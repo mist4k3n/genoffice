@@ -30,10 +30,11 @@ export function recordNotImplemented(method: string, entry: Entry): void {
   window.dispatchEvent(new CustomEvent('host:not-implemented'))
 }
 
-const STATUS_ORDER: Status[] = ['http', 'push', 'shell', 'todo']
+const STATUS_ORDER: Status[] = ['http', 'push', 'local', 'shell', 'todo']
 const STATUS_LABEL: Record<Status, string> = {
   http: 'invoke',
   push: 'push',
+  local: 'browser-local',
   shell: 'shell no-op',
   todo: 'not implemented',
 }
@@ -72,10 +73,12 @@ export function mountProbe(
       .bars { display: flex; gap: 1px; padding: 7px 9px; border-bottom: 1px solid #2e342f; flex: none; }
       .bar { height: 5px; border-radius: 1px; }
       .bar.http { background: #5cc0a6; } .bar.push { background: #8ab6d6; }
+      .bar.local { background: #b6a8d6; }
       .bar.shell { background: #5d655c; } .bar.todo { background: #e08a66; }
       .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 0 9px 7px; font-size: 10px; color: #5d655c; border-bottom: 1px solid #2e342f; flex: none; }
       .legend b { font-weight: 400; }
       .legend .http { color: #5cc0a6; } .legend .push { color: #8ab6d6; }
+      .legend .local { color: #b6a8d6; }
       .legend .shell { color: #8d968c; } .legend .todo { color: #e08a66; }
       ol { margin: 0; padding: 4px 0; list-style: none; overflow-y: auto; flex: 1 1 auto; }
       li { display: flex; gap: 7px; padding: 2px 9px; align-items: baseline; }
@@ -102,7 +105,7 @@ export function mountProbe(
   `
 
   const entries = Object.entries(coverage) as [string, Entry][]
-  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, todo: 0 }
+  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, local: 0, todo: 0 }
   for (const [, entry] of entries) counts[entry.status] += 1
   const total = entries.length
 

@@ -42,17 +42,6 @@ const getAiSettings: ChannelHandler = async (context) => context.preferences.aiS
 const consumeNewBlankWorkbook: ChannelHandler = async () => false
 const hasQueuedWorkbook: ChannelHandler = async () => true
 
-/**
- * Opening a link is the browser's job, not the server's. The renderer already
- * awaits this call, so returning the URL lets the host decide -- and keeps the
- * channel from being a silent no-op.
- */
-const openExternal: ChannelHandler = async (context) => {
-  const [url] = context.args
-  if (typeof url !== 'string') return undefined
-  return { url }
-}
-
 export const appChannels: ChannelTable = {
   'app:get-language': getLanguage,
   'app:get-theme': getTheme,
@@ -63,5 +52,4 @@ export const appChannels: ChannelTable = {
   [IPC_CHANNELS.pendingEditsChanged]: notifyPendingEdits,
   [IPC_CHANNELS.aiGskStatus]: aiGskStatus,
   [IPC_CHANNELS.aiGetSettings]: getAiSettings,
-  [IPC_CHANNELS.openExternal]: openExternal,
 }

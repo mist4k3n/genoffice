@@ -1,5 +1,8 @@
 import type { DesktopApi } from '../../../apps/sheets/src/shared/desktop-api'
 import { COVERAGE, type Entry } from './coverage'
+import { LOCAL_HANDLERS } from './local-api'
+import { createRangePrefetcher, type RangePrefetcher } from './range-prefetch'
+import type { UnsavedGuard } from './unsaved-guard'
 import { createHttpTransport, type HostTransport, type HttpTransportOptions } from './transport'
 
 /**
@@ -36,6 +39,17 @@ export interface HttpDesktopApiOptions extends HttpTransportOptions {
    * it at telemetry.
    */
   readonly onNotImplemented?: ((method: string, entry: Entry) => void) | undefined
+  /**
+   * Watches `notifyPendingEdits` so a tab close with unsaved work warns first.
+   * The call still goes to the server, which uses the count for its own idle
+   * accounting; this only observes it on the way past.
+   */
+  readonly unsavedGuard?: UnsavedGuard | undefined
+  /**
+   * Read ahead in the scroll direction. Off by default: it is a latency
+   * optimisation for real networks and pure overhead against a local server.
+   */
+  readonly prefetchRanges?: boolean | undefined
 }
 
 /** Methods that are subscriptions: called synchronously, return an unsubscribe. */
@@ -43,14 +57,47 @@ const isSubscription = (entry: Entry) => entry.status === 'push' || entry.status
 
 export function createHttpDesktopApi(options: HttpDesktopApiOptions): DesktopApi {
   const transport = createHttpTransport(options)
-  return buildDesktopApi(transport, options.onNotImplemented)
+  return buildDesktopApi(transport, {
+    onNotImplemented: options.onNotImplemented,
+    unsavedGuard: options.unsavedGuard,
+    prefetchRanges: options.prefetchRanges,
+  })
+}
+
+export interface BuildOptions {
+  readonly onNotImplemented?: ((method: string, entry: Entry) => void) | undefined
+  readonly unsavedGuard?: UnsavedGuard | undefined
+  readonly prefetchRanges?: boolean | undefined
+}
+
+/**
+ * Methods that need behaviour beyond "post the arguments at the channel".
+ *
+ * Kept as a named seam rather than conditionals inside the loop below: each
+ * one is a deliberate deviation from the transparent shim, and they should be
+ * easy to count. There are two.
+ */
+interface Interceptors {
+  readonly unsavedGuard: UnsavedGuard | undefined
+  readonly prefetcher: RangePrefetcher | undefined
 }
 
 export function buildDesktopApi(
   transport: HostTransport,
-  onNotImplemented?: (method: string, entry: Entry) => void,
+  options: BuildOptions = {},
 ): DesktopApi {
   const api: Record<string, unknown> = {}
+  const { onNotImplemented, unsavedGuard } = options
+
+  // The channel comes from the coverage table, never retyped here -- a literal
+  // would reintroduce exactly the drift `npm run check:channels` exists to
+  // catch, and this one would only show up as a 501 while scrolling.
+  const rangeChannel = COVERAGE.readWorkbookRange.channel
+  const prefetcher =
+    options.prefetchRanges && rangeChannel !== null
+      ? createRangePrefetcher((request) => transport.invoke(rangeChannel, request))
+      : undefined
+  const interceptors: Interceptors = { unsavedGuard, prefetcher }
 
   for (const [method, entry] of Object.entries(COVERAGE)) {
     // Only 'todo' may carry a null channel. Asserting per branch rather than
@@ -66,7 +113,7 @@ export function buildDesktopApi(
     switch (entry.status) {
       case 'http': {
         const target = wire()
-        api[method] = (...args: unknown[]) => transport.invoke(target, ...args)
+        api[method] = httpMethod(method, target, transport, interceptors)
         break
       }
 
@@ -74,6 +121,15 @@ export function buildDesktopApi(
         const target = wire()
         api[method] = (listener: (...args: unknown[]) => void) =>
           transport.subscribe(target, listener)
+        break
+      }
+
+      case 'local': {
+        const handler = LOCAL_HANDLERS[method as keyof typeof LOCAL_HANDLERS]
+        if (!handler) {
+          throw new Error(`COVERAGE.${method} is 'local' but local-api.ts has no handler`)
+        }
+        api[method] = handler
         break
       }
 
@@ -102,6 +158,56 @@ export function buildDesktopApi(
   // One cast, at the boundary. Everything above is driven by a table the
   // compiler has already checked covers every key of DesktopApi.
   return api as unknown as DesktopApi
+}
+
+/** Reads that a prefetcher may answer; everything else invalidates it. */
+const READ_ONLY_METHODS = new Set([
+  'readWorkbookRange',
+  'readWorkbookFormulas',
+  'readWorkbookMedia',
+  'readPivotDefinition',
+  'getLanguage',
+  'getTheme',
+  'getAutoSaveDefault',
+  'getAiPanelPrefs',
+  'getAiSettings',
+  'aiGskStatus',
+  'hasQueuedWorkbook',
+])
+
+function httpMethod(
+  method: string,
+  channel: string,
+  transport: HostTransport,
+  interceptors: Interceptors,
+): (...args: unknown[]) => Promise<unknown> {
+  const { unsavedGuard, prefetcher } = interceptors
+
+  if (method === 'notifyPendingEdits' && unsavedGuard) {
+    return (...args: unknown[]) => {
+      const [count] = args
+      // Observed on the way past, not intercepted: the server still gets the
+      // count for its own idle accounting.
+      unsavedGuard.setPendingEdits(typeof count === 'number' ? count : 0)
+      return transport.invoke(channel, ...args)
+    }
+  }
+
+  if (method === 'readWorkbookRange' && prefetcher) {
+    return (...args: unknown[]) =>
+      prefetcher.read(args[0] as Parameters<RangePrefetcher['read']>[0])
+  }
+
+  if (prefetcher && !READ_ONLY_METHODS.has(method)) {
+    // A save, a recalc, a close -- anything that could change what a
+    // speculative read would have returned.
+    return (...args: unknown[]) => {
+      prefetcher.invalidate()
+      return transport.invoke(channel, ...args)
+    }
+  }
+
+  return (...args: unknown[]) => transport.invoke(channel, ...args)
 }
 
 /**

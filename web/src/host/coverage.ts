@@ -29,6 +29,8 @@ export type Status =
   | 'push'
   /** relays an Electron *shell* event that has no web source; permanent no-op */
   | 'shell'
+  /** answered by the browser itself; never reaches the server (see local-api.ts) */
+  | 'local'
   /** not yet implemented; calling it rejects with a named error */
   | 'todo'
 
@@ -137,9 +139,9 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
 
   // ── no web equivalent ────────────────────────────────────────────────────
   getPathForFile: {
-    status: 'todo',
+    status: 'local',
     channel: null,
-    note: 'preload uses webUtils.getPathForFile; a browser File has no path',
+    note: 'a browser File has no filesystem path; answers with the empty string',
   },
   captureScreenSources: {
     status: 'todo',
@@ -152,9 +154,9 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
     note: 'desktopCapturer; needs getDisplayMedia',
   },
   openExternal: {
-    status: 'http',
+    status: 'local',
     channel: IPC_CHANNELS.openExternal,
-    note: 'window.open on the web',
+    note: 'window.open; a round trip to learn a URL we already have is waste',
   },
 }
 
@@ -163,7 +165,7 @@ export const BOOT_SURFACE = (Object.keys(COVERAGE) as (keyof DesktopApi)[]).filt
 )
 
 export function coverageSummary(): Record<Status, number> {
-  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, todo: 0 }
+  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, local: 0, todo: 0 }
   for (const entry of Object.values(COVERAGE)) counts[entry.status] += 1
   return counts
 }

@@ -9,6 +9,8 @@
  *    `Set<WebSocket>` and compiled cleanly against a global Node does not have.
  *
  * 2. The coverage table and the channel handlers agree, in BOTH directions.
+ *    ('local' entries are answered by the browser and must NOT be served; a
+ *    handler for one is a round trip that should not exist.)
  *    A channel marked 'http' with no handler is a promise the app discovers at
  *    runtime as a 501. A handler whose channel is still marked 'todo' is worse
  *    and quieter: the work is done, the server answers it, and the browser
@@ -115,6 +117,11 @@ const served = servedChannels()
 const entries = coverageEntries()
 
 const unserved = entries.filter((entry) => entry.status === 'http' && !served.has(entry.channel))
+// A 'local' channel with a server handler means two implementations of the
+// same method, and the browser's one silently wins.
+const shadowed = entries.filter(
+  (entry) => entry.status === 'local' && entry.channel !== null && served.has(entry.channel),
+)
 // The reverse: a handler exists, but the browser still refuses to call it.
 const unclaimed = entries.filter(
   (entry) => entry.status === 'todo' && entry.channel !== null && served.has(entry.channel),
@@ -133,8 +140,18 @@ for (const entry of unclaimed) {
     `  UNCLAIMED       ${entry.method} → ${entry.channel} is served, but COVERAGE says 'todo'`,
   )
 }
+for (const entry of shadowed) {
+  console.log(
+    `  SHADOWED        ${entry.method} → ${entry.channel} is 'local' but the server also serves it`,
+  )
+}
 
-if (globalHits.length === 0 && unserved.length === 0 && unclaimed.length === 0) {
+if (
+  globalHits.length === 0 &&
+  unserved.length === 0 &&
+  unclaimed.length === 0 &&
+  shadowed.length === 0
+) {
   console.log('  OK — no browser globals, and coverage matches the handlers both ways')
   process.exit(0)
 }
