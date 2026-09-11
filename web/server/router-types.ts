@@ -1,4 +1,4 @@
-import type { AppPreferences, RequestIdentity } from './ports'
+import type { AppPreferences, RequestIdentity, StorageAdapter } from './ports'
 import type { PushHub } from './push'
 import type { SessionRegistry } from './sessions'
 import type { SidecarPool } from './sidecar/pool'
@@ -14,6 +14,9 @@ export interface ChannelContext {
   readonly preferences: AppPreferences
   /** For handlers whose effect other viewers of the document must see. */
   readonly push: PushHub
+  readonly storage: StorageAdapter
+  /** Scratch space for work that must land on disk before it reaches storage. */
+  readonly scratchDir: string
 }
 
 export type ChannelHandler = (context: ChannelContext) => Promise<unknown>

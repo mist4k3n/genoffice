@@ -3,7 +3,9 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { workbookFileSchema } from '../../apps/sheets/src/shared/desktop-api'
 import { SheetsError } from './errors'
+import { classifyWorkbookBytes } from './workbook-format'
 import { SidecarPool } from './sidecar/pool'
 import {
   DEFAULT_QUOTA,
@@ -11,6 +13,7 @@ import {
   type RequestIdentity,
   type StorageAdapter,
   type VersionToken,
+  type WorkbookMetadata,
 } from './ports'
 
 /**
@@ -49,6 +52,9 @@ export interface SessionRegistryOptions {
   readonly scratchDir: string
   readonly locale: string
 }
+
+/** The sidecar's open result: a workbook file minus the two fields we supply. */
+const openResultSchema = workbookFileSchema.omit({ sha256: true, readOnly: true })
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, WorkbookSession>()
@@ -103,6 +109,25 @@ export class SessionRegistry {
   }> {
     this.enforceQuota(identity)
     const stored = await this.options.storage.get(identity.documentId)
+
+    // Fail with something actionable before the sidecar turns this into an
+    // EOCD error indistinguishable from corruption.
+    const kind = classifyWorkbookBytes(stored.bytes)
+    if (kind === 'encrypted') {
+      throw new SheetsError(
+        'password_required',
+        'This workbook is password-protected. Decryption is not implemented yet.',
+      )
+    }
+    if (kind === 'legacy-xls') {
+      throw new SheetsError(
+        'not_implemented',
+        'Legacy .xls workbooks are not supported yet; convert to .xlsx first.',
+      )
+    }
+    if (kind === 'unknown') {
+      throw new SheetsError('invalid_request', 'This file is not a spreadsheet.')
+    }
     const dir = join(this.options.scratchDir, randomUUID())
     await mkdir(dir, { recursive: true })
     const snapshotPath = join(dir, sanitizeName(stored.name))
@@ -129,6 +154,66 @@ export class SessionRegistry {
     // Remove the snapshot's directory, not the file: prepareSnapshot made one
     // directory per session precisely so this is a single unlink of a subtree.
     await rm(join(session.snapshotPath, '..'), { recursive: true, force: true })
+  }
+
+  /**
+   * Replace a just-saved session with a fresh one over the saved bytes.
+   *
+   * The old sidecar session still streams the pre-save workbook, so without
+   * this every read for the rest of the session would serve cells that no
+   * longer match what was written. Upstream does the same swap after a save.
+   *
+   * The new session inherits the identity of the old one and the version
+   * token the save produced, so the next save's conflict check compares
+   * against what this save wrote rather than what the session first opened.
+   */
+  async reopenAfterSave(
+    previous: WorkbookSession,
+    saved: WorkbookMetadata,
+    pool: SidecarPool,
+    locale: string,
+  ): Promise<unknown> {
+    await this.close(previous.sessionId)
+
+    const snapshot = await this.prepareSnapshot({
+      userId: previous.userId,
+      tenantId: previous.tenantId,
+      documentId: previous.documentId,
+      canEdit: previous.canEdit,
+    })
+    try {
+      const { sessionId, opened } = await pool.open(
+        snapshot.snapshotPath,
+        locale,
+        undefined,
+        (result) => openResultSchema.parse(result).sessionId,
+        (result) => openResultSchema.parse(result),
+      )
+      this.register({
+        sessionId,
+        documentId: previous.documentId,
+        tenantId: previous.tenantId,
+        userId: previous.userId,
+        snapshotPath: snapshot.snapshotPath,
+        byteLength: snapshot.bytes.byteLength,
+        sha256: snapshot.sha256,
+        openedFromVersion: saved.version,
+        sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
+        canEdit: previous.canEdit,
+        lastUsedAt: Date.now(),
+        pendingEdits: 0,
+      })
+      return workbookFileSchema.parse({
+        ...opened,
+        name: saved.name,
+        sha256: snapshot.sha256,
+        fileBytes: snapshot.bytes.byteLength,
+        readOnly: !previous.canEdit,
+      })
+    } catch (error) {
+      await snapshot.cleanup()
+      throw error
+    }
   }
 
   /**

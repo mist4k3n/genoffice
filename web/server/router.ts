@@ -12,6 +12,7 @@ import { defaultScratchDir, resolveQuota, SessionRegistry } from './sessions'
 import { SidecarPool } from './sidecar/pool'
 import type { ChannelTable } from './router-types'
 import { appChannels } from './channels/app'
+import { saveChannels } from './channels/save'
 import { workbookChannels } from './channels/workbook'
 
 /**
@@ -41,6 +42,7 @@ export interface SheetsRouter {
 const CHANNELS: ChannelTable = {
   ...appChannels,
   ...workbookChannels,
+  ...saveChannels,
 }
 
 export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
@@ -125,7 +127,17 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     }
 
     try {
-      const result = await handler({ args, identity, registry, pool, locale, preferences, push })
+      const result = await handler({
+        args,
+        identity,
+        registry,
+        pool,
+        locale,
+        preferences,
+        push,
+        storage: options.storage,
+        scratchDir,
+      })
       // An undefined result drops out of JSON.stringify entirely, and the
       // transport reads the missing key back as undefined. Right for the void
       // channels, which is most of them.

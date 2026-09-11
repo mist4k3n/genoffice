@@ -99,11 +99,11 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   readPivotDefinition: { status: 'todo', channel: IPC_CHANNELS.readPivotDefinition },
   recalcWorkbook: { status: 'todo', channel: IPC_CHANNELS.recalcWorkbook },
 
-  // ── save (phase 03) ──────────────────────────────────────────────────────
-  saveWorkbookEdits: { status: 'todo', channel: IPC_CHANNELS.saveWorkbook },
-  beginSaveEditsTransfer: { status: 'todo', channel: IPC_CHANNELS.saveEditsBegin },
-  sendSaveEditsChunk: { status: 'todo', channel: IPC_CHANNELS.saveEditsChunk },
-  abortSaveEditsTransfer: { status: 'todo', channel: IPC_CHANNELS.saveEditsAbort },
+  // ── save ─────────────────────────────────────────────────────────────────
+  saveWorkbookEdits: { status: 'http', channel: IPC_CHANNELS.saveWorkbook },
+  beginSaveEditsTransfer: { status: 'http', channel: IPC_CHANNELS.saveEditsBegin },
+  sendSaveEditsChunk: { status: 'http', channel: IPC_CHANNELS.saveEditsChunk },
+  abortSaveEditsTransfer: { status: 'http', channel: IPC_CHANNELS.saveEditsAbort },
   writeWorkbookRecovery: { status: 'todo', channel: IPC_CHANNELS.writeWorkbookRecovery },
   replyRecoveryPrompt: { status: 'todo', channel: IPC_CHANNELS.recoveryPromptReply },
   reportCloseSaveResult: { status: 'todo', channel: IPC_CHANNELS.closeSaveResult },
