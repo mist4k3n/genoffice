@@ -14,6 +14,7 @@
     "check:mirror": "node tools/check-mirror.mjs",
     "compat": "node tools/compat.mjs",
     "bench": "node tools/bench-range.mjs",
+    "bench:memory": "node tools/bench-memory.mjs",
     "test": "tsx --test tests/*.test.ts",
     "audit": "node tools/audit-corpus.mjs",
     "spike:encryption": "node tools/spike-encryption.mjs",
