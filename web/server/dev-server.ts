@@ -140,6 +140,11 @@ app.get(
   }),
 )
 
+// The corpus harness discovers the served directory here rather than being
+// told twice. Pointing it at a different folder than the server serves
+// silently compares two unrelated sets of bytes.
+app.get('/dev-info', (c) => c.json({ documentRoot: root }))
+
 app.route('/', sheets.app)
 
 const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port }, (info) => {
