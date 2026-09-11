@@ -53,6 +53,46 @@ export interface StorageAdapter {
     bytes: Uint8Array,
     expectedVersion: VersionToken | null,
   ): Promise<WorkbookMetadata>
+
+  /**
+   * Optional fast path: an absolute path to **immutable** bytes for this
+   * document, which the engine may read directly.
+   *
+   * A session normally works from a private snapshot the server writes, so
+   * that everything it serves comes from one consistent set of bytes even if
+   * the document changes underneath. Content-addressed storage already
+   * guarantees that: a blob named by the hash of its contents cannot change,
+   * so it *is* a snapshot and copying it buys nothing.
+   *
+   * Returning a path therefore removes a full copy of every opened workbook
+   * from both disk and the open path's latency. For a 30MB financial workbook
+   * on a host where the scratch directory is a tmpfs, that copy is 30MB of
+   * RAM per open document.
+   *
+   * **The contract is immutability, not merely existence.** If anything can
+   * rewrite these bytes in place while a session holds them open, do not
+   * implement this method -- return `null` and let the server take its own
+   * copy. The server never writes to this path and never deletes it.
+   */
+  localPath?(documentId: string): Promise<LocalWorkbookRef | null>
+}
+
+export interface LocalWorkbookRef {
+  /** Absolute path to immutable bytes. Never written to, never deleted. */
+  readonly path: string
+  readonly version: VersionToken
+  readonly name: string
+  readonly byteLength: number
+  readonly displayPath?: string | undefined
+  /**
+   * SHA-256 of the bytes, hex, if storage already knows it.
+   *
+   * The renderer is given this as the workbook's identity. In a
+   * content-addressed store it is usually the version token itself -- but only
+   * usually, so it is a separate field rather than an assumption. When absent
+   * the server streams the file to hash it, which is cheap next to copying it.
+   */
+  readonly sha256?: string | undefined
 }
 
 /** Who is asking, and for which document. Resolved per request by the host. */

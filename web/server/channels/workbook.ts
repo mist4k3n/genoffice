@@ -51,7 +51,8 @@ const selectWorkbook: ChannelHandler = async (context) => {
       tenantId: identity.tenantId,
       userId: identity.userId,
       snapshotPath: snapshot.snapshotPath,
-      byteLength: snapshot.bytes.byteLength,
+      byteLength: snapshot.byteLength,
+      releaseSnapshot: snapshot.cleanup,
       sha256: snapshot.sha256,
       openedFromVersion: snapshot.version,
       sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
@@ -67,7 +68,7 @@ const selectWorkbook: ChannelHandler = async (context) => {
       // workbook-handle.ts for why it cannot be opaque.
       path: workbookDisplayPath(snapshot.name, snapshot.displayPath),
       sha256: snapshot.sha256,
-      fileBytes: snapshot.bytes.byteLength,
+      fileBytes: snapshot.byteLength,
       // Read-only is an authorisation outcome here, not a filesystem one.
       readOnly: !identity.canEdit,
     })

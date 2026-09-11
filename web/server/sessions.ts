@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { pipeline } from 'node:stream/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { workbookFileSchema } from '../../apps/sheets/src/shared/desktop-api'
 import { SheetsError } from './errors'
-import { classifyWorkbookBytes } from './workbook-format'
+import { classifyWorkbookAt, classifyWorkbookBytes, type WorkbookKind } from './workbook-format'
 import { workbookDisplayPath } from './workbook-handle'
 import { SidecarPool } from './sidecar/pool'
 import {
@@ -44,6 +46,11 @@ export interface WorkbookSession {
   lastUsedAt: number
   /** Unsaved edits the renderer has journaled but not yet saved. */
   pendingEdits: number
+  /**
+   * Frees whatever the snapshot owns. A no-op when the engine was pointed at
+   * storage's own immutable blob -- deleting that would destroy the document.
+   */
+  releaseSnapshot: () => Promise<void>
 }
 
 export interface SessionRegistryOptions {
@@ -102,7 +109,7 @@ export class SessionRegistry {
    */
   async prepareSnapshot(identity: RequestIdentity): Promise<{
     snapshotPath: string
-    bytes: Uint8Array
+    byteLength: number
     sha256: string
     version: VersionToken
     name: string
@@ -110,33 +117,41 @@ export class SessionRegistry {
     cleanup: () => Promise<void>
   }> {
     this.enforceQuota(identity)
+
+    // Content-addressed storage is already a snapshot: a blob named by the
+    // hash of its contents cannot change under an open session. Where the
+    // adapter offers that, skip the copy entirely -- it is the difference
+    // between every open costing a full duplicate of the workbook and costing
+    // nothing.
+    const direct = await this.options.storage.localPath?.(identity.documentId)
+    if (direct) {
+      assertOpenable(await classifyWorkbookAt(direct.path))
+      return {
+        snapshotPath: direct.path,
+        byteLength: direct.byteLength,
+        // Storage usually knows this already. When it does not, streaming the
+        // file to hash it still beats copying it.
+        sha256: direct.sha256 ?? (await sha256File(direct.path)),
+        version: direct.version,
+        name: direct.name,
+        displayPath: direct.displayPath,
+        // Not ours. Deleting it would destroy the document.
+        cleanup: async () => {},
+      }
+    }
+
     const stored = await this.options.storage.get(identity.documentId)
 
     // Fail with something actionable before the sidecar turns this into an
     // EOCD error indistinguishable from corruption.
-    const kind = classifyWorkbookBytes(stored.bytes)
-    if (kind === 'encrypted') {
-      throw new SheetsError(
-        'password_required',
-        'This workbook is password-protected. Decryption is not implemented yet.',
-      )
-    }
-    if (kind === 'legacy-xls') {
-      throw new SheetsError(
-        'not_implemented',
-        'Legacy .xls workbooks are not supported yet; convert to .xlsx first.',
-      )
-    }
-    if (kind === 'unknown') {
-      throw new SheetsError('invalid_request', 'This file is not a spreadsheet.')
-    }
+    assertOpenable(classifyWorkbookBytes(stored.bytes))
     const dir = join(this.options.scratchDir, randomUUID())
     await mkdir(dir, { recursive: true })
     const snapshotPath = join(dir, sanitizeName(stored.name))
     await writeFile(snapshotPath, stored.bytes)
     return {
       snapshotPath,
-      bytes: stored.bytes,
+      byteLength: stored.bytes.byteLength,
       sha256: createHash('sha256').update(stored.bytes).digest('hex'),
       version: stored.version,
       name: stored.name,
@@ -154,9 +169,7 @@ export class SessionRegistry {
     if (!session) return
     this.sessions.delete(sessionId)
     await this.options.pool.close(sessionId)
-    // Remove the snapshot's directory, not the file: prepareSnapshot made one
-    // directory per session precisely so this is a single unlink of a subtree.
-    await rm(join(session.snapshotPath, '..'), { recursive: true, force: true })
+    await session.releaseSnapshot()
   }
 
   /**
@@ -198,7 +211,8 @@ export class SessionRegistry {
         tenantId: previous.tenantId,
         userId: previous.userId,
         snapshotPath: snapshot.snapshotPath,
-        byteLength: snapshot.bytes.byteLength,
+        byteLength: snapshot.byteLength,
+        releaseSnapshot: snapshot.cleanup,
         sha256: snapshot.sha256,
         openedFromVersion: saved.version,
         sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
@@ -211,7 +225,7 @@ export class SessionRegistry {
         name: saved.name,
         path: workbookDisplayPath(saved.name, saved.displayPath),
         sha256: snapshot.sha256,
-        fileBytes: snapshot.bytes.byteLength,
+        fileBytes: snapshot.byteLength,
         readOnly: !previous.canEdit,
       })
     } catch (error) {
@@ -267,7 +281,7 @@ export class SessionRegistry {
         const session = this.sessions.get(sessionId)
         if (!session) return
         this.sessions.delete(sessionId)
-        await rm(join(session.snapshotPath, '..'), { recursive: true, force: true })
+        await session.releaseSnapshot()
       }),
     )
   }
@@ -314,6 +328,32 @@ export class SessionRegistry {
     this.reaper = null
     await Promise.allSettled([...this.sessions.keys()].map((id) => this.close(id)))
   }
+}
+
+/** Both open paths must reject the same inputs, for the same reasons. */
+function assertOpenable(kind: WorkbookKind): void {
+  if (kind === 'encrypted') {
+    throw new SheetsError(
+      'password_required',
+      'This workbook is password-protected. Decryption is not implemented yet.',
+    )
+  }
+  if (kind === 'legacy-xls') {
+    throw new SheetsError(
+      'not_implemented',
+      'Legacy .xls workbooks are not supported yet; convert to .xlsx first.',
+    )
+  }
+  if (kind === 'unknown') {
+    throw new SheetsError('invalid_request', 'This file is not a spreadsheet.')
+  }
+}
+
+/** Hash a file without holding it in memory. */
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  await pipeline(createReadStream(path), hash)
+  return hash.digest('hex')
 }
 
 export function defaultScratchDir(): string {

@@ -34,6 +34,12 @@ const port = Number(flag('port', '5274'))
 // Lowerable so the socket-idle session close can be exercised without a
 // 45-second wait.
 const socketIdleGraceMs = Number(flag('idle-grace', '45000'))
+// Pinning the pool to one process makes per-workbook memory attributable.
+const poolSize = Number(flag('pool', '4'))
+// Raised by the memory benchmark, which needs to exceed the per-tenant cap to
+// measure where memory actually goes.
+const maxSessions = Number(flag('max-sessions', '16'))
+const directRead = process.argv.includes('--direct-read')
 
 /**
  * Filesystem storage. The version token is mtime+size, which is enough to
@@ -79,6 +85,31 @@ function fileStorage(directory: string): StorageAdapter {
       ])
       return { bytes, version: meta.version, name: meta.name, displayPath: meta.displayPath }
     },
+    /**
+     * Papan stores blobs content-addressed and immutable, so its adapter can
+     * hand the engine the blob path directly. This dev adapter is a plain
+     * mutable filesystem, so the fast path is opt-in behind --direct-read and
+     * exists to exercise the code path, not because it is safe here.
+     */
+    ...(directRead
+      ? {
+          localPath: async (documentId: string) => {
+            const path = pathFor(documentId)
+            const meta = await versionOf(path)
+            // No sha256 here on purpose: this adapter's version token is
+            // mtime+size, so the server has to hash the file itself. Papan's
+            // would pass file.contentHash and skip that.
+            return {
+              path,
+              version: meta.version,
+              name: meta.name,
+              byteLength: meta.byteLength,
+              ...(meta.displayPath === undefined ? {} : { displayPath: meta.displayPath }),
+            }
+          },
+        }
+      : {}),
+
     put: async (documentId, bytes, expectedVersion) => {
       const path = pathFor(documentId)
       if (expectedVersion !== null) {
@@ -103,7 +134,9 @@ const sheets = createSheetsRouter({
   storage: fileStorage(root),
   identify: devIdentity,
   socketIdleGraceMs,
+  quota: { maxSessionsPerTenant: maxSessions },
   sidecar: {
+    poolSize,
     binaryPath:
       process.env.XLSX_SIDECAR_PATH ??
       resolve('../apps/sheets/native/xlsx-engine/target/release/xlsx-sidecar'),
