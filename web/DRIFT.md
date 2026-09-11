@@ -21,6 +21,8 @@ Baseline upstream SHA: `d2b898f`
 | `apps/sheets/vite.renderer.config.ts` | `web/vite.config.ts` mirrors its plugin set and root semantics | Build differences between desktop and web |
 | `apps/sheets/src/renderer/index.html` | We ship our own with a web CSP | A new upstream CSP directive we do not carry |
 | `apps/sheets/src/renderer/main.tsx` | The module our bootstrap imports; reads `window.desktopApi` during its own boot | Boot order assumptions. Re-run the probe if it changes |
+| `apps/sheets/src/renderer/cell-function.ts` | Parses the workbook `path` structurally (`lastIndexOf('/')`) to build `CELL("filename")`. `web/server/workbook-handle.ts` issues a path-shaped token because of it | A different split rule would silently change what `CELL("filename")` returns |
+| `apps/sheets/src/renderer/univer-sync.ts` | `SIDECAR_READ_BATCH_CELLS` (90,000) decides how many HTTP requests a viewport costs; `web/tools/bench-range.mjs` mirrors it | A much smaller batch would multiply round trips per scroll — the phase-03 risk returning |
 | `apps/sheets/src/renderer/env.d.ts` | Declares `window.desktopApi` readonly; we `defineProperty` around it. Also **included in `web/tsconfig.json`** so the globals resolve | Our install shim; typecheck breaks loudly |
 | `apps/sheets/src/preload/index.ts` | The authority on which channel each method uses. `npm run check:channels` parses it and diffs against `coverage.ts` | A renamed **literal** channel (`app:*`, `sheets:consume-new-blank`, `sheets:has-queued-workbook`, `ai:web-search`) is invisible to the compiler. `check:channels` is what catches it |
 | `apps/sheets/tsconfig.json` | `web/tsconfig.json` mirrors its compiler options | Type errors appearing only in one of the two builds |
