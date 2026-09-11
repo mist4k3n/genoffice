@@ -3,8 +3,9 @@
 Status: **gate met.** A user opens a real workbook in Chrome, edits a cell,
 saves, and reopens it with the edit intact and every untouched package part
 byte-identical. Scroll latency on the largest corpus workbook is one request
-per step, median 16ms. Twenty-one of the fifty-nine channels are served, three
-more answered by the browser itself.
+per step, median 16ms. Of the fifty-nine channels, twenty are served over
+HTTP, four are pushes, three are answered by the browser itself, five are
+permanent shell no-ops, and twenty-seven remain.
 
 ```sh
 cd web
