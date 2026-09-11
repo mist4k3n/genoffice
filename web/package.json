@@ -13,6 +13,8 @@
     "check:server": "node tools/check-server.mjs",
     "check:mirror": "node tools/check-mirror.mjs",
     "compat": "node tools/compat.mjs",
+    "bench": "node tools/bench-range.mjs",
+    "test": "tsx --test tests/*.test.ts",
     "audit": "node tools/audit-corpus.mjs",
     "spike:encryption": "node tools/spike-encryption.mjs",
     "fidelity": "node tools/fidelity-diff.mjs",

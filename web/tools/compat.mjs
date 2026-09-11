@@ -18,6 +18,11 @@
  * Assumes `npm run serve -- --dir <corpus>` is already running against a
  * writable COPY of the corpus, since the save checks mutate documents.
  *
+ * It also assumes nothing else is writing that corpus. The run compares each
+ * document's bytes before and after its own save, so a browser tab open on the
+ * same document saving midway through reports a difference this harness did
+ * not cause -- observed exactly once, as three phantom failures.
+ *
  * The corpus directory is discovered from the server rather than passed in
  * again. Passing it twice is how this harness first lied: the server served a
  * scratch copy while the baseline was read from web/fixtures, so after the

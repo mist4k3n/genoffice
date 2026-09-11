@@ -41,6 +41,7 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "server/**/*.ts",
+    "tests/**/*.ts",
     "vite.config.ts",
     // Upstream's ambient declarations for window.desktopApi / window.projectApi.
     // Read, never modified — the renderer we import relies on these globals.
