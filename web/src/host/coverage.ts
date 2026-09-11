@@ -87,11 +87,13 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   onChromePressed: { status: 'shell', channel: 'app:chrome-pressed', note: 'tab strip press' },
 
   // ── document lifecycle (phase 02/03) ─────────────────────────────────────
-  selectWorkbook: { status: 'todo', channel: IPC_CHANNELS.selectWorkbook },
+  // On the web there is no file dialog: the document is whichever one the
+  // connection is authorised for, so this opens it rather than asking.
+  selectWorkbook: { status: 'http', channel: IPC_CHANNELS.selectWorkbook },
   selectWorkbooksForMerge: { status: 'todo', channel: IPC_CHANNELS.selectWorkbooksForMerge },
   openWorkbooksForMerge: { status: 'todo', channel: IPC_CHANNELS.openWorkbooksForMerge },
-  closeWorkbook: { status: 'todo', channel: IPC_CHANNELS.closeWorkbook },
-  readWorkbookRange: { status: 'todo', channel: IPC_CHANNELS.readWorkbookRange },
+  closeWorkbook: { status: 'http', channel: IPC_CHANNELS.closeWorkbook },
+  readWorkbookRange: { status: 'http', channel: IPC_CHANNELS.readWorkbookRange },
   readWorkbookFormulas: { status: 'todo', channel: IPC_CHANNELS.readWorkbookFormulas },
   readWorkbookMedia: { status: 'todo', channel: IPC_CHANNELS.readWorkbookMedia },
   readPivotDefinition: { status: 'todo', channel: IPC_CHANNELS.readPivotDefinition },
