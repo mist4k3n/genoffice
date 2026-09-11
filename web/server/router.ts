@@ -12,6 +12,7 @@ import { defaultScratchDir, resolveQuota, SessionRegistry } from './sessions'
 import { SidecarPool } from './sidecar/pool'
 import type { ChannelTable } from './router-types'
 import { appChannels } from './channels/app'
+import { readChannels } from './channels/read'
 import { saveChannels } from './channels/save'
 import { workbookChannels } from './channels/workbook'
 
@@ -42,6 +43,7 @@ export interface SheetsRouter {
 const CHANNELS: ChannelTable = {
   ...appChannels,
   ...workbookChannels,
+  ...readChannels,
   ...saveChannels,
 }
 

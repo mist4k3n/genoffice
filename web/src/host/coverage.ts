@@ -94,10 +94,10 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   openWorkbooksForMerge: { status: 'todo', channel: IPC_CHANNELS.openWorkbooksForMerge },
   closeWorkbook: { status: 'http', channel: IPC_CHANNELS.closeWorkbook },
   readWorkbookRange: { status: 'http', channel: IPC_CHANNELS.readWorkbookRange },
-  readWorkbookFormulas: { status: 'todo', channel: IPC_CHANNELS.readWorkbookFormulas },
-  readWorkbookMedia: { status: 'todo', channel: IPC_CHANNELS.readWorkbookMedia },
-  readPivotDefinition: { status: 'todo', channel: IPC_CHANNELS.readPivotDefinition },
-  recalcWorkbook: { status: 'todo', channel: IPC_CHANNELS.recalcWorkbook },
+  readWorkbookFormulas: { status: 'http', channel: IPC_CHANNELS.readWorkbookFormulas },
+  readWorkbookMedia: { status: 'http', channel: IPC_CHANNELS.readWorkbookMedia },
+  readPivotDefinition: { status: 'http', channel: IPC_CHANNELS.readPivotDefinition },
+  recalcWorkbook: { status: 'http', channel: IPC_CHANNELS.recalcWorkbook },
 
   // ── save ─────────────────────────────────────────────────────────────────
   saveWorkbookEdits: { status: 'http', channel: IPC_CHANNELS.saveWorkbook },
