@@ -1,6 +1,7 @@
 import { createHttpDesktopApi, installDesktopApi } from './host/desktop-api'
 import { COVERAGE, coverageSummary } from './host/coverage'
 import { installStubDesktopApi, stubCalls } from './stub-desktop-api'
+import { installUnsavedGuard } from './host/unsaved-guard'
 import { mountProbe, recordNotImplemented } from './probe-panel'
 
 /**
@@ -22,6 +23,12 @@ if (apiBase) {
       baseUrl: apiBase,
       documentId: new URLSearchParams(location.search).get('doc') ?? undefined,
       onNotImplemented: recordNotImplemented,
+      // Closing a tab with pending edits must not lose them silently; the
+      // desktop's close-save prompt has no web counterpart.
+      unsavedGuard: installUnsavedGuard(),
+      // Opt-in: worth it across a real network, pure overhead against a
+      // server on localhost. See range-prefetch.ts for the measurement.
+      prefetchRanges: import.meta.env.VITE_SHEETS_PREFETCH === '1',
     }),
   )
   const counts = coverageSummary()
