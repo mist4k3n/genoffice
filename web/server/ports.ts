@@ -12,14 +12,29 @@ export type VersionToken = string
 export interface StoredWorkbook {
   readonly bytes: Uint8Array
   readonly version: VersionToken
-  /** Display name; becomes the workbook's name and feeds CELL("filename"). */
+  /** Display name; becomes the workbook's name and the basename of its path. */
   readonly name: string
+  /** See {@link WorkbookMetadata.displayPath}. */
+  readonly displayPath?: string | undefined
 }
 
 export interface WorkbookMetadata {
   readonly version: VersionToken
   readonly name: string
   readonly byteLength: number
+  /**
+   * Where this document lives, as the *user* would describe it --
+   * "/Finance/2026/Q1/budget.xlsx", not a path on your server.
+   *
+   * The renderer surfaces it through Excel's `CELL("filename")`, which splits
+   * it at the last separator to produce `dir/[budget.xlsx]Sheet1`. That is why
+   * it must be path-shaped: the very common
+   * `=MID(CELL("filename"),FIND("]",...)+1,31)` sheet-name idiom parses it.
+   *
+   * Optional. Without it the server synthesizes one from the document name, so
+   * the formula still works and no server path is ever exposed.
+   */
+  readonly displayPath?: string | undefined
 }
 
 /**

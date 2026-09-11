@@ -7,6 +7,7 @@ import {
   workbookRangeResultSchema,
 } from '../../../apps/sheets/src/shared/desktop-api'
 import { SheetsError } from '../errors'
+import { workbookDisplayPath } from '../workbook-handle'
 import type { ChannelHandler, ChannelTable } from '../router-types'
 
 /**
@@ -62,6 +63,9 @@ const selectWorkbook: ChannelHandler = async (context) => {
     return workbookFileSchema.parse({
       ...opened,
       name: snapshot.name,
+      // A path-shaped handle, never the server's snapshot path. See
+      // workbook-handle.ts for why it cannot be opaque.
+      path: workbookDisplayPath(snapshot.name, snapshot.displayPath),
       sha256: snapshot.sha256,
       fileBytes: snapshot.bytes.byteLength,
       // Read-only is an authorisation outcome here, not a filesystem one.

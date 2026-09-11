@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { workbookFileSchema } from '../../apps/sheets/src/shared/desktop-api'
 import { SheetsError } from './errors'
 import { classifyWorkbookBytes } from './workbook-format'
+import { workbookDisplayPath } from './workbook-handle'
 import { SidecarPool } from './sidecar/pool'
 import {
   DEFAULT_QUOTA,
@@ -105,6 +106,7 @@ export class SessionRegistry {
     sha256: string
     version: VersionToken
     name: string
+    displayPath: string | undefined
     cleanup: () => Promise<void>
   }> {
     this.enforceQuota(identity)
@@ -138,6 +140,7 @@ export class SessionRegistry {
       sha256: createHash('sha256').update(stored.bytes).digest('hex'),
       version: stored.version,
       name: stored.name,
+      displayPath: stored.displayPath,
       cleanup: () => rm(dir, { recursive: true, force: true }),
     }
   }
@@ -206,6 +209,7 @@ export class SessionRegistry {
       return workbookFileSchema.parse({
         ...opened,
         name: saved.name,
+        path: workbookDisplayPath(saved.name, saved.displayPath),
         sha256: snapshot.sha256,
         fileBytes: snapshot.bytes.byteLength,
         readOnly: !previous.canEdit,

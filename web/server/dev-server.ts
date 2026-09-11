@@ -58,6 +58,9 @@ function fileStorage(directory: string): StorageAdapter {
       version: `${info.mtimeMs}-${info.size}`,
       name: basename(path),
       byteLength: info.size,
+      // A user-meaningful location, deliberately NOT the server's directory.
+      // A real host would use the document's folder in its own hierarchy.
+      displayPath: `/Documents/${basename(path)}`,
     }
   }
 
@@ -74,7 +77,7 @@ function fileStorage(directory: string): StorageAdapter {
         }),
         versionOf(path),
       ])
-      return { bytes, version: meta.version, name: meta.name }
+      return { bytes, version: meta.version, name: meta.name, displayPath: meta.displayPath }
     },
     put: async (documentId, bytes, expectedVersion) => {
       const path = pathFor(documentId)
