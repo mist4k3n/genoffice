@@ -1,4 +1,8 @@
-import type { DesktopApi } from '../../../apps/sheets/src/shared/desktop-api'
+import type {
+  DesktopApi,
+  WorkbookExportCsvRequest,
+  WorkbookExportCsvResult,
+} from '../../../apps/sheets/src/shared/desktop-api'
 
 /**
  * DesktopApi methods the browser answers itself.
@@ -45,6 +49,55 @@ export const LOCAL_HANDLERS: Partial<Record<keyof DesktopApi, LocalHandler>> = {
       console.warn(`[host] the browser blocked opening ${parsed.href}`)
     }
     return Promise.resolve()
+  }) as LocalHandler,
+
+  /**
+   * CSV export. The renderer has already serialized the sheet and hands over
+   * the text, so there is nothing for a server to do -- this is a download.
+   *
+   * The desktop shows a three-way warning when the sheet has formulas ("save
+   * as .xlsx instead" / "continue" / "cancel"), because CSV keeps values only.
+   * A browser has no three-way dialog, so the .xlsx escape hatch is dropped
+   * and `confirm` carries the warning itself. That is a real degradation, not
+   * a hidden one: the user is still told before losing their formulas, and
+   * Save As remains available from the ribbon.
+   *
+   * `path` in the result is the download's filename. Nothing in the renderer
+   * treats it as a location -- it reports it -- and a browser is never told
+   * where a download actually lands.
+   */
+  exportCsv: ((request: WorkbookExportCsvRequest): Promise<WorkbookExportCsvResult> => {
+    if (request.hasFormulas) {
+      const sheetNote = request.activeSheetName
+        ? `\n\nOnly the sheet "${request.activeSheetName}" is exported.`
+        : ''
+      const proceed = window.confirm(
+        `CSV files keep cell values only — the formulas in this sheet will not be saved.` +
+          `${sheetNote}\n\nExport as CSV anyway?`,
+      )
+      if (!proceed) return Promise.resolve({ canceled: true })
+    }
+
+    const fileName = request.fileName.toLowerCase().endsWith('.csv')
+      ? request.fileName
+      : `${request.fileName}.csv`
+
+    // A BOM so Excel decodes the reopened file as UTF-8, matching what the
+    // desktop writes.
+    const blob = new Blob([`\uFEFF${request.content}`], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    anchor.rel = 'noopener'
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    // Revoking immediately can cancel the download in some browsers; one turn
+    // of the event loop is enough for the navigation to have started.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000)
+
+    return Promise.resolve({ canceled: false, path: fileName })
   }) as LocalHandler,
 
   /**

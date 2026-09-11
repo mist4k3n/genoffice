@@ -113,8 +113,12 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   confirmCsvSave: { status: 'todo', channel: IPC_CHANNELS.csvSaveConfirm },
 
   // ── export (phase 03, headless Chromium in phase 09) ─────────────────────
+  // Phase 09: upstream renders PDF through a hidden Electron window, which
+  // has no browser counterpart — it needs headless Chromium server-side.
   exportPdf: { status: 'todo', channel: IPC_CHANNELS.exportPdf },
-  exportCsv: { status: 'todo', channel: IPC_CHANNELS.exportCsv },
+  // Browser download: the renderer already serialized the sheet, so a server
+  // round trip would only hand the bytes back again.
+  exportCsv: { status: 'local', channel: IPC_CHANNELS.exportCsv },
   createDocument: { status: 'todo', channel: IPC_CHANNELS.createDocument },
 
   // ── AI (phase 04) ────────────────────────────────────────────────────────
