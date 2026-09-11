@@ -15,25 +15,44 @@
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 
+import { loadChannelConstants } from './upstream-channels.mjs'
+
+/**
+ * Read upstream's channel names instead of retyping them. Two of the handlers
+ * below used to be spelled by hand and both were wrong; the app still booted,
+ * because the coverage table was wrong in exactly the same way. Deriving both
+ * from the same source removes that failure mode.
+ */
+const CH = loadChannelConstants()
+const channel = (name) => {
+  const value = CH.get(name)
+  if (!value) throw new Error(`IPC_CHANNELS.${name} not found — upstream renamed it`)
+  return value
+}
+
 const PORT = Number(process.env.SHEETS_MOCK_PORT) || 5274
 const VERBOSE = process.argv.includes('--verbose')
 
-/** channel → handler. Mirrors apps/sheets/src/preload/index.ts channel names. */
+/**
+ * channel → handler. Keys are upstream's real channels: `app:*` and the two
+ * `sheets:*` queue probes are string literals in the preload too, so they are
+ * literals here; the rest resolve through IPC_CHANNELS.
+ */
 const handlers = {
   'app:get-language': () => 'en',
   'app:get-theme': () => 'system',
   'app:get-auto-save-default': () => false,
   'app:get-ai-panel-prefs': () => ({}),
-  'sheets:pending-edits': () => undefined,
-  'ai:gsk-status': () => ({ loggedIn: false }),
-  'ai:get-settings': () => ({
+  [channel('pendingEditsChanged')]: () => undefined,
+  [channel('aiGskStatus')]: () => ({ loggedIn: false }),
+  [channel('aiGetSettings')]: () => ({
     provider: 'none',
     model: '',
     spellcheck: true,
   }),
   'sheets:consume-new-blank': () => false,
   'sheets:has-queued-workbook': () => false,
-  'sheets:open-external': ([url]) => {
+  [channel('openExternal')]: ([url]) => {
     console.log(`  [mock] openExternal ${String(url).slice(0, 120)}`)
     return undefined
   },

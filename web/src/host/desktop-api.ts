@@ -16,11 +16,13 @@ import { createHttpTransport, type HostTransport, type HttpTransportOptions } fr
 
 export class NotImplementedError extends Error {
   readonly method: string
-  readonly channel: string
+  /** null for methods the Electron preload answers without an IPC channel. */
+  readonly channel: string | null
 
   constructor(method: string, entry: Entry) {
     const note = entry.note ? ` (${entry.note})` : ''
-    super(`desktopApi.${method}() is not implemented yet — channel ${entry.channel}${note}`)
+    const where = entry.channel ? ` — channel ${entry.channel}` : ''
+    super(`desktopApi.${method}() is not implemented yet${where}${note}`)
     this.name = 'NotImplementedError'
     this.method = method
     this.channel = entry.channel
@@ -51,15 +53,29 @@ export function buildDesktopApi(
   const api: Record<string, unknown> = {}
 
   for (const [method, entry] of Object.entries(COVERAGE)) {
-    switch (entry.status) {
-      case 'http':
-        api[method] = (...args: unknown[]) => transport.invoke(entry.channel, ...args)
-        break
+    // Only 'todo' may carry a null channel. Asserting per branch rather than
+    // once up front keeps the narrowing real instead of casting it away.
+    const { channel } = entry
+    const wire = () => {
+      if (channel === null) {
+        throw new Error(`COVERAGE.${method} is '${entry.status}' but declares no channel`)
+      }
+      return channel
+    }
 
-      case 'push':
-        api[method] = (listener: (...args: unknown[]) => void) =>
-          transport.subscribe(entry.channel, listener)
+    switch (entry.status) {
+      case 'http': {
+        const target = wire()
+        api[method] = (...args: unknown[]) => transport.invoke(target, ...args)
         break
+      }
+
+      case 'push': {
+        const target = wire()
+        api[method] = (listener: (...args: unknown[]) => void) =>
+          transport.subscribe(target, listener)
+        break
+      }
 
       case 'shell':
         // No web source for this event. Returning a no-op unsubscribe is the

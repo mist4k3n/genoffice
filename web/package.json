@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "api:list": "node tools/list-desktop-api.mjs",
     "check:drift": "node tools/check-drift.mjs",
+    "check:channels": "node tools/check-channels.mjs",
     "audit": "node tools/audit-corpus.mjs",
     "spike:encryption": "node tools/spike-encryption.mjs",
     "fidelity": "node tools/fidelity-diff.mjs",

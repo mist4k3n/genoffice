@@ -16,7 +16,7 @@ import type { StubCall } from './stub-desktop-api'
 
 interface Miss {
   readonly method: string
-  readonly channel: string
+  readonly channel: string | null
   readonly note: string | undefined
   count: number
 }

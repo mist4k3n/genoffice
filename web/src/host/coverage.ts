@@ -1,3 +1,4 @@
+import { IPC_CHANNELS } from '../../../apps/sheets/src/shared/ipc-channels'
 import type { DesktopApi } from '../../../apps/sheets/src/shared/desktop-api'
 
 /**
@@ -10,9 +11,16 @@ import type { DesktopApi } from '../../../apps/sheets/src/shared/desktop-api'
  * cheaper and more reliable than watching a diff, and it is the main reason
  * PLAN.md chose a typed shim over extracting packages.
  *
- * `channel` mirrors what apps/sheets/src/preload/index.ts passes to
- * ipcRenderer — some literal, some from IPC_CHANNELS. Kept verbatim so the
- * server can key routes off the same names.
+ * Channels are **imported from upstream's IPC_CHANNELS**, not retyped. An
+ * earlier revision spelled them out as string literals and 32 of the 59 were
+ * wrong — invented rather than mirrored — which nothing caught, because a
+ * channel is just a string. Importing makes a renamed constant a compile error
+ * and a changed value follow automatically.
+ *
+ * A dozen channels are string literals in the preload too (`app:*`, the two
+ * `sheets:*` queue probes, `ai:web-search`). Those are the residual risk, and
+ * `npm run check:channels` re-derives every entry here from the preload source
+ * to catch them.
  */
 export type Status =
   /** implemented over HTTP invoke */
@@ -26,7 +34,8 @@ export type Status =
 
 export interface Entry {
   readonly status: Status
-  readonly channel: string
+  /** Upstream's wire channel, or null when the preload answers without IPC. */
+  readonly channel: string | null
   /** true when the renderer reaches it before the shell is interactive */
   readonly boot?: boolean | undefined
   readonly note?: string | undefined
@@ -46,9 +55,9 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   },
   getAiPanelPrefs: { status: 'http', channel: 'app:get-ai-panel-prefs', boot: true },
   onAiPanelPrefsChanged: { status: 'push', channel: 'app:ai-panel-prefs-changed', boot: true },
-  notifyPendingEdits: { status: 'http', channel: 'sheets:pending-edits', boot: true },
-  aiGskStatus: { status: 'http', channel: 'ai:gsk-status', boot: true },
-  getAiSettings: { status: 'http', channel: 'ai:get-settings', boot: true },
+  notifyPendingEdits: { status: 'http', channel: IPC_CHANNELS.pendingEditsChanged, boot: true },
+  aiGskStatus: { status: 'http', channel: IPC_CHANNELS.aiGskStatus, boot: true },
+  getAiSettings: { status: 'http', channel: IPC_CHANNELS.aiGetSettings, boot: true },
   consumeNewBlankWorkbook: { status: 'http', channel: 'sheets:consume-new-blank', boot: true },
   hasQueuedWorkbook: { status: 'http', channel: 'sheets:has-queued-workbook', boot: true },
 
@@ -56,87 +65,95 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   // source. Left as no-op subscriptions deliberately — see PLAN.md phase 01,
   // "decide this rather than stubbing and forgetting". Repoint them at web
   // equivalents (browser menu, beforeunload, rename UI) when those exist.
-  onMenuAction: { status: 'shell', channel: 'sheets:menu-action', boot: true, note: 'native menu' },
+  onMenuAction: { status: 'shell', channel: IPC_CHANNELS.menuAction, boot: true, note: 'native menu' },
   onCloseSaveRequest: {
     status: 'shell',
-    channel: 'sheets:close-save-request',
+    channel: IPC_CHANNELS.closeSaveRequest,
     boot: true,
     note: 'tab close → beforeunload',
   },
   onWorkbookRenamed: {
     status: 'shell',
-    channel: 'sheets:workbook-renamed',
+    channel: IPC_CHANNELS.workbookRenamed,
     boot: true,
     note: 'rename from shell Home',
   },
   onRecoveryPrompt: {
     status: 'shell',
-    channel: 'sheets:recovery-prompt',
+    channel: IPC_CHANNELS.recoveryPrompt,
     boot: true,
     note: 'crash recovery, phase 02',
   },
-  onChromePressed: { status: 'shell', channel: 'sheets:chrome-pressed', note: 'tab strip press' },
+  onChromePressed: { status: 'shell', channel: 'app:chrome-pressed', note: 'tab strip press' },
 
   // ── document lifecycle (phase 02/03) ─────────────────────────────────────
-  selectWorkbook: { status: 'todo', channel: 'sheets:select-workbook' },
-  selectWorkbooksForMerge: { status: 'todo', channel: 'sheets:select-workbooks-merge' },
-  openWorkbooksForMerge: { status: 'todo', channel: 'sheets:open-workbooks-merge' },
-  closeWorkbook: { status: 'todo', channel: 'sheets:close-workbook' },
-  readWorkbookRange: { status: 'todo', channel: 'workbook:read-range' },
-  readWorkbookFormulas: { status: 'todo', channel: 'workbook:read-formulas' },
-  readWorkbookMedia: { status: 'todo', channel: 'workbook:read-media' },
-  readPivotDefinition: { status: 'todo', channel: 'workbook:read-pivot' },
-  recalcWorkbook: { status: 'todo', channel: 'workbook:recalc' },
+  selectWorkbook: { status: 'todo', channel: IPC_CHANNELS.selectWorkbook },
+  selectWorkbooksForMerge: { status: 'todo', channel: IPC_CHANNELS.selectWorkbooksForMerge },
+  openWorkbooksForMerge: { status: 'todo', channel: IPC_CHANNELS.openWorkbooksForMerge },
+  closeWorkbook: { status: 'todo', channel: IPC_CHANNELS.closeWorkbook },
+  readWorkbookRange: { status: 'todo', channel: IPC_CHANNELS.readWorkbookRange },
+  readWorkbookFormulas: { status: 'todo', channel: IPC_CHANNELS.readWorkbookFormulas },
+  readWorkbookMedia: { status: 'todo', channel: IPC_CHANNELS.readWorkbookMedia },
+  readPivotDefinition: { status: 'todo', channel: IPC_CHANNELS.readPivotDefinition },
+  recalcWorkbook: { status: 'todo', channel: IPC_CHANNELS.recalcWorkbook },
 
   // ── save (phase 03) ──────────────────────────────────────────────────────
-  saveWorkbookEdits: { status: 'todo', channel: 'workbook:save' },
-  beginSaveEditsTransfer: { status: 'todo', channel: 'workbook:save-transfer-begin' },
-  sendSaveEditsChunk: { status: 'todo', channel: 'workbook:save-transfer-chunk' },
-  abortSaveEditsTransfer: { status: 'todo', channel: 'workbook:save-transfer-abort' },
-  writeWorkbookRecovery: { status: 'todo', channel: 'workbook:recovery-write' },
-  replyRecoveryPrompt: { status: 'todo', channel: 'sheets:recovery-reply' },
-  reportCloseSaveResult: { status: 'todo', channel: 'sheets:close-save-result' },
-  autoRenameWorkbook: { status: 'todo', channel: 'sheets:auto-rename' },
-  confirmCsvSave: { status: 'todo', channel: 'sheets:confirm-csv-save' },
+  saveWorkbookEdits: { status: 'todo', channel: IPC_CHANNELS.saveWorkbook },
+  beginSaveEditsTransfer: { status: 'todo', channel: IPC_CHANNELS.saveEditsBegin },
+  sendSaveEditsChunk: { status: 'todo', channel: IPC_CHANNELS.saveEditsChunk },
+  abortSaveEditsTransfer: { status: 'todo', channel: IPC_CHANNELS.saveEditsAbort },
+  writeWorkbookRecovery: { status: 'todo', channel: IPC_CHANNELS.writeWorkbookRecovery },
+  replyRecoveryPrompt: { status: 'todo', channel: IPC_CHANNELS.recoveryPromptReply },
+  reportCloseSaveResult: { status: 'todo', channel: IPC_CHANNELS.closeSaveResult },
+  autoRenameWorkbook: { status: 'todo', channel: IPC_CHANNELS.autoRenameWorkbook },
+  confirmCsvSave: { status: 'todo', channel: IPC_CHANNELS.csvSaveConfirm },
 
   // ── export (phase 03, headless Chromium in phase 09) ─────────────────────
-  exportPdf: { status: 'todo', channel: 'workbook:export-pdf' },
-  exportCsv: { status: 'todo', channel: 'workbook:export-csv' },
-  createDocument: { status: 'todo', channel: 'sheets:create-document' },
+  exportPdf: { status: 'todo', channel: IPC_CHANNELS.exportPdf },
+  exportCsv: { status: 'todo', channel: IPC_CHANNELS.exportCsv },
+  createDocument: { status: 'todo', channel: IPC_CHANNELS.createDocument },
 
   // ── AI (phase 04) ────────────────────────────────────────────────────────
-  aiStream: { status: 'todo', channel: 'ai:stream' },
-  aiStreamCancel: { status: 'todo', channel: 'ai:stream-cancel' },
-  onAiStream: { status: 'todo', channel: 'ai:stream-event' },
-  aiChat: { status: 'todo', channel: 'ai:chat' },
-  setAiSettings: { status: 'todo', channel: 'ai:set-settings' },
-  aiGskLogin: { status: 'todo', channel: 'ai:gsk-login' },
+  aiStream: { status: 'todo', channel: IPC_CHANNELS.aiStream },
+  aiStreamCancel: { status: 'todo', channel: IPC_CHANNELS.aiStreamCancel },
+  onAiStream: { status: 'todo', channel: IPC_CHANNELS.aiStreamChunk },
+  aiChat: { status: 'todo', channel: IPC_CHANNELS.aiChat },
+  setAiSettings: { status: 'todo', channel: IPC_CHANNELS.aiSetSettings },
+  aiGskLogin: { status: 'todo', channel: IPC_CHANNELS.aiGskLogin },
   webSearch: { status: 'todo', channel: 'ai:web-search' },
-  imageSearch: { status: 'todo', channel: 'ai:image-search' },
-  generateImage: { status: 'todo', channel: 'ai:generate-image' },
+  imageSearch: { status: 'todo', channel: IPC_CHANNELS.aiImageSearch },
+  generateImage: { status: 'todo', channel: IPC_CHANNELS.aiGenerateImage },
 
   // ── assets and attachments (phase 03) ────────────────────────────────────
-  readLocalImage: { status: 'todo', channel: 'sheets:read-local-image' },
-  addPastedImage: { status: 'todo', channel: 'sheets:add-pasted-image' },
-  fetchImage: { status: 'todo', channel: 'sheets:fetch-image' },
-  pickAttachments: { status: 'todo', channel: 'sheets:pick-attachments' },
-  addAttachmentPaths: { status: 'todo', channel: 'sheets:add-attachment-paths' },
-  readAttachment: { status: 'todo', channel: 'sheets:read-attachment' },
-  readAttachmentImage: { status: 'todo', channel: 'sheets:read-attachment-image' },
-  getPathForFile: { status: 'todo', channel: 'sheets:get-path-for-file' },
+  readLocalImage: { status: 'todo', channel: IPC_CHANNELS.readLocalImage },
+  addPastedImage: { status: 'todo', channel: IPC_CHANNELS.filesAddPastedImage },
+  fetchImage: { status: 'todo', channel: IPC_CHANNELS.aiFetchImage },
+  pickAttachments: { status: 'todo', channel: IPC_CHANNELS.filesPick },
+  addAttachmentPaths: { status: 'todo', channel: IPC_CHANNELS.filesAdd },
+  readAttachment: { status: 'todo', channel: IPC_CHANNELS.filesRead },
+  readAttachmentImage: { status: 'todo', channel: IPC_CHANNELS.filesReadImage },
 
   // ── no web equivalent ────────────────────────────────────────────────────
+  getPathForFile: {
+    status: 'todo',
+    channel: null,
+    note: 'preload uses webUtils.getPathForFile; a browser File has no path',
+  },
   captureScreenSources: {
     status: 'todo',
-    channel: 'sheets:capture-sources',
+    channel: IPC_CHANNELS.captureScreenSources,
     note: 'desktopCapturer; needs getDisplayMedia',
   },
   captureScreenSource: {
     status: 'todo',
-    channel: 'sheets:capture-source',
+    channel: IPC_CHANNELS.captureScreenSource,
     note: 'desktopCapturer; needs getDisplayMedia',
   },
-  openExternal: { status: 'http', channel: 'sheets:open-external', note: 'window.open on the web' },
+  openExternal: {
+    status: 'http',
+    channel: IPC_CHANNELS.openExternal,
+    note: 'window.open on the web',
+  },
 }
 
 export const BOOT_SURFACE = (Object.keys(COVERAGE) as (keyof DesktopApi)[]).filter(
