@@ -27,11 +27,21 @@ Baseline upstream SHA: `d2b898f`
 
 ## Local patches
 
-None. Target: **under five**, per the Tier 2 budget.
+None — no upstream file is modified.
 
 | Patch | Reason | Written against | Upstream PR |
 | --- | --- | --- | --- |
-| _(none yet)_ | | | |
+| _(none)_ | | | |
+
+## Mirrored implementations
+
+Upstream code **copied** into `web/`, rather than imported. One, against a
+Tier 2 budget of five. Guarded by `npm run check:mirror`, which hashes the
+upstream original and fails when it changes.
+
+| Copy | Upstream source | Why it cannot be imported |
+| --- | --- | --- |
+| `web/server/channels/save-plan.ts` | `writeWorkbookTo`, `apps/sheets/src/main/sheets-main.ts` (259 lines) | Pure function, but module-local in a file that imports `electron`. An upstream PR exporting it deletes the copy |
 
 ## Open upstream PRs
 
@@ -41,6 +51,7 @@ None. Target: **under five**, per the Tier 2 budget.
 | Expose a mutation hook / `OpExecutorContext` from the renderer | 1 | not filed | phase 08. **File during phase 07** so it has time to land |
 | Sidecar protocol accepting bytes instead of a `PathBuf` | 1 | not filed | phase 05, only if plaintext must never touch disk |
 | `onExit` callback on `XlsxSidecarClient` | 1 | not filed | nothing. Would delete the pid-polling in `web/server/sidecar/pool.ts` — see `FINDINGS-02.md` |
+| Export `writeWorkbookTo` from `sheets-main.ts` | 1 | not filed | nothing. Would delete `web/server/channels/save-plan.ts`, the fork's only mirrored implementation |
 
 ## Rebase runbook
 
@@ -50,6 +61,7 @@ git rebase upstream/main          # must never conflict
 cd web && npm run typecheck       # method-level contract drift surfaces here
 npm run check:channels            # channel-level drift the compiler cannot see
 npm run check:server              # server purity + coverage agreement
+npm run check:mirror              # mirrored implementations still match upstream
 npm run check:drift               # watched-file diff report
 npm run spike                     # smoke: does the shell still render?
 ```

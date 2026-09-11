@@ -1,15 +1,21 @@
 # Phase 02 — Hono server kernel
 
-Status: **partially met.** The upstream renderer opens a real `.xlsx` from a
-real `StorageAdapter`, through a pooled Rust sidecar, over Hono — and renders
-it. Thirteen of the fifty-nine channels are served. The save pipeline is not
-built, so the phase gate (`npm run compat` over the corpus) is not yet claimed.
+Status: **gate met.** The upstream renderer opens a real `.xlsx` from a real
+`StorageAdapter`, through a pooled Rust sidecar, over Hono, renders it, and
+saves it back with every untouched part byte-identical. Seventeen of the
+fifty-nine channels are served.
+
+`npm run compat` — the phase gate — passes over the corpus: **6,061 cells
+compared across 14 workbooks with zero mismatches**, every archive entry
+preserved, the one encrypted fixture correctly skipped as known-unsupported.
 
 ```sh
 cd web
-npm run serve    # terminal 1 — Sheets server on :5274, serving web/fixtures
-npm run dev      # terminal 2 — app on :5273
-# then open http://localhost:5273/?doc=acme-budget.xlsx
+cp -r fixtures /tmp/corpus              # the save checks mutate documents
+npm run serve -- --dir /tmp/corpus      # terminal 1 — server on :5274
+npm run dev                             # terminal 2 — app on :5273
+npm run compat                          # terminal 3 — the gate
+# or open http://localhost:5273/?doc=acme-budget.xlsx
 ```
 
 ## What runs
@@ -24,11 +30,16 @@ npm run dev      # terminal 2 — app on :5273
 | The Hono router | `server/router.ts` |
 | 10 boot channels | `server/channels/app.ts` |
 | open / read-range / close | `server/channels/workbook.ts` |
+| Save + the chunked edit transfer | `server/channels/save.ts` |
+| Verbatim mirror of upstream's `writeWorkbookTo` | `server/channels/save-plan.ts` |
+| Encrypted / legacy-xls detection | `server/workbook-format.ts` |
 | Development host: filesystem storage, dev identity, real WebSocket | `server/dev-server.ts` |
 
-Coverage went from 10 invoke / 40 todo to **13 invoke / 37 todo**, and the probe
+Coverage went from 10 invoke / 40 todo to **17 invoke / 33 todo**, and the probe
 still reports *no unimplemented method reached* — now with a workbook on screen
-rather than an empty shell.
+rather than an empty shell. The browser's own network log shows the ten boot
+channels, then `workbook:select`, then `workbook:read-range` per viewport
+chunk, all 200.
 
 ## Verified against the running server, not asserted
 
@@ -44,6 +55,11 @@ rather than an empty shell.
   `sheets:session-lost` frame reaches that document's socket, and the pool
   returns to four warm processes.
 - A session survives a socket blip and dies when the socket really goes.
+- A save writes through: `A1` "Line" becomes "PHASE-02-SAVED" on disk, only
+  `xl/worksheets/sheet1.xml` is rewritten, the other six entries stay
+  byte-identical, and the archive passes an independent integrity check.
+- A concurrent write is rejected `409 version_conflict` carrying
+  `currentVersion`, so the client can rebase rather than only be told no.
 
 Security paths, all checked against the live server:
 
@@ -58,7 +74,7 @@ Security paths, all checked against the live server:
 | No identity | `401` |
 | Unimplemented channel | `501` |
 
-## Three defects found by running it
+## Four defects found by running it
 
 **The coverage table's channel names were invented.** 32 of 59 were wrong:
 `workbook:select` had been written `sheets:select-workbook`,
@@ -80,6 +96,14 @@ longer than the client's 15s reconnect backoff.
 **Errors pointed at the wrong component.** A blocked path traversal returned
 `sidecar_failed`, and a missing document returned a 500 carrying the server's
 absolute filesystem path to the browser.
+
+**The compat harness lied, in my favour.** It took the corpus directory as its
+own flag while the server took it separately, so once the first run had saved
+anything the two pointed at different bytes — and the second run reported three
+`entryCount` failures that were entirely the harness's own. (The underlying
+difference was legitimate: a save drops `xl/calcChain.xml`, which is what Excel
+does when a cell changes.) The harness now discovers the directory from the
+server, so the two cannot disagree.
 
 ## Decisions
 
@@ -103,21 +127,45 @@ modules are compiled with DOM by both its projects, and `shared/desktop-api.ts`
 type-imports `@genoffice/ui`, so the compile fails inside upstream's own
 sources. `npm run check:server` enforces the rule on our files instead.
 
+## One copy of upstream code, deliberately
+
+`server/channels/save-plan.ts` is a **verbatim mirror** of `writeWorkbookTo`
+from `sheets-main.ts` — the fork's only copied implementation.
+
+It is a pure function that reads nothing but the save request and the session's
+sheetId→name map, and it would be importable if upstream exported it. It does
+not: it is module-local inside a 4,000-line file that imports `electron`.
+
+Rewriting it was the alternative and a worse one. Nearly every one of its 259
+lines resolves a sheetId for a different feature of the format — structural
+ops, filters, hyperlinks, conditional formatting, data validation, protections,
+page setup, notes, tables, pivots, sparklines, theme, defined names,
+recalculated values. A reimplementation would have to reproduce each branch
+exactly and would lose fidelity silently wherever it did not.
+
+`npm run check:mirror` hashes upstream's version and fails when it changes,
+telling you to re-copy rather than reconcile by hand. An upstream PR exporting
+the function would delete the file.
+
 ## Not done in this phase
 
-- The save pipeline: journal, part surgery, write-through, version-token bump,
-  conflict rejection. This is what the phase gate needs.
-- The other 37 channels, including `read-formulas`, `read-media`,
+- **Save As.** It means "create a different document", which needs a
+  document-create port. Refused with a 501 rather than silently overwriting the
+  document the user was branching from.
+- The other 33 channels, including `read-formulas`, `read-media`,
   `read-pivot-definition` and `recalc`.
-- Encrypted workbooks. `SecretsAdapter` exists as a port; nothing consumes it,
-  and the server must sniff CFB magic itself because the sidecar reports an
-  encrypted file as `Could not find EOCD`, indistinguishable from corruption
-  (`FINDINGS-00.md`).
+- **Decrypting** encrypted workbooks. They are now *detected* and answered with
+  `428 password_required` instead of an EOCD error indistinguishable from
+  corruption, and `SecretsAdapter` exists as a port — but nothing consumes it.
+- Legacy `.xls` is detected and refused with an explanation rather than
+  mis-reported as corrupt.
 - Sessions opened without a socket (an AI agent, a server-side job) fall back to
   the 15-minute idle sweep. Correct, but it means the socket-bound cleanup is
   not a complete answer on its own.
 
 ## Next
 
-Phase 03 — the save pipeline and document lifecycle, which is what closes the
-phase-02 gate, followed by the read channels the viewport depends on.
+Phase 03 — browser document lifecycle: the remaining read channels
+(`read-formulas`, `read-media`, `read-pivot-definition`, `recalc`), Save As
+against a document-create port, and the `beforeunload` path that replaces the
+desktop's close-save prompt.
