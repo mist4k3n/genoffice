@@ -1,0 +1,36 @@
+{
+  // Standalone rather than extending ../tsconfig.base.json: web/ stays
+  // self-contained, and an upstream compiler-option change cannot silently
+  // alter this build. The settings below deliberately mirror
+  // apps/sheets/tsconfig.json, which is on the DRIFT.md watch list.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@genoffice/file-parse": ["../apps/sheets/src/types/file-parse.d.ts"],
+      "@genoffice/docx-engine/math": ["../apps/sheets/src/types/docx-engine-math.d.ts"]
+    }
+  },
+  // Only our own sources. Upstream files are pulled in through imports, which
+  // is exactly what makes a contract change surface here as a type error.
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "vite.config.ts",
+    // Upstream's ambient declarations for window.desktopApi / window.projectApi.
+    // Read, never modified — the renderer we import relies on these globals.
+    "../apps/sheets/src/renderer/env.d.ts"
+  ]
+}

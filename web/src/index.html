@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Development CSP.
+
+      Upstream's renderer/index.html carries an Electron-shaped policy
+      (`connect-src 'self' ws://localhost:*`) which cannot work here: the API
+      and the push socket live on another origin.
+
+      'unsafe-inline' and 'unsafe-eval' below are Vite dev-server requirements
+      (HMR injects inline scripts; some dependencies evaluate at runtime). The
+      production policy must drop both and pin the real API origin — build that
+      in phase 03 alongside the deployment, and verify Univer's canvas worker
+      still loads under it, because worker-src is the part that usually bites.
+
+      blob: on worker-src and img-src is not optional: Univer creates workers
+      from blobs, and rendered images arrive as blob URLs.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:;
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' data: blob:;
+        font-src 'self' data:;
+        worker-src 'self' blob:;
+        connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*;
+      "
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GenOffice Sheets</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./bootstrap.ts"></script>
+  </body>
+</html>

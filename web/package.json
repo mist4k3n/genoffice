@@ -1,0 +1,28 @@
+{
+  "name": "@mist4k3n/sheets-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser delivery of GenOffice Sheets. Additive-only fork delta; see PLAN.md.",
+  "scripts": {
+    "spike": "vite --config vite.config.ts",
+    "typecheck": "tsc --noEmit",
+    "api:list": "node tools/list-desktop-api.mjs",
+    "check:drift": "node tools/check-drift.mjs",
+    "audit": "node tools/audit-corpus.mjs",
+    "spike:encryption": "node tools/spike-encryption.mjs",
+    "fidelity": "node tools/fidelity-diff.mjs",
+    "visuals": "node tools/probe-visuals.mjs",
+    "mock": "node tools/mock-server.mjs",
+    "dev": "VITE_SHEETS_API=http://127.0.0.1:5274 vite --config vite.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
