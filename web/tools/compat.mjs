@@ -108,15 +108,63 @@ function compareOpen(http, direct) {
   return problems
 }
 
-/** A stable digest of a range result, so a mismatch is one comparison. */
-function digestRange(result) {
+/**
+ * Read a range, waiting for the engine to finish indexing it.
+ *
+ * The sidecar indexes lazily and reports how far it has got in
+ * `indexedThroughRow`. Comparing two independently-indexed reads without
+ * waiting is a race: the same range legitimately returns fewer cells on
+ * whichever side is behind, and the harness reports a phantom difference that
+ * disappears on the next run. That flakiness was real and is why this exists —
+ * a gate that fails at random is worse than no gate.
+ */
+async function readSettled(read, range, attempts = 40) {
+  let result = await read()
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (result.indexedThroughRow === null || result.indexedThroughRow >= range.endRow) return result
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    result = await read()
+  }
+  return result
+}
+
+/**
+ * Canonical lines for a range result: sorted, and built from named fields so
+ * JSON key order cannot matter. The HTTP side passes through zod, which
+ * rebuilds objects in schema order, so a raw stringify would differ on every
+ * cell for no reason at all.
+ */
+function canonicalLines(result) {
   const cells = [...result.cells]
     .sort((a, b) => a.row - b.row || a.column - b.column)
-    .map((c) => `${c.row},${c.column},${JSON.stringify(c.value ?? null)},${c.formula ?? ''}`)
+    .map((c) => `cell ${c.row},${c.column} = ${JSON.stringify(c.value ?? null)} f=${c.formula ?? ''}`)
   const merges = [...result.merges]
-    .map((m) => `${m.startRow},${m.endRow},${m.startColumn},${m.endColumn}`)
+    .map((m) => `merge ${m.startRow},${m.endRow},${m.startColumn},${m.endColumn}`)
     .sort()
-  return createHash('sha256').update(`${cells.join('\n')}##${merges.join('\n')}`).digest('hex')
+  return [...cells, ...merges]
+}
+
+function digestRange(result) {
+  return createHash('sha256').update(canonicalLines(result).join('\n')).digest('hex')
+}
+
+/** The first few actual differences, so a failure is diagnosable rather than a flag. */
+function describeDifference(left, right, limit = 3) {
+  const a = canonicalLines(left)
+  const b = canonicalLines(right)
+  const notes = []
+  if (a.length !== b.length) notes.push(`${a.length} lines via http vs ${b.length} direct`)
+  const seen = new Set(b)
+  for (const line of a) {
+    if (notes.length >= limit) break
+    if (!seen.has(line)) notes.push(`http-only: ${line}`)
+  }
+  const other = new Set(a)
+  for (const line of b) {
+    if (notes.length >= limit + 1) break
+    if (!other.has(line)) notes.push(`direct-only: ${line}`)
+  }
+  return notes
 }
 
 async function main() {
@@ -165,12 +213,16 @@ async function main() {
           endColumn: Math.max(0, Math.min(SAMPLE_COLUMNS, sheet.columnCount) - 1),
         }
         const [viaHttp, viaDirect] = await Promise.all([
-          invoke(name, 'workbook:read-range', {
-            sessionId: httpFile.sessionId,
-            sheetId: sheet.id,
+          readSettled(
+            () =>
+              invoke(name, 'workbook:read-range', {
+                sessionId: httpFile.sessionId,
+                sheetId: sheet.id,
+                range,
+              }),
             range,
-          }),
-          sidecar.readRange(direct.sessionId, directSheet.id, range),
+          ),
+          readSettled(() => sidecar.readRange(direct.sessionId, directSheet.id, range), range),
         ])
         compared += viaHttp.cells.length
         if (identityEdit === null) {
@@ -186,8 +238,34 @@ async function main() {
           }
         }
         if (digestRange(viaHttp) !== digestRange(viaDirect)) {
-          mismatched += 1
-          row.notes.push(`sheet "${sheet.name}" cells differ`)
+          // Re-read both before believing it. The engine discovers merges as
+          // it indexes, and `indexedThroughRow` only reports how far *cell*
+          // indexing has got — so two sessions over the same file can
+          // transiently disagree by one merge with both claiming to be fully
+          // indexed. Observed as roughly one run in six reporting a single
+          // extra `merge 0,0,0,2`, which a re-read always resolves.
+          //
+          // A difference that survives a settle and a re-read is real.
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          const [againHttp, againDirect] = await Promise.all([
+            readSettled(
+              () =>
+                invoke(name, 'workbook:read-range', {
+                  sessionId: httpFile.sessionId,
+                  sheetId: sheet.id,
+                  range,
+                }),
+              range,
+            ),
+            readSettled(() => sidecar.readRange(direct.sessionId, directSheet.id, range), range),
+          ])
+          if (digestRange(againHttp) !== digestRange(againDirect)) {
+            mismatched += 1
+            row.notes.push(`sheet "${sheet.name}" differs after a re-read`)
+            for (const note of describeDifference(againHttp, againDirect)) {
+              row.notes.push(`  ${note}`)
+            }
+          }
         }
       }
       row.cells = mismatched === 0 ? `ok (${compared})` : `DIFF (${mismatched} sheet(s))`
