@@ -171,7 +171,15 @@ export class SidecarPool {
       return value
     } catch (error) {
       this.checkLiveness()
-      throw error
+      // Label it as what it is. Anything unclassified becomes 'internal'
+      // further up, and a spreadsheet-engine failure reported as a generic
+      // server fault sends whoever reads it to the wrong component -- the
+      // same mistake a blocked path traversal made in phase 02, in reverse.
+      if (error instanceof SheetsError) throw error
+      throw new SheetsError(
+        'sidecar_failed',
+        error instanceof Error ? error.message : String(error),
+      )
     }
   }
 
