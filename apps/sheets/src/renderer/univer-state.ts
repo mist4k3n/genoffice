@@ -17,6 +17,26 @@ import type { createUniver } from './create-univer'
 import type { EditJournal } from './edit-journal'
 import { netAxisDelta } from './view-transform'
 
+/**
+ * A grid container id nobody else is using.
+ *
+ * Univer resolves its container *by id* (`createUniver({ container })`), and so
+ * do the shape-draw overlay and the formula-bar toggle. A constant id is
+ * therefore a page-level singleton: two Apps on one page render two elements
+ * with the same id, every `getElementById` returns the first, and one of the
+ * two grids ends up unreachable from the keyboard while still looking
+ * perfectly normal.
+ *
+ * The desktop only ever has one App, so this is invisible there. It is not
+ * invisible to an embedder rendering the editor twice -- a document beside the
+ * version it conflicts with, say.
+ *
+ * Styling and the keyboard handler match `[data-univer-grid]` instead, because
+ * those need *a* grid rather than a particular one.
+ */
+let gridContainerSeq = 0
+export const nextGridContainerId = (): string => `univer-container-${++gridContainerSeq}`
+
 export type UniverRuntime = ReturnType<typeof createUniver>
 export type ActiveWorkbook = NonNullable<
   ReturnType<UniverRuntime['univerAPI']['getActiveWorkbook']>

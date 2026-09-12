@@ -1,10 +1,10 @@
 {
   "baseline": "d2b898f",
-  "reason": "Per-instance host bridge, so one browser page can hold several editors. See web/UPSTREAM-CHANGES.md.",
+  "reason": "Per-instance host bridge and per-instance grid container, so one browser page can hold several editors. See web/UPSTREAM-CHANGES.md.",
   "files": [
-    "apps/sheets/src/renderer/host-api.ts",
     "apps/sheets/src/renderer/App.tsx",
     "apps/sheets/src/renderer/ColorDropdown.tsx",
+    "apps/sheets/src/renderer/ExcelShell.tsx",
     "apps/sheets/src/renderer/ScreenshotDialog.tsx",
     "apps/sheets/src/renderer/WorkbookVisuals.tsx",
     "apps/sheets/src/renderer/ai/AiChatPanel.tsx",
@@ -15,7 +15,9 @@
     "apps/sheets/src/renderer/ai/image-skill.ts",
     "apps/sheets/src/renderer/ai/search-skill.ts",
     "apps/sheets/src/renderer/ai/transport.ts",
+    "apps/sheets/src/renderer/clear-selection-keyboard.ts",
     "apps/sheets/src/renderer/csv-export.ts",
+    "apps/sheets/src/renderer/host-api.ts",
     "apps/sheets/src/renderer/i18n/locale.tsx",
     "apps/sheets/src/renderer/merge-workbooks.ts",
     "apps/sheets/src/renderer/op-executor.ts",
@@ -23,7 +25,24 @@
     "apps/sheets/src/renderer/plan-operations.ts",
     "apps/sheets/src/renderer/ribbon-actions.ts",
     "apps/sheets/src/renderer/save-actions.ts",
+    "apps/sheets/src/renderer/shape-draw.ts",
+    "apps/sheets/src/renderer/styles.css",
     "apps/sheets/src/renderer/univer-state.ts",
-    "apps/sheets/src/renderer/univer-sync.ts"
-  ]
+    "apps/sheets/src/renderer/univer-sync.ts",
+    "apps/sheets/src/renderer/visual-actions.ts",
+    "apps/sheets/tests/aggregate-range.test.ts",
+    "apps/sheets/tests/copy-source-direct.test.ts",
+    "apps/sheets/tests/csv-save-streamed.test.ts",
+    "apps/sheets/tests/formula-audit.test.ts",
+    "apps/sheets/tests/formula-closure-structural-race.test.ts",
+    "apps/sheets/tests/image-skill.test.ts",
+    "apps/sheets/tests/read-sheet-range-batching.test.ts",
+    "apps/sheets/tests/save-recovery-mode.test.ts",
+    "apps/sheets/tests/structural-delete-guard.test.ts",
+    "apps/sheets/tests/univer-range-loading.test.ts"
+  ],
+  "allowedFailures": [
+    "parseCsv ignores delimiters inside escaped quotes when sniffing"
+  ],
+  "allowedFailuresReason": "Fails at the baseline commit too, so it is upstream's, not ours. check-upstream.mjs fails if this list grows, or if a listed test starts passing."
 }

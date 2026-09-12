@@ -17,7 +17,11 @@ export const CLEAR_SELECTION_CONTENT_COMMAND = 'sheet.command.clear-selection-co
 
 const NATIVE_FIELD_SELECTOR = 'input, textarea, select'
 const CONTENT_EDITABLE_SELECTOR = '[contenteditable="true"]'
-const SHEET_CONTAINER_SELECTOR = '#univer-container'
+/// "Inside some grid", not inside a particular one. The container's id is
+/// unique per App instance (see univer-state.ts, nextGridContainerId), so the
+/// stable hook is the attribute; the id stays in the group because this is a
+/// pure predicate and its tests address the container that way.
+const SHEET_CONTAINER_SELECTOR = '#univer-container, [data-univer-grid]'
 export const SKIP_HOST_SELECTOR = [
   '[data-u-comp="formula-bar"]',
   '[data-u-comp="input"]',

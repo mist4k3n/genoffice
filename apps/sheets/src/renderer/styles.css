@@ -5339,9 +5339,12 @@ textarea:focus {
   background: var(--ribbon-hover);
 }
 
-/* Shape draw mode: crosshair over the whole grid while armed */
-#univer-container.sheet-shape-drawing,
-#univer-container.sheet-shape-drawing * {
+/* Shape draw mode: crosshair over the whole grid while armed.
+   Keyed on [data-univer-grid] rather than the container's id: the id is unique
+   per App instance (see univer-state.ts, nextGridContainerId), so there is no
+   single id to match. */
+[data-univer-grid].sheet-shape-drawing,
+[data-univer-grid].sheet-shape-drawing * {
   cursor: crosshair !important;
 }
 
@@ -5449,7 +5452,7 @@ textarea:focus {
 
 /* View > Formula Bar toggle: an app-level setting (not in the file), hiding
    Univer's formula-bar row; the flex workbench reflows the grid below. */
-#univer-container.formula-bar-hidden [data-u-comp='formula-bar'] {
+[data-univer-grid].formula-bar-hidden [data-u-comp='formula-bar'] {
   display: none;
 }
 

@@ -160,6 +160,14 @@ function ToolSymbol({ symbol }: { readonly symbol: string }): React.JSX.Element 
 }
 
 interface ExcelShellProps {
+  /// Element id for the grid container.
+  ///
+  /// A prop rather than a constant because the id has to be unique per shell:
+  /// Univer resolves its container *by id*, as do the shape-draw overlay and
+  /// the formula-bar toggle, so two shells on one page with one id all resolve
+  /// the same element. `data-univer-grid` is the stable hook CSS and the
+  /// keyboard handler key off, since those need "a grid", not a specific one.
+  readonly gridContainerId: string
   readonly prompt: string
   readonly preview: ChangePlan | null
   readonly selectionFormat: SelectionFormat | null
@@ -309,6 +317,7 @@ export interface PageLayoutEcho {
 }
 
 export function ExcelShell({
+  gridContainerId,
   prompt,
   preview,
   selectionFormat,
@@ -691,7 +700,7 @@ export function ExcelShell({
             </button>
           </div>
           <section className="workbook-area">
-            <div id="univer-container" className="spreadsheet" />
+            <div id={gridContainerId} className="spreadsheet" data-univer-grid="" />
           </section>
           {aiSelectionAskAnchor && aiScopeRange && !aiBusy && (
             <AiSelectionAsk

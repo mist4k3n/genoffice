@@ -49,6 +49,8 @@ import {
 
 /** The App refs/state the visual-insert actions need; built fresh per call. */
 export interface VisualActionContext {
+  /// This App's grid container id; shape draw arms an overlay over it.
+  gridContainerId: string
   adapterRef: { readonly current: InMemoryWorkbookAdapter }
   univerRef: { readonly current: UniverRuntime | null }
   lazyWorkbookRef: { current: LazyWorkbookState | null }
@@ -388,7 +390,9 @@ export function startShapeDraw(ctx: VisualActionContext, shapeType: string): voi
     ctx.setMessage(t('appShapeNeedsFile'))
     return
   }
-  startSheetShapeDraw(runtime, shapeType, (anchor) => insertShapeAtAnchor(ctx, shapeType, anchor))
+  startSheetShapeDraw(runtime, ctx.gridContainerId, shapeType, (anchor) =>
+    insertShapeAtAnchor(ctx, shapeType, anchor),
+  )
 }
 
 /** Insert a gallery shape at an explicit twoCellAnchor (draw-mode commit). */

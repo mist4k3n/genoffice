@@ -98,14 +98,15 @@ export function anchorAxisMarkers(
 export function rectToAnchor(
   runtime: UniverRuntime,
   rect: DrawRectPx,
+  /// The grid container this runtime drew into. Passed rather than looked up:
+  /// the id is per-App now, so there is no one element to find.
+  hostEl: HTMLElement,
 ): WorkbookVisualObject['anchor'] | null {
   const workbook = runtime.univerAPI.getActiveWorkbook()
   const worksheet = workbook?.getActiveSheet()
   if (!workbook || !worksheet) return null
   // getCellRect is relative to the grid's render surface — the largest canvas
   // in the container (the container itself has extra chrome above the grid)
-  const hostEl = document.getElementById('univer-container')
-  if (!hostEl) return null
   let surface: DOMRect | null = null
   for (const canvas of hostEl.querySelectorAll('canvas')) {
     const r = canvas.getBoundingClientRect()
@@ -188,11 +189,14 @@ const cancelStore = (): Record<string, (() => void) | undefined> =>
 /** Arm the crosshair draw mode over the grid; commit receives the drawn anchor. */
 export function startSheetShapeDraw(
   runtime: UniverRuntime,
+  /// This App's grid container id. One id per App instance — see
+  /// univer-state.ts, nextGridContainerId.
+  gridContainerId: string,
   prst: string,
   commit: (anchor: WorkbookVisualObject['anchor']) => void,
 ): void {
   cancelStore()[CANCEL_KEY]?.()
-  const host = document.getElementById('univer-container')
+  const host = document.getElementById(gridContainerId)
   if (!host) return
   host.classList.add('sheet-shape-drawing')
 
@@ -249,7 +253,7 @@ export function startSheetShapeDraw(
       ? clickInsertRect(runtime, s.x, s.y)
       : resolveDrawRect(s.x, s.y, e.clientX, e.clientY, e.shiftKey)
     cleanup()
-    const anchor = rectToAnchor(runtime, rect)
+    const anchor = rectToAnchor(runtime, rect, host)
     if (anchor) commit(anchor)
   }
   const onKey = (e: KeyboardEvent) => {

@@ -35,6 +35,7 @@ import {
   installLoadAutoHeightGate,
   journalSuppression,
   lazySheetScreenExtent,
+  nextGridContainerId,
   type ActiveWorkbook,
   type LazyWorkbookState,
   type UniverRuntime,
@@ -506,6 +507,16 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
   useEffect(() => {
     hostApi?.notifyPendingEdits?.(pendingEdits)
   }, [pendingEdits])
+  /// This shell's own grid container id.
+  ///
+  /// Univer resolves its container by id, and so do the shape-draw overlay and
+  /// the formula-bar toggle. A constant id is therefore a page-level
+  /// singleton: two Apps on one page produce two elements with one id and
+  /// every lookup returns the first, which leaves one of the two grids
+  /// unreachable from the keyboard. One id per App instance removes the
+  /// collision; `data-univer-grid` is what CSS and the keyboard handler match
+  /// on, because those want "a grid", not a particular one.
+  const [gridContainerId] = useState(nextGridContainerId)
   const [autoSave, setAutoSave] = useAutoSavePref('ai-sheets-auto-save', hostApi)
   // Ref mirror for callbacks captured when an AI run starts
   const autoSaveRef = useRef(autoSave)
@@ -705,6 +716,7 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
   /** App-scope refs/state bundle for the extracted visual-insert actions (visual-actions.ts). */
   function visualContext(): VisualActionContext {
     return {
+      gridContainerId,
       adapterRef,
       univerRef,
       lazyWorkbookRef,
@@ -1441,7 +1453,7 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
       },
       presets: [
         UniverSheetsCorePreset({
-          container: 'univer-container',
+          container: gridContainerId,
           // header: true + toolbar: false renders only the name box + formula
           // bar (the Univer ribbon needs both flags).
           header: true,
@@ -2570,7 +2582,7 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
     const unsubscribeCloseSave =
       hostApi?.onCloseSaveRequest?.(() => void closeSaveRef.current()) ??
       (() => undefined)
-    const gridHost = document.getElementById('univer-container')
+    const gridHost = document.getElementById(gridContainerId)
     let selectionAskRaf: number | null = null
     let selectionAskSettleRaf: number | null = null
     let selectionAskSettling = false
@@ -3396,7 +3408,7 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
     }
     if (command === 'toggle-formula-bar') {
       const next = !formulaBarVisible
-      document.getElementById('univer-container')?.classList.toggle('formula-bar-hidden', !next)
+      document.getElementById(gridContainerId)?.classList.toggle('formula-bar-hidden', !next)
       setFormulaBarVisible(next)
       setMessage(t(next ? 'appFormulaBarShown' : 'appFormulaBarHidden'))
       return
@@ -4132,6 +4144,7 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
         />
       )}
       <ExcelShell
+        gridContainerId={gridContainerId}
         prompt={prompt}
         preview={preview}
         sheetHasContent={sheetHasContent}
