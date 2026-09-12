@@ -1,6 +1,9 @@
+import { readFile } from 'node:fs/promises'
+
 import { Hono } from 'hono'
 
 import { toSheetsError } from './errors'
+import { ExportStore, exportIdentityKey } from './exports'
 import {
   DEFAULT_PREFERENCES,
   DEFAULT_SIDECAR,
@@ -51,6 +54,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
   const quota = resolveQuota(options.quota)
   const scratchDir = options.sidecar?.scratchDir ?? defaultScratchDir()
   const preferences = { ...DEFAULT_PREFERENCES, ...options.preferences }
+  const exports = new ExportStore(options.exportTtlMs)
   const locale = options.locale ?? preferences.language
 
   const push = new PushHub({
@@ -91,6 +95,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
 
   pool.start()
   registry.start()
+  exports.start()
 
   const app = new Hono()
 
@@ -139,6 +144,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
         push,
         storage: options.storage,
         scratchDir,
+        exports,
       })
       // An undefined result drops out of JSON.stringify entirely, and the
       // transport reads the missing key back as undefined. Right for the void
@@ -159,8 +165,54 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     }
   })
 
+  /**
+   * Redeem a Save As.
+   *
+   * A GET rather than another `/invoke` channel because the payload is a file:
+   * the invoke endpoint speaks JSON, and base64 through it would inflate a
+   * 30MB workbook by a third on both sides for no gain. The host fetches this
+   * once and writes the bytes wherever its own picker chose.
+   */
+  app.get('/export/:token', async (c) => {
+    let identity: RequestIdentity
+    try {
+      identity = await options.identify(c.req.raw)
+    } catch (error) {
+      const failure = toSheetsError(error)
+      return c.json({ error: { code: 'unauthorized', message: failure.message } }, 401)
+    }
+
+    let slot: ReturnType<ExportStore['take']>
+    try {
+      slot = exports.take(c.req.param('token'), exportIdentityKey(identity))
+    } catch (error) {
+      const failure = toSheetsError(error)
+      return c.json({ error: { code: failure.code, message: failure.message } }, failure.status as 404)
+    }
+
+    // Read then release: the file is at most one workbook and the slot is
+    // already spent, so holding the scratch directory open across a stream
+    // would buy nothing but a cleanup path that runs on disconnect.
+    try {
+      const bytes = await readFile(slot.path)
+      return c.body(bytes as unknown as ArrayBuffer, 200, {
+        'content-type': XLSX_MEDIA_TYPE,
+        'content-length': String(bytes.byteLength),
+        'content-disposition': `attachment; filename="${slot.name.replace(/["\\]/g, '')}"`,
+      })
+    } finally {
+      slot.release()
+    }
+  })
+
   app.get('/health', (c) =>
-    c.json({ ok: true, sidecar: pool.stats(), sessions: registry.stats(), push: push.stats() }),
+    c.json({
+      ok: true,
+      sidecar: pool.stats(),
+      sessions: registry.stats(),
+      push: push.stats(),
+      exports: exports.stats(),
+    }),
   )
 
   return {
@@ -168,6 +220,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     attachSocket: (documentId, socket) => push.attach(documentId, socket),
     push: (documentId, channel, ...args) => push.send(documentId, channel, ...args),
     async dispose() {
+      exports.dispose()
       push.dispose()
       await registry.dispose()
       pool.dispose()
@@ -181,3 +234,9 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
  * phase-03 reconnect logic is what will listen.
  */
 export const SESSION_LOST_CHANNEL = 'sheets:session-lost'
+
+/**
+ * The media type for .xlsx. Also correct for .xlsm: the macro-enabled type
+ * only differs in the manifest, and a host that cares reads the name.
+ */
+const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'

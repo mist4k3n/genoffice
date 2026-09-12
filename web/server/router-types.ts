@@ -1,3 +1,4 @@
+import type { ExportStore } from './exports'
 import type { AppPreferences, RequestIdentity, StorageAdapter } from './ports'
 import type { PushHub } from './push'
 import type { SessionRegistry } from './sessions'
@@ -17,6 +18,8 @@ export interface ChannelContext {
   readonly storage: StorageAdapter
   /** Scratch space for work that must land on disk before it reaches storage. */
   readonly scratchDir: string
+  /** Save As parks its assembled bytes here for the host to fetch once. */
+  readonly exports: ExportStore
 }
 
 export type ChannelHandler = (context: ChannelContext) => Promise<unknown>

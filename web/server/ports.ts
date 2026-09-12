@@ -177,6 +177,12 @@ export interface SheetsServerOptions {
    * closed. Must exceed the client's reconnect backoff. Defaults to 45s.
    */
   readonly socketIdleGraceMs?: number | undefined
+  /**
+   * How long an assembled Save As stays fetchable. The browser asks for it
+   * immediately, so this is an abandonment timeout, not a budget. Defaults to
+   * 60s.
+   */
+  readonly exportTtlMs?: number | undefined
 }
 
 export const DEFAULT_QUOTA: QuotaOptions = {

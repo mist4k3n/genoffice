@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readFile, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { SaveEditsTransferStore } from '../../../apps/sheets/src/main/save-edits-transfer'
@@ -13,8 +13,11 @@ import {
 } from '../../../apps/sheets/src/shared/desktop-api'
 import { IPC_CHANNELS } from '../../../apps/sheets/src/shared/ipc-channels'
 import { SheetsError, VersionConflictError } from '../errors'
+import { exportIdentityKey } from '../exports'
+import type { WorkbookSaveExportResult } from '../../protocol'
+import type { WorkbookSession } from '../sessions'
 import type { ChannelContext, ChannelHandler, ChannelTable } from '../router-types'
-import { writeWorkbookTo } from './save-plan'
+import { writeWorkbookTo, type SaveMutation } from './save-plan'
 
 /**
  * The save pipeline: journal in, part surgery through the sidecar, bytes out
@@ -55,15 +58,7 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
     throw new SheetsError('forbidden', 'This workbook is open read-only.')
   }
 
-  // Save As means "create a different document", which needs a storage port
-  // this package does not have. Refusing explicitly beats silently writing
-  // over the document the user was trying to branch from.
-  if (request.mode === 'save-as') {
-    throw new SheetsError(
-      'not_implemented',
-      'Save As needs a document-create port; use the host application to copy the document.',
-    )
-  }
+  if (request.mode === 'save-as') return exportPatchedBytes(context, session, request)
 
   // The web equivalent of upstream's "the file changed on disk" guard. Same
   // intent, better outcome: the client is handed the version it lost to.
@@ -72,19 +67,9 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
     throw new VersionConflictError(current.version)
   }
 
-  const workDir = join(context.scratchDir, `save-${randomUUID()}`)
-  const targetPath = join(workDir, current.name)
-  const { mutation, bytes } = await context.pool
-    .withSession(request.sessionId, async (client) => {
-      const { mkdir } = await import('node:fs/promises')
-      await mkdir(workDir, { recursive: true })
-      // One sidecar, one save: writeWorkbookTo issues a manifest read, entry
-      // extractions and the archive assembly, and they must all land on the
-      // process holding this session's snapshot.
-      const result = await writeWorkbookTo(client, session, request, targetPath)
-      return { mutation: result, bytes: await readFile(targetPath) }
-    })
-    .finally(() => rm(workDir, { recursive: true, force: true }))
+  const assembled = await assemble(context, session, request, current.name)
+  const { mutation } = assembled
+  const bytes = await readFile(assembled.path).finally(() => assembled.discard())
 
   // Only now does the document change. A failure above leaves storage
   // untouched and the session still usable.
@@ -97,6 +82,81 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
   const file = await context.registry.reopenAfterSave(session, saved, context.pool, context.locale)
 
   return { canceled: false, file, touchedEntries: mutation.touchedEntries }
+}
+
+/**
+ * Part surgery into a scratch file.
+ *
+ * Shared by the two saves because they differ only in what happens to the
+ * bytes afterwards: an in-place save uploads them and bumps the version, a
+ * Save As hands them to the host. Both must run inside one sidecar session --
+ * writeWorkbookTo issues a manifest read, entry extractions and the archive
+ * assembly, and they all have to land on the process holding this session's
+ * snapshot.
+ *
+ * The caller owns the result and must call `discard()`; a throw in here cleans
+ * up on its own.
+ */
+async function assemble(
+  context: ChannelContext,
+  session: WorkbookSession,
+  request: WorkbookSaveRequest,
+  name: string,
+): Promise<{ mutation: SaveMutation; path: string; workDir: string; discard(): void }> {
+  const workDir = join(context.scratchDir, `save-${randomUUID()}`)
+  const targetPath = join(workDir, name)
+  const discard = () => void rm(workDir, { recursive: true, force: true }).catch(() => {})
+  try {
+    const mutation = await context.pool.withSession(request.sessionId, async (client) => {
+      await mkdir(workDir, { recursive: true })
+      return writeWorkbookTo(client, session, request, targetPath)
+    })
+    return { mutation, path: targetPath, workDir, discard }
+  } catch (error) {
+    discard()
+    throw error
+  }
+}
+
+/**
+ * Save As: the patched bytes, without persisting them.
+ *
+ * Deliberately not a write. Save As means "put a copy somewhere else", and
+ * where else is the host application's question -- Papan's picker already
+ * takes a `customSave` callback, and its documents are tree nodes this package
+ * has no port to create. So the answer is bytes and a suggested name, fetched
+ * once from `GET /export/:token`.
+ *
+ * Three consequences, all of them the point:
+ *
+ *  - **No version guard.** Nothing is written to this document, so a
+ *    concurrent save elsewhere cannot conflict with a copy.
+ *  - **The session keeps its identity and its journal.** The renderer reads
+ *    the `canceled: true` half of upstream's result -- which is accurate,
+ *    since nothing was saved *here* -- and leaves the edits pending. That is
+ *    upstream's own CSV-Save-As semantics, verbatim.
+ *  - **The sidecar session is not reopened.** It still streams the stored
+ *    bytes, which are still what storage holds.
+ */
+async function exportPatchedBytes(
+  context: ChannelContext,
+  session: WorkbookSession,
+  request: WorkbookSaveRequest,
+): Promise<WorkbookSaveExportResult> {
+  const current = await context.storage.head(session.documentId)
+  const assembled = await assemble(context, session, request, current.name)
+  try {
+    const slot = await context.exports.register({
+      path: assembled.path,
+      workDir: assembled.workDir,
+      name: current.name,
+      identityKey: exportIdentityKey(context.identity),
+    })
+    return { canceled: true, export: { ...slot, touchedEntries: assembled.mutation.touchedEntries } }
+  } catch (error) {
+    assembled.discard()
+    throw error
+  }
 }
 
 /**
