@@ -128,10 +128,16 @@ boolean, because three distinctions matter:
 result**, never against what the session recorded at open. A grant you revoke
 fails on the next call, not at the next open.
 
-One caveat worth knowing before you mount a viewer: read-only is enforced at
-the server, not in the editor's UI. Upstream's renderer ignores the workbook's
-`readOnly` flag, so a viewer can type and will be refused on save. Say so in
-your own chrome.
+Pass `readOnly` on the component for a viewer and the grid stops taking input —
+typing, the ribbon, Delete — the way Excel's read-only does, while Save As
+still works. It is a downgrade only: the server intersects it with the rights
+`identify()` granted.
+
+One limit: **two editors visible at once, on the same document, break each
+other.** The grid's keyboard host is a page-level element id upstream resolves
+by `getElementById`, so the second one to mount takes it and the first stops
+accepting input. Mounting several editors is fine as long as one is visible at
+a time, which is what a tab bar means.
 
 ### Drafts are not versions
 

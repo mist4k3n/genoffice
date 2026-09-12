@@ -234,13 +234,32 @@ It rides as a **second argument**. Upstream's preload sends exactly one, so
 stays usable verbatim — a flag folded into the request the renderer builds
 would fail the renderer's own validation before leaving the browser.
 
-### Show saved version
+### Show saved version — mounts, but the pane beside it goes dead
 
-`readOnly` on the component, which travels as a header the server **intersects**
-with what `identify()` returned. A downgrade only: a client can give up rights
-it has and can never claim rights it does not. Mounting a second editor on the
-same document with `readOnly` gives the side-by-side compare view, on a fresh
-session that reads what storage holds now.
+`readOnly` on the component travels as a header the server **intersects** with
+what `identify()` returned. A downgrade only: a client can give up rights it
+has and can never claim rights it does not. Mounting a second editor on the
+same document with `readOnly` does produce the side-by-side view, on a fresh
+session reading what storage holds now.
+
+**It is not usable yet, and this corrects an earlier claim here.** Two editors
+visible *at the same time* break each other: `#univer-container` is a
+page-level element id, upstream resolves the grid's keyboard host from it
+(`App.tsx`, `const gridHost = document.getElementById('univer-container')`),
+and only one editor can own it. The second editor to mount takes it, and the
+first stops accepting input.
+
+Verified to be nothing to do with the read-only work: with the compare pane
+mounted **fully editable**, the primary pane froze just the same.
+
+`singletons.ts` solved this for *tab switching*, where one editor is visible at
+a time. Simultaneous visibility is a different problem and needs the container
+id scoped per editor — five call sites across four upstream files, so a real
+upstream change and a decision to make, not an oversight.
+
+Until then a host should show the stored version some other way: its own
+viewer, a download, or a modal that replaces the editor rather than sitting
+beside it.
 
 ### Measured
 
@@ -250,6 +269,8 @@ tab B saves                 → rejected, version_conflict, current version carr
 tab B Overwrite             → saved; tab B's edit is in the file, tab A's is gone
 external change + notify    → both tabs: CONFLICT (announced)
 Show saved version          → second editor mounts, readOnly=true
+                              (but see above: the pane beside it stops taking
+                               input -- a page-singleton limit, pre-existing)
 ```
 
 ## Draft and version
@@ -387,18 +408,49 @@ covering them. Anything in the request that is not its own identity counts, so
 a field upstream adds later is refused for a viewer by default rather than
 allowed by omission.
 
-### Read-only is enforced at the server, not in the UI
+### Read-only in the UI, not only at the boundary
 
-Worth knowing before wiring a viewer: **upstream's renderer ignores
-`WorkbookFile.readOnly`.** It is in the schema, the server sets it honestly,
-and nothing in `apps/sheets/src/renderer` reads it. So a read-only session
-looks fully editable — a viewer can type, and finds out on Save, with a 403.
+**Upstream's renderer ignores `WorkbookFile.readOnly`.** It is in the schema,
+the server sets it honestly, and nothing in `apps/sheets/src/renderer` reads
+it. Left at that, a viewer sees a fully editable grid, types into it, and finds
+out at Save with a 403. Papan's Collabora does not behave that way, and neither
+does Excel: read-only means the cells do not take input.
 
-The boundary is correct and fail-closed; the affordance is wrong. Fixing it
-properly is an upstream change (the renderer has no read-only mode to turn on).
-Until then a host that mounts a viewer should say so in its own chrome. The
-same applies to the conflict banner's "show saved version": the comparison copy
-is scribble-able and nothing persists.
+Univer already has the mechanism, and this component already holds the editor's
+own `univerAPI` through `onRuntime`, so no upstream change was needed.
+`read-only.ts` calls `setEditable(false)` on the workbook, which gates the
+commands every mutation runs through — the ribbon's included, because upstream's
+ribbon actions call the same facade (`range.setValues`) the in-cell editor does.
+
+Measured, with the whole thing mounted read-only:
+
+```
+type into a cell   → nothing; 0 pending edits
+ribbon Bold        → nothing; 0 pending edits
+Delete             → nothing; 0 pending edits
+exportBytes()      → 12019 bytes, "rewrote nothing"   ← readcopy still works
+an editable editor elsewhere on the page → unaffected
+```
+
+Applied on a retry loop rather than once: the workbook arrives after the
+runtime does, and a save replaces it with a fresh one that starts editable.
+
+### One editable workbook per unit id
+
+Univer keys edit permission by *unit id*, and upstream names a workbook after
+its content — `file-<sha256>`. **Two editors showing the same document share a
+unit**, and share the permission with it.
+
+Measured: locking a read-only pane also froze the editable pane beside it, and
+the user's unsaved workbook silently stopped taking input while looking
+completely normal.
+
+So a read-only editor locks the unit only while no editable editor shares it,
+gives the lock back if one appears, and tells the host through `onError` when
+it cannot lock. The asymmetry is deliberate: an unlocked viewer can scribble in
+a grid whose session the server holds read-only and loses the scribbles; a
+locked editor loses the user's real work with nothing to indicate anything is
+wrong.
 
 ## Theme scoping is half-broken
 

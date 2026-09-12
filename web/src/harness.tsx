@@ -38,6 +38,13 @@ function Harness(): React.JSX.Element {
   const docs = (params.get('docs') ?? 'acme-budget.xlsx,gamma-sales.xlsx').split(',')
   // Active-only is the supported mode. `?mount=all` demonstrates the refusal.
   const mountAll = params.get('mount') !== 'active'
+  // `?readonly=all`, or a comma-separated list of tab indices. A list is what
+  // makes the interesting case reachable: one viewer and one editor on the
+  // page at once, which is what the conflict banner's compare view produces.
+  const readOnlyParam = params.get('readonly') ?? ''
+  const readOnlyTabs = new Set(readOnlyParam.split(',').filter(Boolean))
+  const isReadOnly = (index: number): boolean =>
+    readOnlyTabs.has('all') || readOnlyTabs.has(String(index))
 
   const [tabs] = useState<Tab[]>(docs.map((documentId, i) => ({ id: `tab-${i}`, documentId })))
   // One handle per tab, the way a host keeps a ref per open editor.
@@ -192,7 +199,13 @@ function Harness(): React.JSX.Element {
                 apiBase={API}
                 theme={theme}
                 visible={visible}
-                onLoaded={(file) => note(`${tab.documentId}: loaded, ${file.sheets.length} sheet(s)`)}
+                readOnly={isReadOnly(index)}
+                onLoaded={(file) =>
+                  note(
+                    `${tab.documentId}: loaded, ${file.sheets.length} sheet(s)` +
+                      `${file.readOnly ? ' (read-only)' : ''}`,
+                  )
+                }
                 onDirtyChange={(n) => note(`${tab.documentId}: ${n} pending edit(s)`)}
                 onSaved={(e) =>
                   note(`${tab.documentId}: SAVED, rewrote [${e.touchedEntries.join(', ') || 'nothing'}]`)
