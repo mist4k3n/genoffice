@@ -1,6 +1,6 @@
 # What the Papan briefing changes
 
-Source: `GENOFFICE_SHEET_INTEGRATION_BRIEFING.md` (Papan `main` @ `ded0db4c2`).
+Source: `PAPAN-BRIEFING.md` (Papan `main` @ `ded0db4c2`), alongside this file.
 It is an unusually good answer and it invalidates several things I had assumed.
 
 ## 0. There is a competing decision in flight, and it is not mine to make
