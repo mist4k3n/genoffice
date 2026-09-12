@@ -12,7 +12,7 @@
  * The document id is the filename, so the browser opens one with
  * `?doc=acme-budget.xlsx`.
  */
-import { readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 
 import { serve } from '@hono/node-server'
@@ -22,7 +22,7 @@ import { Hono } from 'hono'
 import { SheetsError, VersionConflictError } from './errors'
 import { createSheetsRouter } from './router'
 import { READ_ONLY_HEADER } from '../protocol'
-import type { RequestIdentity, StorageAdapter, WorkbookMetadata } from './ports'
+import type { DraftAdapter, RequestIdentity, StorageAdapter, WorkbookMetadata } from './ports'
 
 const args = process.argv.slice(2)
 const flag = (name: string, fallback: string): string => {
@@ -31,6 +31,9 @@ const flag = (name: string, fallback: string): string => {
 }
 
 const root = resolve(flag('dir', 'fixtures'))
+// Beside the corpus, never inside it: a draft that showed up as a document
+// would be a confusing way to learn the split works.
+const draftRoot = resolve(flag('drafts', `${root}-drafts`))
 const port = Number(flag('port', '5274'))
 // Lowerable so the socket-idle session close can be exercised without a
 // 45-second wait.
@@ -123,6 +126,43 @@ function fileStorage(directory: string): StorageAdapter {
   }
 }
 
+/**
+ * Filesystem draft store, beside the corpus rather than in it.
+ *
+ * Papan's is disk-backed bytes plus a Redis pointer with a 7-day TTL, keyed
+ * `tenant:fileId`. This one keys the same way and skips the TTL: a dev server
+ * that outlives its drafts is not a scenario worth building for.
+ *
+ * The `.drafts` directory is deliberately outside the served corpus -- a draft
+ * that turned up as a document in the corpus listing would be a confusing way
+ * to learn that the split works.
+ */
+function fileDrafts(directory: string): DraftAdapter {
+  const keyFor = (identity: RequestIdentity): string =>
+    join(directory, `${identity.tenantId}__${basename(identity.documentId)}`)
+
+  return {
+    put: async (identity, bytes, baseVersion) => {
+      await mkdir(directory, { recursive: true })
+      await writeFile(keyFor(identity), bytes)
+      await writeFile(`${keyFor(identity)}.base`, baseVersion)
+    },
+    get: async (identity) => {
+      const [bytes, baseVersion] = await Promise.all([
+        readFile(keyFor(identity)).catch(() => null),
+        readFile(`${keyFor(identity)}.base`, 'utf8').catch(() => null),
+      ])
+      return bytes && baseVersion ? { bytes, baseVersion } : null
+    },
+    delete: async (identity) => {
+      await Promise.all([
+        rm(keyFor(identity), { force: true }),
+        rm(`${keyFor(identity)}.base`, { force: true }),
+      ])
+    },
+  }
+}
+
 /** Dev identity: the document comes from the request, everyone is the same user. */
 function devIdentity(request: Request): RequestIdentity {
   const url = new URL(request.url)
@@ -133,6 +173,7 @@ function devIdentity(request: Request): RequestIdentity {
 
 const sheets = createSheetsRouter({
   storage: fileStorage(root),
+  drafts: fileDrafts(draftRoot),
   identify: devIdentity,
   socketIdleGraceMs,
   quota: { maxSessionsPerTenant: maxSessions },
@@ -180,7 +221,7 @@ app.get(
 // The corpus harness discovers the served directory here rather than being
 // told twice. Pointing it at a different folder than the server serves
 // silently compares two unrelated sets of bytes.
-app.get('/dev-info', (c) => c.json({ documentRoot: root }))
+app.get('/dev-info', (c) => c.json({ documentRoot: root, draftRoot }))
 
 /**
  * Stand-in for the host's realtime layer.

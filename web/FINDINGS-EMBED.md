@@ -252,6 +252,84 @@ external change + notify    → both tabs: CONFLICT (announced)
 Show saved version          → second editor mounts, readOnly=true
 ```
 
+## Draft and version
+
+`#617` names the two ways of getting saves wrong: *"version spam or silent
+exit-save data loss."* Papan avoids both by routing autosave and exit-save to a
+draft store and only explicit saves to the file. That split now exists here,
+and almost none of it needed inventing — **upstream already draws the same
+line.**
+
+Its renderer writes a crash-recovery copy every 30 seconds while a workbook is
+dirty, on its own timer, through its own channel (`workbook:write-recovery`),
+deliberately separate from Save and deliberately not the document. On the
+desktop that copy lands under userData. Here it lands in a `DraftAdapter` the
+host supplies.
+
+So the mapping is one line long:
+
+| Upstream channel | Goes to |
+| --- | --- |
+| `workbook:write-recovery`, every 30s while dirty | the draft store |
+| `workbook:save`, a person pressing Save | a version, and the draft is deleted |
+
+Upstream's AutoSave pill writes the *document* every 30 seconds, which is
+version spam by Papan's standard. It ships **off** by default here, which is
+not a new opinion: Papan's Collabora is configured the same way
+(`per_document.autosave_duration_secs=0`), with the draft as the safety net. A
+host that turns it on is choosing versions, and can.
+
+### The draft comes back silently
+
+On open, a draft outranks the stored document and no one is asked. That is
+Papan's rule — its WOPI `GetFile` serves a non-stale draft ahead of storage —
+and it is the difference between "your edits came back" and a restore prompt
+posing a question the user has no way to evaluate. Upstream's desktop
+`recoveryPrompt` channel stays unimplemented on purpose.
+
+### Staleness, and the work it deletes
+
+A draft records the storage version it was edited from. When that no longer
+matches, the draft is **deleted**, not offered: those edits describe a document
+that no longer exists. Papan does the same thing with
+`draftHash !== file.contentHash`.
+
+Worth being plain about the consequence — that deletion loses the unsaved work.
+It is the right trade (silently reapplying edits to someone else's newer
+document is worse) and it is why the conflict banner matters: while the session
+is live, `documentChanged` raises the conflict at the moment the document
+moves, which is when there is still a person able to decide. The stale-draft
+deletion is what happens when nobody was there.
+
+The recovery channel refuses to write for the same reason: a session already
+behind the document produces no draft rather than a doomed one.
+
+### The dirty indicator would otherwise lie
+
+Restoring a draft leaves the edit journal **empty** — the edits are in the bytes
+the engine opened — so the renderer honestly reports zero pending edits for a
+document that differs from what storage holds. A host wiring only
+`onDirtyChange` would show "saved".
+
+Hence `onDraftRestored`. Papan persists its own dirty flag server-side for
+exactly this reason: it has to survive a session ending.
+
+### Measured
+
+```
+edit, wait for the 30s tick   → draft written; document byte-identical
+reload the page               → edits back, onDraftRestored fired, 0 pending edits
+explicit save                 → version written, draft deleted
+document changes, then reopen → stale draft deleted, storage opened, nothing restored
+```
+
+### Not covered
+
+Exit-save. A browser tab closing cannot reliably finish an async save, so the
+30-second draft is the whole safety net and `beforeunload` is the whole
+warning. Papan's Collabora is in the same position — its exit-save is a
+best-effort write from a server-side process, which we do not have.
+
 ## Theme scoping is half-broken
 
 Found while testing the above, and it is not what this component's own comment

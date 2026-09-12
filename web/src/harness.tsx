@@ -205,6 +205,9 @@ function Harness(): React.JSX.Element {
                   note(`${tab.documentId}: selection ${s ? `${s.sheetName}!${s.range}` : 'none'}`)
                 }
                 onSaveAsRequest={(exported) => receive(exported, 'ribbon Save As')}
+                onDraftRestored={() =>
+                  note(`${tab.documentId}: restored unsaved work — DIRTY before any edit`)
+                }
                 onError={(error) => note(`${tab.documentId}: ERROR ${error.message}`)}
               />
               </div>

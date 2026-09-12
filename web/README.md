@@ -108,8 +108,26 @@ app.route('/sheets', createSheetsRouter({
   storage,                 // head / get / put with version tokens
   identify: (req) => …,    // { userId, tenantId, documentId, canEdit }
   secrets,                 // optional: passwords for encrypted workbooks
+  drafts,                  // optional: where unsaved work lives between saves
 }).app)
 ```
+
+### Drafts are not versions
+
+The editor writes a recovery copy every 30 seconds while a workbook is dirty,
+through a channel that never touches the document. Give it a `DraftAdapter` and
+that copy survives a crash or a closed tab; leave it out and an interrupted
+session loses whatever was pending.
+
+A draft is served ahead of storage on the next open, silently, and deleted the
+moment a real save supersedes it — or the moment the document moves underneath
+it, since edits to a version that no longer exists cannot be applied. Wire
+`onDraftRestored` if you show a dirty indicator: a restored draft leaves the
+edit journal empty, so `onDirtyChange` reports zero for a document that is not
+saved.
+
+Only an explicit save writes a version. The AutoSave toggle, which writes the
+document on a timer, is **off by default** for that reason.
 
 `StorageAdapter` may also offer `localPath()`. Where content is stored
 immutably — content-addressed blobs, say — the engine reads storage directly and
