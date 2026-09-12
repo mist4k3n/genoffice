@@ -22,6 +22,7 @@
     "visuals": "node tools/probe-visuals.mjs",
     "mock": "node tools/mock-server.mjs",
     "serve": "tsx server/dev-server.ts",
+    "harness": "VITE_SHEETS_API=http://127.0.0.1:5274 vite --config vite.config.ts",
     "dev": "VITE_SHEETS_API=http://127.0.0.1:5274 vite --config vite.config.ts"
   },
   "devDependencies": {

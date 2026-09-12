@@ -20,6 +20,16 @@ const repoRoot = resolve(here, '..')
  */
 export default defineConfig({
   root: resolve(here, 'src'),
+  // Two entries: the standalone app, and the host harness that mounts the
+  // editor as a component the way an embedding application would.
+  build: {
+    rollupOptions: {
+      input: {
+        index: resolve(here, 'src/index.html'),
+        harness: resolve(here, 'src/harness.html'),
+      },
+    },
+  },
   plugins: [react()],
   server: {
     port: Number(process.env.SHEETS_WEB_PORT) || 5273,
