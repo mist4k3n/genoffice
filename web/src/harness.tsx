@@ -32,7 +32,7 @@ function Harness(): React.JSX.Element {
   const params = new URLSearchParams(location.search)
   const docs = (params.get('docs') ?? 'acme-budget.xlsx,gamma-sales.xlsx').split(',')
   // Active-only is the supported mode. `?mount=all` demonstrates the refusal.
-  const mountAll = params.get('mount') === 'all'
+  const mountAll = params.get('mount') !== 'active'
 
   const [tabs] = useState<Tab[]>(docs.map((documentId, i) => ({ id: `tab-${i}`, documentId })))
   const [active, setActive] = useState(0)
@@ -63,7 +63,7 @@ function Harness(): React.JSX.Element {
           </select>
         </span>
         <span style={{ opacity: 0.6 }}>
-          {mountAll ? 'all tabs mounted — expect a refusal' : 'active tab only (supported)'}
+          {mountAll ? 'all tabs mounted (Papan-shaped)' : 'active tab only'}
         </span>
       </div>
 
