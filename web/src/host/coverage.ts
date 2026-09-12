@@ -31,6 +31,11 @@ export type Status =
   | 'shell'
   /** answered by the browser itself; never reaches the server (see local-api.ts) */
   | 'local'
+  /**
+   * driven by the embedding application rather than by either side of the
+   * wire: the host dispatches, the renderer listens (see commands.ts)
+   */
+  | 'host'
   /** not yet implemented; calling it rejects with a named error */
   | 'todo'
 
@@ -67,7 +72,15 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   // source. Left as no-op subscriptions deliberately — see PLAN.md phase 01,
   // "decide this rather than stubbing and forgetting". Repoint them at web
   // equivalents (browser menu, beforeunload, rename UI) when those exist.
-  onMenuAction: { status: 'shell', channel: IPC_CHANNELS.menuAction, boot: true, note: 'native menu' },
+  // Repointed from 'shell', as that comment said to: the embedding
+  // application's chrome is the menu on the web, and its Save As needs to
+  // reach the renderer's own save path. See commands.ts.
+  onMenuAction: {
+    status: 'host',
+    channel: IPC_CHANNELS.menuAction,
+    boot: true,
+    note: 'host chrome dispatches',
+  },
   onCloseSaveRequest: {
     status: 'shell',
     channel: IPC_CHANNELS.closeSaveRequest,
@@ -169,7 +182,7 @@ export const BOOT_SURFACE = (Object.keys(COVERAGE) as (keyof DesktopApi)[]).filt
 )
 
 export function coverageSummary(): Record<Status, number> {
-  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, local: 0, todo: 0 }
+  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, local: 0, host: 0, todo: 0 }
   for (const entry of Object.values(COVERAGE)) counts[entry.status] += 1
   return counts
 }

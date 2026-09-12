@@ -117,10 +117,13 @@ const served = servedChannels()
 const entries = coverageEntries()
 
 const unserved = entries.filter((entry) => entry.status === 'http' && !served.has(entry.channel))
-// A 'local' channel with a server handler means two implementations of the
-// same method, and the browser's one silently wins.
+// A 'local' or 'host' channel with a server handler means two implementations
+// of the same method, and the browser's one silently wins.
 const shadowed = entries.filter(
-  (entry) => entry.status === 'local' && entry.channel !== null && served.has(entry.channel),
+  (entry) =>
+    (entry.status === 'local' || entry.status === 'host') &&
+    entry.channel !== null &&
+    served.has(entry.channel),
 )
 // The reverse: a handler exists, but the browser still refuses to call it.
 const unclaimed = entries.filter(

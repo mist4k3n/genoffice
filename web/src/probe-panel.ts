@@ -30,11 +30,12 @@ export function recordNotImplemented(method: string, entry: Entry): void {
   window.dispatchEvent(new CustomEvent('host:not-implemented'))
 }
 
-const STATUS_ORDER: Status[] = ['http', 'push', 'local', 'shell', 'todo']
+const STATUS_ORDER: Status[] = ['http', 'push', 'local', 'host', 'shell', 'todo']
 const STATUS_LABEL: Record<Status, string> = {
   http: 'invoke',
   push: 'push',
   local: 'browser-local',
+  host: 'host-driven',
   shell: 'shell no-op',
   todo: 'not implemented',
 }
@@ -105,7 +106,7 @@ export function mountProbe(
   `
 
   const entries = Object.entries(coverage) as [string, Entry][]
-  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, local: 0, todo: 0 }
+  const counts: Record<Status, number> = { http: 0, push: 0, shell: 0, local: 0, host: 0, todo: 0 }
   for (const [, entry] of entries) counts[entry.status] += 1
   const total = entries.length
 
