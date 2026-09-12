@@ -93,10 +93,7 @@ threaded through most of the renderer, so nine files needed a one-token change.
 - **No behaviour changes on the desktop.** Every entry point defaults to
   `window.desktopApi`; the Electron app takes exactly the path it took before.
 - **No change to the `DesktopApi` contract**, the IPC channels, or the preload.
-- **The `univer-container` element id is untouched.** It is also a page-level
-  global, but it is handled entirely in `web/src/embed/singletons.ts` by giving
-  it to one editor at a time — see `FINDINGS-EMBED.md` for why that works where
-  the same trick fails for the API.
+- **No change to the `DesktopApi` contract**, the IPC channels, or the preload.
 
 ### Rebasing
 
@@ -126,3 +123,78 @@ those.
 Send it upstream. It is additive, changes no default behaviour, and the desktop
 app is unaffected. If upstream takes it, delete the entries from
 `upstream-changes.json` — `check:drift` will then report them as stale.
+
+---
+
+## Change 2 — the grid container id is per editor instance
+
+**Files:** 7 modified under `apps/sheets/src/renderer/` — `App.tsx`,
+`ExcelShell.tsx`, `univer-state.ts`, `shape-draw.ts`, `visual-actions.ts`,
+`clear-selection-keyboard.ts`, `styles.css`.
+
+### Why
+
+`ExcelShell` rendered `<div id="univer-container">`, and four places resolved
+that element **by id**: Univer itself (`createUniver({ container })`), the
+shape-draw overlay, the formula-bar toggle, and the keyboard handler. One id is
+fine for one App. Two Apps on one page produce two elements with one id, and
+every `getElementById` returns the first — so one of the two grids is styled
+and driven through the other's container while looking completely normal.
+
+`web/src/embed/singletons.ts` used to work around this by *owning* the id:
+exactly one editor held it, and it was renamed off the others as ownership
+moved. That worked, and it was a hack on live DOM that had already needed a
+second mechanism (start-up serialisation) to stop two editors claiming it in
+one React commit.
+
+### What changed
+
+`univer-state.ts` gains `nextGridContainerId()`, a counter. `App` takes one id
+per instance and passes it to `ExcelShell`, to the Univer preset, to the
+formula-bar toggle and to shape draw. Styling and the keyboard predicate key
+off a new `data-univer-grid` attribute instead, because they want *a* grid
+rather than a particular one — `clear-selection-keyboard.ts` keeps `#univer-container`
+in its selector group so its upstream test passes unmodified.
+
+The ownership and parking code in `singletons.ts` is deleted.
+
+### What this does **not** fix
+
+Two grids **visible at the same time** still cannot both take keyboard input,
+and the remaining cause is inside Univer rather than upstream: it renders its
+internal editor hosts with fixed ids. Measured on a page with two editors:
+
+```
+__editor___INTERNAL_EDITOR__DOCS_NORMAL                    ×3
+univer-doc-selection-container-__INTERNAL_EDITOR__DOCS_NORMAL ×3
+univer-sheet-main-canvas_file-<sha>                        ×3
+```
+
+Nothing outside Univer can rename those. Several editors *mounted* with one
+visible at a time — a tab bar, which is Papan's shape — works, and is what this
+change makes structurally sound rather than a DOM trick. A genuinely
+side-by-side view needs a separate realm, which means an iframe; see
+`FINDINGS-EMBED.md`, "The option not taken".
+
+### Rebasing
+
+The same routine as Change 1. A conflict here is upstream adding another
+`getElementById('univer-container')`: give it `gridContainerId` if it is inside
+`App`, or `data-univer-grid` if it only needs to find a grid.
+
+---
+
+## Change 3 — upstream's tests build the state the app builds
+
+**Files:** 10 under `apps/sheets/tests/`.
+
+Not a feature: these are the repairs Change 1 owed. The tests construct
+`LazyWorkbookState` with `as unknown as LazyWorkbookState`, so the host bridge
+field added by Change 1 was **not** a type error in them — it was `undefined` at
+runtime, and 34 tests failed for reasons that looked like product bugs. They
+now supply `api` the way `App` does, through a getter, because several install
+their stub after building the state and some run with no `window` at all.
+
+`npm run check:upstream` compiles `apps/sheets` and runs its suite, so the next
+change to these modules cannot break them quietly. One failure is allowed and
+listed in `upstream-changes.json`: it fails at the baseline commit too.

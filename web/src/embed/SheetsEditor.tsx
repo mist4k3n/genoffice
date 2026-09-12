@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 
 import { App } from '../../../apps/sheets/src/renderer/App'
 import { HostApiProvider } from '../../../apps/sheets/src/renderer/host-api'
@@ -14,7 +14,7 @@ import { createHttpTransport, type HostTransport } from '../host/transport'
 import { createHostCommandBus } from '../host/commands'
 import { CONFLICT_CHANNEL, type DocumentConflict, type HostCallOptions } from '../../protocol'
 import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
-import { claimContainerId, enqueueMount, releaseContainerId, whenGridReady } from './singletons'
+import { enqueueMount, whenGridReady } from './singletons'
 import { installUnsavedGuard } from '../host/unsaved-guard'
 
 /**
@@ -28,10 +28,9 @@ import { installUnsavedGuard } from '../host/unsaved-guard'
  * ## Several editors on one page
  *
  * Each editor gets its own host bridge, passed to `App` as a prop rather than
- * read from `window.desktopApi` — that is the upstream change recorded in
- * `web/UPSTREAM-CHANGES.md`. The container element id is still a page-level
- * global upstream, so `singletons.ts` hands it to one editor at a time; that
- * part needs no upstream change.
+ * read from `window.desktopApi`, and its own grid container id. Both are
+ * upstream changes, recorded in `web/UPSTREAM-CHANGES.md`, and both exist so
+ * that two editors on one page address two different things.
  */
 export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   const {
@@ -50,8 +49,6 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   const handlers = useRef(props)
   handlers.current = props
 
-  // Identity for singleton ownership. Stable for this editor's lifetime.
-  const token = useMemo(() => Symbol('sheets-editor'), [])
   const apiRef = useRef<DesktopApi | null>(null)
   // This editor's own Univer runtime, so the selection bridge reports the
   // right document when a page holds several editors.
@@ -133,21 +130,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
       awaitingSave.current.abandon(new Error('The editor was closed.'))
       awaitingExport.current.abandon(new Error('The editor was closed.'))
     }
-  }, [apiBase, documentId, locale, readOnly, token, commands, generation])
-
-  /**
-   * Take the singletons before upstream's `useEffect` resolves the container
-   * id. A parent layout effect runs ahead of a child's passive effect, which
-   * is the whole reason this ordering works.
-   */
-  useLayoutEffect(() => {
-    const root = containerRef.current
-    if (!root || !ready) return
-    // Claimed on mount as well as on becoming visible: an editor needs the
-    // container id while *it* initialises, not only while it is on screen.
-    claimContainerId(token, root)
-    return () => releaseContainerId(token, root)
-  }, [ready, visible, token])
+  }, [apiBase, documentId, locale, readOnly, commands, generation])
 
   /**
    * The selection bridge. Papan fed the active cell to its AI chat from a

@@ -242,24 +242,33 @@ has and can never claim rights it does not. Mounting a second editor on the
 same document with `readOnly` does produce the side-by-side view, on a fresh
 session reading what storage holds now.
 
-**It is not usable yet, and this corrects an earlier claim here.** Two editors
-visible *at the same time* break each other: `#univer-container` is a
-page-level element id, upstream resolves the grid's keyboard host from it
-(`App.tsx`, `const gridHost = document.getElementById('univer-container')`),
-and only one editor can own it. The second editor to mount takes it, and the
-first stops accepting input.
+**It is not usable, and this corrects an earlier claim here.** Two editors
+visible *at the same time* break each other: the second to mount takes the
+keyboard and the first stops accepting input.
 
-Verified to be nothing to do with the read-only work: with the compare pane
-mounted **fully editable**, the primary pane froze just the same.
+Verified to be nothing to do with the read-only work — with the compare pane
+mounted **fully editable**, the primary froze just the same.
 
-`singletons.ts` solved this for *tab switching*, where one editor is visible at
-a time. Simultaneous visibility is a different problem and needs the container
-id scoped per editor — five call sites across four upstream files, so a real
-upstream change and a decision to make, not an oversight.
+The first cause was upstream's: `#univer-container` was one element id for the
+whole page. That is fixed (see `UPSTREAM-CHANGES.md`, Change 2) and the
+ownership hack in `singletons.ts` is gone with it. **It was not the only
+cause.** Univer renders its own internal editor hosts with fixed ids, and on a
+page with two editors they collide:
 
-Until then a host should show the stored version some other way: its own
-viewer, a download, or a modal that replaces the editor rather than sitting
-beside it.
+```
+__editor___INTERNAL_EDITOR__DOCS_NORMAL                       ×3
+univer-doc-selection-container-__INTERNAL_EDITOR__DOCS_NORMAL ×3
+univer-sheet-main-canvas_file-<sha>                           ×3
+```
+
+Nothing outside Univer can rename those, so side-by-side grids need a separate
+realm — which means an iframe, the option recorded above as not taken. It is
+the right tool for exactly this one view.
+
+So a host should show the stored version another way: its own viewer, a
+download, or a modal that replaces the editor rather than sitting beside it.
+Several editors mounted with **one visible at a time** — a tab bar, Papan's
+shape — works, and is now structurally sound rather than a DOM trick.
 
 ### Measured
 

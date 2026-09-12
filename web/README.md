@@ -133,11 +133,11 @@ typing, the ribbon, Delete — the way Excel's read-only does, while Save As
 still works. It is a downgrade only: the server intersects it with the rights
 `identify()` granted.
 
-One limit: **two editors visible at once, on the same document, break each
-other.** The grid's keyboard host is a page-level element id upstream resolves
-by `getElementById`, so the second one to mount takes it and the first stops
-accepting input. Mounting several editors is fine as long as one is visible at
-a time, which is what a tab bar means.
+One limit: **two editors visible at the same time break each other** — the
+second to mount takes the keyboard. Univer renders its internal editor hosts
+with fixed element ids, so two of them in one realm collide. Mounting several
+editors is fine as long as one is visible at a time, which is what a tab bar
+means; a genuinely side-by-side view needs an iframe.
 
 ### Drafts are not versions
 
@@ -188,6 +188,7 @@ decision someone writes down.
 | `npm run check:host-global` | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed |
 | `npm run check:server` | No browser globals server-side; coverage and handlers agree both ways |
 | `npm run check:mirror` | The one copied upstream function still matches its original |
+| `npm run check:upstream` | `apps/sheets` still compiles and its own test suite still passes |
 | `npm run bench` / `bench:memory` | Scroll latency; resident memory per open workbook |
 
 ## Where things are
