@@ -55,6 +55,27 @@ matters: a host that hides a tab with `display: none` rather than unmounting it
 must say so, because a canvas in a hidden subtree measures zero and nothing
 resizes it back.
 
+### Commands
+
+A ref gives the host `save()`, `exportBytes()`, `exportCsv()`, `reload()` and
+`pendingEdits()`.
+
+```tsx
+const sheets = useRef<SheetsHandle>(null)
+
+// Save As is the host's flow with our bytes: the editor patches the workbook,
+// the host decides where the copy goes.
+async function saveAs() {
+  const { bytes, suggestedName } = await sheets.current!.exportBytes()
+  await picker.save(bytes, suggestedName)
+}
+```
+
+`exportBytes()` writes nothing. The document keeps its version and the editor
+keeps its unsaved edits — the copy carries them too. Add `onSaveAsRequest` to
+answer the editor's own ribbon Save As button, which produces the same bytes
+without anyone calling the handle.
+
 ## Serving it
 
 ```ts
@@ -90,8 +111,8 @@ decision someone writes down.
 | Command | What it protects |
 | --- | --- |
 | `npm run typecheck` | The whole renderer under the browser config. An un-threaded host call is a type error |
-| `npm test` | Prefetch correctness — never serves stale or partial data |
-| `npm run compat` | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip |
+| `npm test` | Prefetch correctness, export-slot lifetime, the save/Save As split |
+| `npm run compat` | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip. **Saves over what it reads** — serve a copy, never `web/fixtures` |
 | `npm run check:drift` | Undeclared changes outside `web/`, and upstream movement in watched files |
 | `npm run check:channels` | Channel names still match the preload. The compiler cannot see these |
 | `npm run check:host-global` | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed |
@@ -112,3 +133,4 @@ decision someone writes down.
 | `server/` | The Hono router, session registry, engine pool |
 | `src/host/` | The browser-side bridge: transport, coverage table, prefetch |
 | `src/embed/` | The mountable component and its host API |
+| `protocol.ts` | The short list of wire shapes that are ours, not upstream's |

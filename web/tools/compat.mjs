@@ -84,6 +84,17 @@ async function discoverCorpus() {
   }
   const { documentRoot } = await response.json()
   if (!documentRoot) throw new Error('server did not report its document root')
+  // This harness SAVES every workbook it checks, in place, through the server.
+  // Pointed at web/fixtures that overwrites the corpus -- and the second run
+  // then passes, because both sides are reading what the first run wrote.
+  // That is how a real fidelity difference can read as a clean gate, so refuse
+  // rather than warn.
+  if (resolve(documentRoot) === resolve(webRoot, 'fixtures')) {
+    throw new Error(
+      'the server is serving web/fixtures itself, and this harness saves over what it reads.\n' +
+        '  Serve a copy instead:  cp -R fixtures /tmp/corpus && npm run serve -- --dir /tmp/corpus',
+    )
+  }
   return documentRoot
 }
 

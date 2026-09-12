@@ -118,10 +118,75 @@ components, its SPA ships `frame-ancestors 'none'`, and each frame would carry
 another copy of the bundle. Worth remembering if the upstream change ever
 becomes unmaintainable.
 
+## Save As, and the imperative handle
+
+`SheetsHandle` is wired: `save()`, `exportBytes()`, `exportCsv()`, `reload()`
+and `pendingEdits()`, reached through a ref (React 19 passes one as a plain
+prop).
+
+Every command drives the renderer through **upstream's own `onMenuAction`**,
+repointed from the Electron native menu at the host (`src/host/commands.ts`,
+one bus per editor). That choice is the whole design:
+
+> Save As needs the pending edit journal, and the journal lives inside the
+> renderer. Collecting it is the several hundred lines of `save-actions.ts`
+> that walk the Univer state, batch the structural ops, and chunk the upload.
+> Driving the command the renderer already listens for costs nothing.
+> Reimplementing it host-side would be a second save path to keep correct
+> forever.
+
+COVERAGE gained a `host` status for this. `onMenuAction` had been `shell` — a
+permanent no-op — with a comment saying to repoint it at a web equivalent once
+one existed. This is that equivalent, and without a host it falls back to the
+no-op, so the standalone page is unchanged.
+
+### Save As does not save
+
+`exportBytes()` returns bytes and changes nothing. The server assembles the
+patched archive in its scratch directory, parks it behind a one-shot token, and
+`GET /export/:token` streams it once and deletes it. The document is not
+written, its version is not bumped, the sidecar session is not reopened, and
+**the journal stays pending** — the copy has the edits, and so does the editor.
+
+A GET rather than another `/invoke` channel because the payload is a file:
+base64 through the JSON endpoint would inflate a 30MB workbook by a third on
+both sides to move bytes a GET already moves. The bytes stay on disk until
+fetched rather than in a map, because a resident set that stays flat is the
+property this fork is being judged on.
+
+What the renderer receives is `{ canceled: true }` — upstream's own shape, and
+the accurate one, since nothing was saved *to this document*. It is also
+literally upstream's semantics for the CSV branch of Save As: *"the journal
+stays pending; the session keeps its identity (a copy semantics)"*. The
+`export` half is stripped by the bridge, so upstream's `.strict()` result
+schema stays satisfied on the only side that parses it.
+
+**The cost of that choice, stated plainly:** the renderer's status bar reads
+*"Save canceled."* after a Save As that succeeded. It is cosmetic and it is
+wrong. Fixing it means an upstream change — a result the renderer can tell
+apart from a cancel — which is not worth it for a status line while the host's
+own chrome is reporting the real outcome.
+
+### Who gets the bytes
+
+The ribbon's own Save As button is still there and a user can click it. It
+produces the same export, which arrives at the host as `onSaveAsRequest`.
+`exportBytes()` takes precedence when a caller is waiting. So a host that
+offers Save As only through its own chrome still answers the button that is
+already on screen, instead of doing nothing.
+
+### Fixed on the way past
+
+`HostTransportError` now carries the server's `detail`. The conflict event read
+`detail.currentVersion` off a field that was never populated, so every conflict
+reported an empty version — a banner that could say a conflict happened and
+nothing else.
+
+Unmounting an editor now closes its WebSocket. It did not before: every editor
+a host had ever mounted kept one open for the life of the page.
+
 ## What this does not yet cover
 
-- `exportBytes()` is declared and not implemented — it is the Save As path, and
-  it needs the server to return patched bytes instead of persisting them.
 - Theme: Papan has `dark` / `dim` / `light`; upstream has `light` / `dark` /
   `system`. `dim` has no mapping yet.
 - Locale: Papan ships `en`, `zh-CN`, `zh-TW`, `ms`; upstream has eleven with
@@ -130,5 +195,8 @@ becomes unmaintainable.
   selection events differ across versions and an event name that stops firing
   after an upgrade is exactly the silent breakage the Papan briefing warns this
   bridge is prone to. A subscription is better if a stable event exists.
+- Save As for a **read-only** session is refused, because a session is still
+  `canEdit: boolean`. Exporting a copy is exactly what Papan's `readcopy`
+  permission means, so this resolves with the permission lattice, not before.
 - Nothing here has run inside Papan. It runs inside a harness built to Papan's
   described constraints, which is a different and weaker claim.

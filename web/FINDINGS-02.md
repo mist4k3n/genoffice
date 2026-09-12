@@ -147,11 +147,43 @@ exactly and would lose fidelity silently wherever it did not.
 telling you to re-copy rather than reconcile by hand. An upstream PR exporting
 the function would delete the file.
 
+## Correction: the gate was measured on a dirty corpus
+
+This document previously reported `compat` as **14 passing, 0 failing**. That
+number was wrong, and the way it was wrong is worth keeping.
+
+`compat` saves every workbook it checks, in place, through the server. Run
+against a dev server pointed at `web/fixtures` itself, the first run overwrites
+the corpus — and the *second* run passes, because both the service and the
+baseline are now reading what the first run wrote. The clean gate was a second
+run.
+
+Against a **fresh copy** of the corpus the result is **11 passing, 3 failing**:
+
+```
+Book 1.xlsx    DIFF   entry lost: xl/calcChain.xml
+Book 4.xlsx    DIFF   entry lost: xl/calcChain.xml
+Book.xlsx      DIFF   entry lost: xl/calcChain.xml
+```
+
+The HTTP save drops `xl/calcChain.xml` where a directly-spawned engine keeps
+it. Verified to predate the Save As work: the same three fail identically at
+the commit before it.
+
+`calcChain` is a recalculation hint, not data — Excel rebuilds it — so this is
+a fidelity difference rather than data loss. It is still a real difference, and
+it is open.
+
+`npm run compat` now **refuses to run** against a server serving `web/fixtures`,
+because a harness that quietly destroys its own baseline is worth more as an
+error than as a caveat.
+
 ## Not done in this phase
 
 - **Save As.** It means "create a different document", which needs a
   document-create port. Refused with a 501 rather than silently overwriting the
-  document the user was branching from.
+  document the user was branching from. *(Done later: it is not a create, it is
+  an export. See FINDINGS-EMBED.md.)*
 - The other 33 channels, including `read-formulas`, `read-media`,
   `read-pivot-definition` and `recalc`.
 - **Decrypting** encrypted workbooks. They are now *detected* and answered with
