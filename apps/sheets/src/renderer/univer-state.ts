@@ -8,6 +8,7 @@ import { BorderType, LocalUndoRedoService, type IRange } from '@univerjs/core'
 import { SheetInterceptorService } from '@univerjs/sheets'
 
 import type {
+  DesktopApi,
   WorkbookFile,
   WorkbookPagePrintSettings,
   WorkbookPivotDefinition,
@@ -23,6 +24,10 @@ export type ActiveWorkbook = NonNullable<
 export type UniverWorksheet = NonNullable<ReturnType<ActiveWorkbook['getActiveSheet']>>
 
 export interface LazyWorkbookState {
+  /// The host bridge for this editor instance. Read this instead of
+  /// `window.desktopApi`: several editors can share one page, and a global
+  /// would point every one of them at the same document. See host-api.ts.
+  readonly api: DesktopApi
   readonly file: WorkbookFile
   readonly generation: number
   readonly loadedRanges: Map<string, IRange>

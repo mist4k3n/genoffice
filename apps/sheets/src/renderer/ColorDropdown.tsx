@@ -16,6 +16,7 @@ import { ColorPicker } from '@genoffice/ui'
 // translator is kept in sync on every language switch and re-renders arrive
 // with the host component
 import { t } from './i18n/locale'
+import { useHostApi } from './host-api'
 
 /// Portal wrapper for hosts inside Univer's float DOM (chart editor): the
 /// float container is transformed and clips overflow, which breaks the CSS
@@ -30,6 +31,7 @@ function PortalPop({
   readonly popRef: React.RefObject<HTMLDivElement | null>
   readonly children: React.ReactNode
 }): React.JSX.Element {
+
   useLayoutEffect(() => {
     const el = popRef.current
     if (!el) return
@@ -77,6 +79,7 @@ export function ColorDropdown({
   readonly split?: boolean
   readonly onPick: (hex: string | null) => void
 }): React.JSX.Element {
+  const hostApi = useHostApi()
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
@@ -92,7 +95,7 @@ export function ColorDropdown({
     // capture phase: the grid canvas stops mousedown propagation, so bubble-phase listeners never fire
     window.addEventListener('pointerdown', onDown, true)
     window.addEventListener('keydown', onKey)
-    const offChrome = window.desktopApi?.onChromePressed?.(() => setOpen(false))
+    const offChrome = hostApi?.onChromePressed?.(() => setOpen(false))
     return () => {
       window.removeEventListener('pointerdown', onDown, true)
       window.removeEventListener('keydown', onKey)

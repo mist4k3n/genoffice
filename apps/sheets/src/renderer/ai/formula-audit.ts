@@ -382,7 +382,7 @@ async function collectSheetFormulas(
   if (!meta) return { cells, complete: true }
   let result
   try {
-    result = await window.desktopApi.readWorkbookFormulas({
+    result = await state.api.readWorkbookFormulas({
       sessionId: state.file.sessionId,
       sheetId: sheet.id,
     })

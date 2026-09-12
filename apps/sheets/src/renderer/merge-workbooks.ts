@@ -14,7 +14,8 @@
 import { CellValueType, ICommandService } from '@univerjs/core'
 import type { ICellData, IRange, Nullable } from '@univerjs/core'
 import { AddWorksheetMergeCommand, InsertSheetCommand } from '@univerjs/sheets'
-import type { WorkbookFile } from '../shared/desktop-api'
+import type {
+  DesktopApi, WorkbookFile } from '../shared/desktop-api'
 import { t } from './i18n/locale'
 import type { LazyWorkbookState, UniverRuntime } from './univer-state'
 import { characterWidthToPixels, toUniverStyle, workbookStructureLocked } from './univer-sync'
@@ -26,6 +27,8 @@ const SET_COL_WIDTH_COMMAND = 'sheet.command.set-worksheet-col-width'
 const SET_ROW_HEIGHT_COMMAND = 'sheet.command.set-row-height'
 
 export interface MergeWorkbooksDeps {
+  /// Host bridge for the editor instance performing the merge. See host-api.ts.
+  api: DesktopApi
   runtime: UniverRuntime
   lazyWorkbookRef: { readonly current: LazyWorkbookState | null }
   setMessage: (message: string) => void
@@ -71,6 +74,7 @@ interface ImportedSheet {
 }
 
 async function readSourceSheet(
+  api: DesktopApi,
   file: WorkbookFile,
   sheet: WorkbookFile['sheets'][number],
 ): Promise<ImportedSheet> {
@@ -87,7 +91,7 @@ async function readSourceSheet(
     // poll until the chunk's rows are covered or the source stops indexing,
     // otherwise unindexed rows would be silently dropped.
     const deadline = Date.now() + 120_000
-    let result = await window.desktopApi.readWorkbookRange({
+    let result = await api.readWorkbookRange({
       sessionId: file.sessionId,
       sheetId: sheet.id,
       range: { startRow, endRow, startColumn: 0, endColumn: columns - 1 },
@@ -98,7 +102,7 @@ async function readSourceSheet(
     ) {
       if (Date.now() > deadline) throw new Error(t('appMergeWorkbooksFailed'))
       await new Promise((resolve) => setTimeout(resolve, 400))
-      result = await window.desktopApi.readWorkbookRange({
+      result = await api.readWorkbookRange({
         sessionId: file.sessionId,
         sheetId: sheet.id,
         range: { startRow, endRow, startColumn: 0, endColumn: columns - 1 },
@@ -203,7 +207,7 @@ export async function mergeSourcesIntoCurrent(
   deps: MergeWorkbooksDeps,
   sources: WorkbookFile[],
 ): Promise<MergeSourcesResult> {
-  const { runtime, setMessage } = deps
+  const { api, runtime, setMessage } = deps
   try {
     const workbook = runtime.univerAPI.getActiveWorkbook()
     if (!workbook) throw new Error(t('appMergeWorkbooksFailed'))
@@ -215,7 +219,7 @@ export async function mergeSourcesIntoCurrent(
     for (const file of sources) {
       for (const sheetMeta of file.sheets) {
         setMessage(t('appMergeWorkbooksReading', { file: file.name, sheet: sheetMeta.name }))
-        const imported = await readSourceSheet(file, sheetMeta)
+        const imported = await readSourceSheet(api, file, sheetMeta)
         const name = dedupeSheetName(imported.name, taken)
         taken.add(name)
         sheetNames.push(name)
@@ -289,7 +293,7 @@ export async function mergeSourcesIntoCurrent(
     return { importedSheets, files: sources.length, sheetNames }
   } finally {
     for (const file of sources) {
-      void window.desktopApi.closeWorkbook(file.sessionId).catch(() => {})
+      void api.closeWorkbook(file.sessionId).catch(() => {})
     }
   }
 }
@@ -303,7 +307,7 @@ export async function mergeWorkbooksIntoCurrent(deps: MergeWorkbooksDeps): Promi
   }
   setMessage(t('appMergeWorkbooksPicking'))
   try {
-    const sources = await window.desktopApi.selectWorkbooksForMerge()
+    const sources = await deps.api.selectWorkbooksForMerge()
     if (!sources || sources.length === 0) {
       setMessage(t('appOpenCanceled'))
       return
@@ -322,7 +326,7 @@ export async function mergeAttachedWorkbooks(
   if (workbookStructureLocked(deps.lazyWorkbookRef.current)) {
     throw new Error(t('appMergeWorkbooksLocked'))
   }
-  const sources = await window.desktopApi.openWorkbooksForMerge(paths)
+  const sources = await deps.api.openWorkbooksForMerge(paths)
   if (!sources || sources.length === 0) throw new Error(t('appMergeWorkbooksFailed'))
   return mergeSourcesIntoCurrent(deps, sources)
 }

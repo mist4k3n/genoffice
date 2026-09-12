@@ -23,7 +23,7 @@ export async function createAiDocument(
     request.type === 'md' ||
     request.type === 'html'
   ) {
-    const result = await window.desktopApi.createDocument(request)
+    const result = await (ctx.lazyWorkbookRef.current?.api ?? window.desktopApi).createDocument(request)
     if (!result.ok) return { ok: false, error: result.error ?? 'creating the document failed' }
     return {
       ok: true,
@@ -61,7 +61,7 @@ export async function createAiDocument(
   }
   const sheetName = sheet.getSheetName()
   const title = request.title?.trim() || sheetName
-  const result = await window.desktopApi.createDocument({
+  const result = await (ctx.lazyWorkbookRef.current?.api ?? window.desktopApi).createDocument({
     type: request.type,
     title,
     content,

@@ -19,6 +19,7 @@ import fileVideoIcon from '../assets/file-video.png'
 import fileVoiceIcon from '../assets/file-voice.png'
 import fileDocumentIcon from '../assets/file-document.png'
 import fileGeneralIcon from '../assets/file-general.png'
+import { useHostApi } from '../host-api'
 
 /** Clipboard bitmap MIME → attachment extension (matches the main process's
  * ATTACHMENT_IMAGE_EXTS) */
@@ -281,6 +282,7 @@ export function AiChatPanel({
   readonly onExpand: () => void
   readonly onCollapse: () => void
 }): React.JSX.Element {
+  const hostApi = useHostApi()
   const { t, lang } = useI18n()
   // Panel chrome follows the UI language; message text follows its own content (dir=auto below)
   const isRtl = lang === 'ar' || lang === 'he'
@@ -317,7 +319,7 @@ export function AiChatPanel({
     for (const a of wanted) {
       if (!ATTACHMENT_IMAGE_EXTS.has(a.ext) || previewRequestedRef.current.has(a.path)) continue
       previewRequestedRef.current.add(a.path)
-      void window.desktopApi
+      void hostApi
         .readAttachmentImage(a.path)
         .then((r) => {
           if (!previewRequestedRef.current.has(a.path)) return // removed while the read was in flight
@@ -466,7 +468,7 @@ export function AiChatPanel({
     e.stopPropagation()
     setDragOver(false)
     const paths = Array.from(e.dataTransfer.files)
-      .map((f) => window.desktopApi.getPathForFile(f))
+      .map((f) => hostApi.getPathForFile(f))
       .filter(Boolean)
     if (paths.length > 0) onAddAttachmentPaths(paths)
   }
@@ -476,7 +478,7 @@ export function AiChatPanel({
   const onPasteFiles = (files: File[]): void => {
     const paths: string[] = []
     for (const f of files) {
-      const p = window.desktopApi.getPathForFile(f)
+      const p = hostApi.getPathForFile(f)
       if (p) {
         paths.push(p)
         continue
@@ -633,7 +635,7 @@ export function AiChatPanel({
                 {entry.loginRequired && (
                   <button
                     className="ai-login-btn"
-                    onClick={() => void window.desktopApi.aiGskLogin()}
+                    onClick={() => void hostApi.aiGskLogin()}
                   >
                     {t('aiGskLoginBtn')}
                   </button>

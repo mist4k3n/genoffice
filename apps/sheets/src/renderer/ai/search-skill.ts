@@ -1,3 +1,4 @@
+import type { DesktopApi } from '../../shared/desktop-api'
 import type { AgentSkill } from '@genoffice/agent-core'
 import { t } from '../i18n/locale'
 
@@ -11,7 +12,7 @@ const SEARCH_SYSTEM_PROMPT = `## Web search
 - When you need up-to-date information, data, or facts beyond the workbook, use web_search; never fabricate numbers from memory.
 - When writing search results into the workbook, you must attribute the data source (load_guide: data-attribution first).`
 
-export function createSearchSkill(): AgentSkill {
+export function createSearchSkill(api: DesktopApi): AgentSkill {
   return {
     id: 'search',
     systemPrompt: SEARCH_SYSTEM_PROMPT,
@@ -38,7 +39,7 @@ export function createSearchSkill(): AgentSkill {
       if (!query) {
         return { output: 'query must not be empty', isError: true, summary: t('aiToolWebSearch') }
       }
-      const r = await window.desktopApi.webSearch(query, Number(call.input.maxResults) || 6)
+      const r = await api.webSearch(query, Number(call.input.maxResults) || 6)
       // a backend failure must not read as "no results" — the model would fabricate conclusions
       if (r.method === 'error') {
         return {

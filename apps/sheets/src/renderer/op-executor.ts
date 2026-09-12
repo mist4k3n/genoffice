@@ -1,3 +1,4 @@
+import type { DesktopApi } from '../shared/desktop-api'
 /**
  * Applies a planned batch of workbook operations to the live Univer workbook:
  * prechecks, one undo item per batch, per-op facade calls and journal
@@ -173,6 +174,7 @@ const SHEET_LIFECYCLE_OPS = new Set([
  * loop, so a slow disk read can never interleave with edits.
  */
 export async function prefetchOpImages(
+  api: DesktopApi,
   ops: readonly PlannedOp[],
 ): Promise<Map<string, LoadedImage>> {
   const imageData = new Map<string, LoadedImage>()
@@ -182,7 +184,7 @@ export async function prefetchOpImages(
     let mediaType: string
     // file:// = a BYOK-generated image in the local store (fetchImage resolves it)
     if (/^(https?|file):\/\//i.test(op.path)) {
-      const fetched = await window.desktopApi.fetchImage(op.path)
+      const fetched = await api.fetchImage(op.path)
       if (!fetched) throw new Error(t('appCannotReadImage'))
       // Trust the bytes, not the Content-Type header the handler echoed
       const sniffed = sniffImageMime(fetched.base64)
@@ -192,7 +194,7 @@ export async function prefetchOpImages(
       dataUrl = `data:${sniffed};base64,${fetched.base64}`
       mediaType = sniffed
     } else {
-      const image = await window.desktopApi.readLocalImage({ path: op.path })
+      const image = await api.readLocalImage({ path: op.path })
       dataUrl = `data:${image.mediaType};base64,${image.base64}`
       mediaType = image.mediaType
     }
@@ -361,7 +363,7 @@ async function applyChangePlanNow(
   const notices: string[] = []
   let imageData: Map<string, LoadedImage>
   try {
-    imageData = await prefetchOpImages(plannedOps)
+    imageData = await prefetchOpImages(state.api, plannedOps)
     const spanError = await precheckStructuralDeletes(state, workbook, plannedOps)
     if (spanError) throw new Error(options.userFacing ? t('appDeleteSpanFormulas') : spanError)
   } catch (error: unknown) {

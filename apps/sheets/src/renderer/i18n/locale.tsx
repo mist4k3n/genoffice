@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createI18n, htmlLang, type Lang, type Params } from '@genoffice/i18n'
 import { strings } from './strings'
+import { useHostApi } from '../host-api'
 
 const translate = createI18n(strings)
 
@@ -73,10 +74,11 @@ export const DATE_LOCALES: Record<Lang, string> = {
 const LocaleContext = createContext<Lang>('zh')
 
 export function LocaleProvider({ initial, children }: { initial: Lang; children: ReactNode }) {
+  const hostApi = useHostApi()
   const [lang, setLang] = useState<Lang>(initial)
   useEffect(
     () =>
-      window.desktopApi.onLanguageChanged((next) => {
+      hostApi.onLanguageChanged((next) => {
         setModuleLang(next)
         document.documentElement.lang = htmlLang(next)
         setLang(next)

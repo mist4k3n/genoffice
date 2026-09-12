@@ -1348,7 +1348,7 @@ export async function structuralDeleteFormulaError(
     if (fileSheetIds.has(sheetId)) {
       let result
       try {
-        result = await window.desktopApi.readWorkbookFormulas({
+        result = await state.api.readWorkbookFormulas({
           sessionId: state.file.sessionId,
           sheetId,
         })

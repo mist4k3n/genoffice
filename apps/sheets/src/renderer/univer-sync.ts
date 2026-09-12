@@ -1336,7 +1336,7 @@ export async function activateFormulaClosure(
       if (lazyWorkbookRef.current !== state) return
       let result
       try {
-        result = await window.desktopApi.readWorkbookFormulas({
+        result = await state.api.readWorkbookFormulas({
           sessionId: state.file.sessionId,
           sheetId: sheet.id,
         })
@@ -1381,7 +1381,7 @@ export async function activateFormulaClosure(
     for (const range of closureFetchRanges(cells)) {
       let result
       try {
-        result = await window.desktopApi.readWorkbookRange({
+        result = await state.api.readWorkbookRange({
           sessionId: state.file.sessionId,
           sheetId,
           range,
@@ -1725,7 +1725,7 @@ export async function readSheetRangeMapped(
       startRow += batchRows
     ) {
       const endRow = Math.min(startRow + batchRows - 1, screenRange.endRow)
-      const batch = await window.desktopApi.readWorkbookRange({
+      const batch = await state.api.readWorkbookRange({
         sessionId: state.file.sessionId,
         sheetId,
         range: { ...screenRange, startRow, endRow },
@@ -1742,7 +1742,7 @@ export async function readSheetRangeMapped(
     if (!raw) {
       // Degenerate empty range (endRow < startRow): let the sidecar answer,
       // preserving the pre-batching behavior for out-of-contract input.
-      raw = await window.desktopApi.readWorkbookRange({
+      raw = await state.api.readWorkbookRange({
         sessionId: state.file.sessionId,
         sheetId,
         range: screenRange,
@@ -1778,7 +1778,7 @@ export async function readSheetRangeMapped(
   let raw: WorkbookRangeResult | null = null
   for (let startRow = fileRange.startRow; startRow <= fileRange.endRow; startRow += batchRows) {
     const endRow = Math.min(startRow + batchRows - 1, fileRange.endRow)
-    const batch = await window.desktopApi.readWorkbookRange({
+    const batch = await state.api.readWorkbookRange({
       sessionId: state.file.sessionId,
       sheetId,
       range: { ...fileRange, startRow, endRow },
@@ -2234,7 +2234,7 @@ async function recalcFormulaCellKeys(
 ): Promise<ReadonlySet<number> | null> {
   const cached = state.recalc.formulaCells.get(sheetId)
   if (cached) return cached
-  const result = await window.desktopApi.readWorkbookFormulas({
+  const result = await state.api.readWorkbookFormulas({
     sessionId: state.file.sessionId,
     sheetId,
   })
@@ -2318,7 +2318,7 @@ async function runFormulaRecalc(
       return
     }
     const windowComplete = reads.length === closureFetchRanges(keys).length
-    const result = await window.desktopApi.recalcWorkbook({
+    const result = await state.api.recalcWorkbook({
       sessionId: state.file.sessionId,
       edits,
       reads: reads.map((range) => ({ sheetId, range })),
@@ -4864,7 +4864,7 @@ async function preloadEntireWorkbookInner(
       }
       let result
       try {
-        result = await window.desktopApi.readWorkbookRange({
+        result = await state.api.readWorkbookRange({
           sessionId: state.file.sessionId,
           sheetId,
           range,
@@ -4877,7 +4877,7 @@ async function preloadEntireWorkbookInner(
         ) {
           await new Promise((resolve) => setTimeout(resolve, 150))
           guard += 1
-          result = await window.desktopApi.readWorkbookRange({
+          result = await state.api.readWorkbookRange({
             sessionId: state.file.sessionId,
             sheetId,
             range,
@@ -5943,7 +5943,7 @@ async function readCachedRange(
   const deadline = Date.now() + 15_000
   try {
     for (;;) {
-      const result = await window.desktopApi.readWorkbookRange({
+      const result = await state.api.readWorkbookRange({
         sessionId: state.file.sessionId,
         sheetId,
         range,

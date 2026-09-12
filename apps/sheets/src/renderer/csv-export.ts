@@ -144,7 +144,7 @@ export async function handleExportCsv(ctx: CsvExportContext, targetPath?: string
       return
     }
     const baseName = (state?.file.name ?? 'Book1').replace(/\.[^.]+$/, '')
-    const result = await window.desktopApi.exportCsv({
+    const result = await (state?.api ?? window.desktopApi).exportCsv({
       fileName: `${baseName}.csv`,
       content,
       hasFormulas: sheetHasFormulas(sheet),

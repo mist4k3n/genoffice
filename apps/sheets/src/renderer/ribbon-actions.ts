@@ -20,6 +20,7 @@ import { nextSheetName } from './op-executor'
 import { transposeChartSeries, type ChartSeriesVisualState } from '../domain/chart-visual'
 import { applyFlashFillTemplate, inferFlashFillTemplate } from '../domain/flash-fill'
 import type {
+  DesktopApi,
   WorkbookChartEdit,
   WorkbookStyleEdit,
   WorkbookVisualObject,
@@ -96,6 +97,8 @@ import type { ChartDialogKind, ChartEditData, ShapeEditChanges } from './Workboo
 
 /** The App refs/state the ribbon dispatcher needs; built fresh per call. */
 export interface RibbonCommandContext {
+  /// Host bridge for this editor instance. See host-api.ts.
+  api: DesktopApi
   univerRef: { readonly current: UniverRuntime | null }
   lazyWorkbookRef: { current: LazyWorkbookState | null }
   /// Imported workbooks: run workbook DSL ops through the shared executor
@@ -1481,6 +1484,7 @@ export function handleRibbonCommand(ctx: RibbonCommandContext, command: string):
         const runtime = ctx.univerRef.current
         if (!runtime) return
         void mergeWorkbooksIntoCurrent({
+          api: ctx.api,
           runtime,
           lazyWorkbookRef: ctx.lazyWorkbookRef,
           setMessage: ctx.setMessage,

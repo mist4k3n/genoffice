@@ -1,3 +1,4 @@
+import type { DesktopApi } from '../../shared/desktop-api'
 import type { AgentSkill } from '@genoffice/agent-core'
 import { t } from '../i18n/locale'
 
@@ -24,7 +25,10 @@ ${PLACEMENT_PROMPT}`
  * BYOK media key); the loop re-reads tools and systemPrompt before every
  * request, so generate_image appears and disappears without rebuilding the loop.
  */
-export function createImageSkill(imageGen: () => boolean = () => true): AgentSkill {
+export function createImageSkill(
+  api: DesktopApi,
+  imageGen: () => boolean = () => true,
+): AgentSkill {
   const allTools = [
     {
       name: 'image_search',
@@ -79,7 +83,7 @@ export function createImageSkill(imageGen: () => boolean = () => true): AgentSki
             summary: t('aiToolImageSearch'),
           }
         }
-        const result = await window.desktopApi.imageSearch(
+        const result = await api.imageSearch(
           query,
           Number(call.input.maxResults) || 8,
         )
@@ -108,7 +112,7 @@ export function createImageSkill(imageGen: () => boolean = () => true): AgentSki
           return { output: 'prompt must not be empty', isError: true, summary: t('aiToolGenImage') }
         }
         const aspectRatio = String(call.input.aspectRatio ?? '').trim()
-        const result = await window.desktopApi.generateImage({
+        const result = await api.generateImage({
           prompt,
           ...(aspectRatio ? { aspectRatio } : {}),
         })

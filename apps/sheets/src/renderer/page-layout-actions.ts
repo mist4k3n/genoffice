@@ -1,3 +1,4 @@
+import type { DesktopApi } from '../shared/desktop-api'
 /**
  * Page Layout commands, header/footer, freeze journaling and PDF export.
  * Extracted from App.tsx; the App component passes a PageLayoutContext built
@@ -367,7 +368,7 @@ export async function handleExportPdf(ctx: PageLayoutContext): Promise<void> {
     const baseName = (state?.file.name ?? 'Book1').replace(/\.[^.]+$/, '')
     ctx.setMessage(t('appPdfRendering'))
     const pictures = state
-      ? await loadHeaderFooterPictures(state.file.sessionId, setup.headerFooterPictures)
+      ? await loadHeaderFooterPictures(state.api, state.file.sessionId, setup.headerFooterPictures)
       : new Map<string, HeaderFooterPictureImage>()
     const payload = buildSheetPrintPayload(
       worksheet as unknown as PrintWorksheet,
@@ -376,7 +377,7 @@ export async function handleExportPdf(ctx: PageLayoutContext): Promise<void> {
       worksheet.getSheetName(),
       pictures,
     )
-    const result = await window.desktopApi.exportPdf(payload)
+    const result = await (state?.api ?? window.desktopApi).exportPdf(payload)
     ctx.setMessage(
       result.canceled ? t('appPdfCanceled') : t('appPdfExported', { path: result.path }),
     )
@@ -390,6 +391,7 @@ export async function handleExportPdf(ctx: PageLayoutContext): Promise<void> {
 /// picture that fails to load is left out — its `&G` then prints nothing,
 /// which is also what Excel shows for a slot without a picture.
 async function loadHeaderFooterPictures(
+  api: DesktopApi,
   sessionId: string,
   slots: readonly HeaderFooterPictureSlot[],
 ): Promise<Map<string, HeaderFooterPictureImage>> {
@@ -397,7 +399,7 @@ async function loadHeaderFooterPictures(
   await Promise.all(
     slots.map(async (slot) => {
       try {
-        const media = await window.desktopApi.readWorkbookMedia({ sessionId, visualId: slot.id })
+        const media = await api.readWorkbookMedia({ sessionId, visualId: slot.id })
         const dataUrl = isMetafileMime(media.mediaType)
           ? await metafileToDataUrl(base64ToBytes(media.base64), media.mediaType)
           : `data:${media.mediaType};base64,${media.base64}`

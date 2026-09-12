@@ -257,7 +257,7 @@ export async function handleSave(
     // hatch unreachable. Streamed sessions that insist on CSV still get the
     // message (and are asked again next time instead of being remembered).
     if (!confirmedCsvSaves.has(csvPath)) {
-      const choice = await window.desktopApi.confirmCsvSave()
+      const choice = await state.api.confirmCsvSave()
       if (choice === 'cancel') {
         ctx.setMessage(t('appSaveCanceled'))
         return
@@ -304,7 +304,7 @@ export async function handleSave(
   // chunks first; the request then references the transfer instead.
   let staged: StagedEdits
   try {
-    staged = await stageEditsForSave(window.desktopApi, state.file.sessionId, edits)
+    staged = await stageEditsForSave(state.api, state.file.sessionId, edits)
   } catch (error: unknown) {
     if (mode === 'recovery') return
     const message = stripIpcErrorWrapper(error instanceof Error ? error.message : '')
@@ -346,9 +346,9 @@ export async function handleSave(
   if (mode === 'recovery') {
     // Best-effort; a failure only means this tick's copy is skipped — but an
     // unconsumed transfer must not sit in main-process memory until expiry.
-    await window.desktopApi.writeWorkbookRecovery(payload).catch(async () => {
+    await state.api.writeWorkbookRecovery(payload).catch(async () => {
       await abortStagedEditsTransfer(
-        window.desktopApi,
+        state.api,
         state.file.sessionId,
         staged.editsTransferId,
       )
@@ -358,7 +358,7 @@ export async function handleSave(
   }
   try {
     ctx.setMessage(t('appSavingEdits', { count: total }))
-    const result = await window.desktopApi.saveWorkbookEdits({
+    const result = await state.api.saveWorkbookEdits({
       sessionId: state.file.sessionId,
       mode,
       ...(restoreWriteBack ? { restoreWriteBack: true } : {}),
@@ -433,7 +433,7 @@ export async function handleSave(
     // carry undo history across them (and clears any stale stash).
     stashUndoCarry(null)
     try {
-      const second = await window.desktopApi.saveWorkbookEdits({
+      const second = await state.api.saveWorkbookEdits({
         sessionId: result.file.sessionId,
         mode: 'save',
         edits: [],
@@ -488,7 +488,7 @@ export async function handleSave(
   } catch (error: unknown) {
     // The save may have failed before consuming the chunked transfer (e.g.
     // request validation); freeing it is a no-op when it was consumed.
-    await abortStagedEditsTransfer(window.desktopApi, state.file.sessionId, staged.editsTransferId)
+    await abortStagedEditsTransfer(state.api, state.file.sessionId, staged.editsTransferId)
     const message = stripIpcErrorWrapper(error instanceof Error ? error.message : '')
     const failed = localizeSaveError(message) ?? (message || t('appSaveFailed'))
     ctx.setMessage(failed)

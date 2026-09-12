@@ -393,7 +393,7 @@ export async function aggregateWorkbookRange(
       if (filledAreaInRange(fillBands, batchBounds) === rangeCellCount(batchBounds)) continue
       let result
       try {
-        result = await window.desktopApi.readWorkbookRange({
+        result = await state.api.readWorkbookRange({
           sessionId: state.file.sessionId,
           sheetId,
           range: batchBounds,

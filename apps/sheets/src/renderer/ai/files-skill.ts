@@ -1,5 +1,6 @@
 import type { AgentSkill } from '@genoffice/agent-core'
-import type { AttachmentMeta } from '../../shared/desktop-api'
+import type {
+  DesktopApi, AttachmentMeta } from '../../shared/desktop-api'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/desktop-api'
 import { t } from '../i18n/locale'
 
@@ -25,7 +26,10 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`
 }
 
-export function createFilesSkill(getAttachments: () => readonly AttachmentMeta[]): AgentSkill {
+export function createFilesSkill(
+  api: DesktopApi,
+  getAttachments: () => readonly AttachmentMeta[],
+): AgentSkill {
   return {
     id: 'files',
     systemPrompt: FILES_SYSTEM_PROMPT,
@@ -77,7 +81,7 @@ export function createFilesSkill(getAttachments: () => readonly AttachmentMeta[]
         }
       }
       const offset = Math.max(0, Number(call.input.offset) || 0)
-      const result = await window.desktopApi.readAttachment(att.path, offset, READ_CHUNK_CHARS)
+      const result = await api.readAttachment(att.path, offset, READ_CHUNK_CHARS)
       if (!result.ok) {
         return {
           output: result.error ?? 'Read failed',

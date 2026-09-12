@@ -23,6 +23,7 @@ import { VisualDeleteButton } from './VisualDeleteButton'
 import { shouldShowVisualDeleteButton } from './visual-delete-button'
 import type { WorkbookChartEdit, WorkbookFile, WorkbookVisualObject } from '../shared/desktop-api'
 import { shapeRunFontSize, shapeTextOverflowClass, shapeTextScaleStyle } from './shape-text-scale'
+import { useHostApi } from './host-api'
 
 type UniverRuntime = ReturnType<typeof createUniver>
 type ActiveWorkbook = NonNullable<ReturnType<UniverRuntime['univerAPI']['getActiveWorkbook']>>
@@ -401,6 +402,7 @@ function Sparkline({
   readonly color?: string | undefined
   readonly negativeColor?: string | undefined
 }): React.JSX.Element {
+
   const stroke = color ?? '#376092'
   const negative = negativeColor ?? '#d00000'
   const width = 100
@@ -1472,13 +1474,14 @@ function useWorkbookMediaUrl(
   sessionId: string | undefined,
   visualId: string,
 ): { url: string | null; unavailable: boolean } {
+  const hostApi = useHostApi()
   const [url, setUrl] = useState<string | null>(null)
   const [unavailable, setUnavailable] = useState(false)
 
   useEffect(() => {
     if (sessionId === undefined) return
     let isCurrent = true
-    void window.desktopApi
+    void hostApi
       .readWorkbookMedia({ sessionId, visualId })
       .then(async (media) => {
         const next = isMetafileMime(media.mediaType)
