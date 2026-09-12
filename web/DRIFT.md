@@ -30,11 +30,14 @@ Baseline upstream SHA: `d2b898f`
 
 ## Local patches
 
-None — no upstream file is modified.
+**One change is carried outside `web/`** — see
+[UPSTREAM-CHANGES.md](./UPSTREAM-CHANGES.md), which is the authority. It is
+declared in `upstream-changes.json`, and `npm run check:drift` fails on anything
+undeclared.
 
-| Patch | Reason | Written against | Upstream PR |
+| Change | Files | Reason | Upstream PR |
 | --- | --- | --- | --- |
-| _(none)_ | | | |
+| Host bridge resolved per editor instance instead of `window.desktopApi` | 23, all under `apps/sheets/src/renderer/` | One browser page holds several documents. With a global, two editors both addressed whichever document claimed it last — measured | not filed; additive, desktop behaviour unchanged |
 
 ## Mirrored implementations
 
@@ -55,7 +58,7 @@ upstream original and fails when it changes.
 | Sidecar protocol accepting bytes instead of a `PathBuf` | 1 | not filed | phase 05, only if plaintext must never touch disk |
 | `onExit` callback on `XlsxSidecarClient` | 1 | not filed | nothing. Would delete the pid-polling in `web/server/sidecar/pool.ts` — see `FINDINGS-02.md` |
 | Export `writeWorkbookTo` from `sheets-main.ts` | 1 | not filed | nothing. Would delete `web/server/channels/save-plan.ts`, the fork's only mirrored implementation |
-| Pass the host API to `App` instead of reading `window.desktopApi` | 1 | not filed | **multi-document embedding only.** The container-id half was solved in `web/` (see `FINDINGS-EMBED.md`); this half cannot be, because calls leave at times no ordering controls. Without it, a second editor on a different document is refused. Additive; no desktop behaviour changes |
+| Pass the host API to `App` instead of reading `window.desktopApi` | 1 | **implemented locally** — see UPSTREAM-CHANGES.md | filing it upstream would retire the fork's only local change |
 
 ## Rebase runbook
 
@@ -66,6 +69,7 @@ cd web && npm run typecheck       # method-level contract drift surfaces here
 npm run check:channels            # channel-level drift the compiler cannot see
 npm run check:server              # server purity + coverage agreement
 npm run check:mirror              # mirrored implementations still match upstream
+npm run check:host-global         # no stray window.desktopApi reads crept back
 npm run check:drift               # watched-file diff report
 npm run spike                     # smoke: does the shell still render?
 ```

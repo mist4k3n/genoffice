@@ -1,10 +1,14 @@
 # Embedding the spreadsheet in a host application
 
-Status: **the component works; one document at a time.** A single editor mounts
-into a host React tree, drives a real document, and reports everything the host
-needs. Tab switching works at ~450ms. Two editors on *different* documents are
-refused with an explanatory error rather than silently showing one document's
-data in the other's tab.
+Status: **multi-document works.** Several editors mount into a host React tree,
+each on its own document, each reporting its own dirty state, saves and
+selection. Switching tabs no longer remounts anything.
+
+Getting there took one deliberate upstream change — the host bridge is now
+per-instance rather than a `window` global — recorded in
+[UPSTREAM-CHANGES.md](./UPSTREAM-CHANGES.md). The container-id half needed no
+upstream change; the sections below record which approaches failed and why,
+because the failures are the useful part.
 
 ```sh
 cd web
@@ -70,9 +74,9 @@ any passive effect, so two editors mounting together both claim and only then
 both call `createUniver`; the second claim wins and the first resolves the wrong
 element. An editor now waits for the previous one's grid before rendering.
 
-### The host API: cannot be fixed here
+### The host API: required the upstream change
 
-Ownership routing was tried and **measured to fail**: with two editors on
+Ownership routing was tried first and **measured to fail**: with two editors on
 different documents, *both loaded the same one*.
 
 The reason is structural. The document load is not part of mounting — the
@@ -81,29 +85,17 @@ read, a save) leaves at a time nobody controls. Whoever owns the API then
 answers. No ordering trick fixes it, because a call has no way to say which
 React tree it came from.
 
-So a second editor on a **different** document is refused outright:
+Until it was fixed, a second editor on a different document was refused
+outright, because showing a user someone else's spreadsheet in a tab labelled
+with their filename is far worse than showing them an error.
 
-```
-Cannot open "gamma-sales.xlsx" while "acme-budget.xlsx" is open in this page:
-the renderer reads a single global host API, so both editors would share one
-document.
-```
+`App` now takes the bridge as a prop. Verified in the harness with two
+documents mounted together: each loads its own file, selections are reported
+per document (`Budget!A1` and `Sales!A1`), and there are no errors.
 
-Showing a user someone else's spreadsheet in a tab labelled with their filename
-is far worse than showing them an error. Two editors on the *same* document are
-allowed — they share a session, which is what they would do anyway.
-
-### What a host does today, measured
-
-Mount the active document only. A tab switch is a remount:
-
-```
-switch → grid ready:  515ms, 433ms, 466ms, 419ms
-```
-
-**~450ms per tab switch**, with each editor loading its own document
-(`Budget!A1` and `Sales!A1` respectively) and no errors. Unsaved work is not
-lost — it lives in the server session — but scroll position and selection are.
+For reference, the previous fallback — mounting only the active tab — cost
+**~450ms per switch** (515 / 433 / 466 / 419ms), since every switch was a full
+remount and reopen. That is the latency the upstream change removes.
 
 ### Two bugs found building it
 
@@ -117,12 +109,14 @@ neither was visible in review:
 - An editor that unmounted during start-up held the mount queue for its full
   timeout, turning every tab switch into a twenty-second wait.
 
-### If true multi-document is wanted
+### The option not taken
 
-Either pass the host API to `App` instead of reading a global — a small
-additive upstream change, tracked in `DRIFT.md` — or give each editor its own
-iframe, since a frame has its own realm and therefore its own globals, at the
-cost of a second copy of the bundle.
+An **iframe per editor** also works — verified — because a frame has its own
+realm and therefore its own globals, and it needs no upstream change at all. It
+was rejected in favour of the in-page component: Papan embeds editors as React
+components, its SPA ships `frame-ancestors 'none'`, and each frame would carry
+another copy of the bundle. Worth remembering if the upstream change ever
+becomes unmaintainable.
 
 ## What this does not yet cover
 

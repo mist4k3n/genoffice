@@ -1,0 +1,114 @@
+# GenOffice Sheets on the web
+
+Serves the GenOffice Sheets renderer in a browser, backed by a Hono router that
+speaks to the same Rust spreadsheet engine the desktop app uses.
+
+Built to be embedded in [Papan](./PAPAN-BRIEFING.md) as a React component,
+replacing its Collabora deployment.
+
+```sh
+cd web && npm install
+
+cp -r fixtures /tmp/corpus            # the save checks mutate documents
+npm run serve -- --dir /tmp/corpus    # terminal 1 — API + engine on :5274
+npm run dev                           # terminal 2 — the app on :5273
+# http://localhost:5273/?doc=acme-budget.xlsx
+
+npm run harness                       # the embedding harness instead
+# http://localhost:5273/harness.html?docs=acme-budget.xlsx,gamma-sales.xlsx
+```
+
+## How it fits together
+
+```
+browser                          server (your Hono app)
+─────────────────────────        ──────────────────────────────
+<SheetsEditor documentId … />    createSheetsRouter({ storage, identify })
+  upstream renderer, unmodified    ├─ POST /invoke/:channel
+  host bridge per instance ────▶   ├─ GET  /events   (WebSocket pushes)
+                                   ├─ session registry + quotas
+                                   └─ pool of xlsx-engine processes
+```
+
+The renderer is imported from `apps/sheets`, not copied. Everything it used to
+ask Electron for now goes over HTTP; `web/src/host/coverage.ts` is the table of
+all 59 methods and is typed `Record<keyof DesktopApi, …>`, so an upstream
+contract change is a compile error naming the method.
+
+## Embedding
+
+```tsx
+<SheetsEditor
+  documentId={fileId}
+  apiBase="/sheets"
+  theme="dark"
+  visible={isActiveTab}
+  onDirtyChange={(n) => setDirty(n > 0)}
+  onSaved={(e) => toast(`Saved — rewrote ${e.touchedEntries.length} part(s)`)}
+  onConflict={(e) => showConflictBanner(e.currentVersion)}
+  onSelectionChange={(s) => setAiContext(s)}
+/>
+```
+
+Several editors may be mounted at once, each on its own document. `visible`
+matters: a host that hides a tab with `display: none` rather than unmounting it
+must say so, because a canvas in a hidden subtree measures zero and nothing
+resizes it back.
+
+## Serving it
+
+```ts
+app.route('/sheets', createSheetsRouter({
+  storage,                 // head / get / put with version tokens
+  identify: (req) => …,    // { userId, tenantId, documentId, canEdit }
+  secrets,                 // optional: passwords for encrypted workbooks
+}).app)
+```
+
+`StorageAdapter` may also offer `localPath()`. Where content is stored
+immutably — content-addressed blobs, say — the engine reads storage directly and
+no per-session snapshot is written at all.
+
+## This fork modifies upstream. Read this before you edit.
+
+The fork keeps its delta under `web/` so `git rebase upstream/main` stays clean.
+**One deliberate exception exists**, and it is documented in
+[UPSTREAM-CHANGES.md](./UPSTREAM-CHANGES.md): the renderer's host bridge is
+per-editor-instance rather than a `window` global, so one page can hold several
+documents.
+
+The invariant is therefore not "nothing outside `web/` changes" but:
+
+> Every file outside `web/` that differs is declared in `upstream-changes.json`
+> and justified in `UPSTREAM-CHANGES.md`.
+
+`npm run check:drift` fails on anything undeclared. Adding to that list is a
+decision someone writes down.
+
+## Checks
+
+| Command | What it protects |
+| --- | --- |
+| `npm run typecheck` | The whole renderer under the browser config. An un-threaded host call is a type error |
+| `npm test` | Prefetch correctness — never serves stale or partial data |
+| `npm run compat` | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip |
+| `npm run check:drift` | Undeclared changes outside `web/`, and upstream movement in watched files |
+| `npm run check:channels` | Channel names still match the preload. The compiler cannot see these |
+| `npm run check:host-global` | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed |
+| `npm run check:server` | No browser globals server-side; coverage and handlers agree both ways |
+| `npm run check:mirror` | The one copied upstream function still matches its original |
+| `npm run bench` / `bench:memory` | Scroll latency; resident memory per open workbook |
+
+## Where things are
+
+| | |
+| --- | --- |
+| `PLAN.md` | The phase plan, and the reasoning behind the architecture |
+| `UPSTREAM-CHANGES.md` | **Every change outside `web/`, and why** |
+| `DRIFT.md` | Watched upstream files; what breaks when each moves |
+| `FINDINGS-0x.md` | What each phase actually established, including what failed |
+| `FINDINGS-EMBED.md` | Embedding: the singletons, and how far each could be fixed |
+| `FINDINGS-PAPAN.md` | What the Papan briefing changed |
+| `server/` | The Hono router, session registry, engine pool |
+| `src/host/` | The browser-side bridge: transport, coverage table, prefetch |
+| `src/embed/` | The mountable component and its host API |
