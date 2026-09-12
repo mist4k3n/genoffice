@@ -20,6 +20,7 @@ Baseline upstream SHA: `d2b898f`
 | `apps/sheets/src/shared/desktop-api.ts` (schemas) | The server validates with upstream's own zod schemas | A tightened constraint arrives on rebase, which is the point. A *renamed* schema fails typecheck |
 | `apps/sheets/vite.renderer.config.ts` | `web/vite.config.ts` mirrors its plugin set and root semantics | Build differences between desktop and web |
 | `apps/sheets/src/renderer/index.html` | We ship our own with a web CSP | A new upstream CSP directive we do not carry |
+| `apps/sheets/src/renderer/ExcelShell.tsx` | Renders `<div id="univer-container">`, the id Univer and three helpers resolve by `getElementById`. Caps the embed at one editor per page | A renamed id breaks shape drawing, the formula-bar toggle and keyboard handling — all silently, since `getElementById` just returns null |
 | `apps/sheets/src/renderer/main.tsx` | The module our bootstrap imports; reads `window.desktopApi` during its own boot | Boot order assumptions. Re-run the probe if it changes |
 | `apps/sheets/src/renderer/cell-function.ts` | Parses the workbook `path` structurally (`lastIndexOf('/')`) to build `CELL("filename")`. `web/server/workbook-handle.ts` issues a path-shaped token because of it | A different split rule would silently change what `CELL("filename")` returns |
 | `apps/sheets/src/renderer/univer-sync.ts` | `SIDECAR_READ_BATCH_CELLS` (90,000) decides how many HTTP requests a viewport costs; `web/tools/bench-range.mjs` mirrors it | A much smaller batch would multiply round trips per scroll — the phase-03 risk returning |
@@ -54,6 +55,7 @@ upstream original and fails when it changes.
 | Sidecar protocol accepting bytes instead of a `PathBuf` | 1 | not filed | phase 05, only if plaintext must never touch disk |
 | `onExit` callback on `XlsxSidecarClient` | 1 | not filed | nothing. Would delete the pid-polling in `web/server/sidecar/pool.ts` — see `FINDINGS-02.md` |
 | Export `writeWorkbookTo` from `sheets-main.ts` | 1 | not filed | nothing. Would delete `web/server/channels/save-plan.ts`, the fork's only mirrored implementation |
+| Injectable container id + host API (instead of `id="univer-container"` and `window.desktopApi`) | 1 | not filed | **multi-document embedding**. Two editors on one page currently leave both blank — see `FINDINGS-EMBED.md`. Additive; no desktop behaviour changes |
 
 ## Rebase runbook
 
