@@ -11,8 +11,10 @@ import { classifyWorkbookAt, classifyWorkbookBytes, type WorkbookKind } from './
 import { workbookDisplayPath } from './workbook-handle'
 import { SidecarPool } from './sidecar/pool'
 import {
+  canWrite,
   DEFAULT_QUOTA,
   type DraftAdapter,
+  type FilePermission,
   type QuotaOptions,
   type RequestIdentity,
   type StorageAdapter,
@@ -43,7 +45,15 @@ export interface WorkbookSession {
   /** Storage version the snapshot was taken from; a save must still match it. */
   readonly openedFromVersion: VersionToken
   readonly sheetNames: ReadonlyMap<string, string>
-  readonly canEdit: boolean
+  /**
+   * What the opener could do at open time.
+   *
+   * A record, not an authorisation: every mutating channel re-reads the
+   * *request's* permission, so a revoked grant fails on the next call. This is
+   * kept because the workbook's `readOnly` flag was reported from it and the
+   * reopen after a save must report the same thing.
+   */
+  readonly permission: FilePermission
   lastUsedAt: number
   /** Unsaved edits the renderer has journaled but not yet saved. */
   pendingEdits: number
@@ -251,7 +261,7 @@ export class SessionRegistry {
       userId: previous.userId,
       tenantId: previous.tenantId,
       documentId: previous.documentId,
-      canEdit: previous.canEdit,
+      permission: previous.permission,
     })
     try {
       const { sessionId, opened } = await pool.open(
@@ -272,7 +282,7 @@ export class SessionRegistry {
         sha256: snapshot.sha256,
         openedFromVersion: saved.version,
         sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
-        canEdit: previous.canEdit,
+        permission: previous.permission,
         lastUsedAt: Date.now(),
         pendingEdits: 0,
       })
@@ -282,7 +292,7 @@ export class SessionRegistry {
         path: workbookDisplayPath(saved.name, saved.displayPath),
         sha256: snapshot.sha256,
         fileBytes: snapshot.byteLength,
-        readOnly: !previous.canEdit,
+        readOnly: !canWrite(previous.permission),
       })
     } catch (error) {
       await snapshot.cleanup()

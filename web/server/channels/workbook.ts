@@ -7,6 +7,7 @@ import {
   workbookRangeResultSchema,
 } from '../../../apps/sheets/src/shared/desktop-api'
 import { SheetsError } from '../errors'
+import { canWrite } from '../ports'
 import { DRAFT_RESTORED_KEY } from '../../protocol'
 import { workbookDisplayPath } from '../workbook-handle'
 import type { ChannelHandler, ChannelTable } from '../router-types'
@@ -57,7 +58,7 @@ const selectWorkbook: ChannelHandler = async (context) => {
       sha256: snapshot.sha256,
       openedFromVersion: snapshot.version,
       sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
-      canEdit: identity.canEdit,
+      permission: identity.permission,
       lastUsedAt: Date.now(),
       pendingEdits: 0,
     })
@@ -71,7 +72,7 @@ const selectWorkbook: ChannelHandler = async (context) => {
       sha256: snapshot.sha256,
       fileBytes: snapshot.byteLength,
       // Read-only is an authorisation outcome here, not a filesystem one.
-      readOnly: !identity.canEdit,
+      readOnly: !canWrite(identity.permission),
     })
     // Added after the parse, and only when true, so an ordinary open is
     // byte-identical to what it was. The host bridge strips it again before

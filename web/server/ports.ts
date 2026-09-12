@@ -95,14 +95,62 @@ export interface LocalWorkbookRef {
   readonly sha256?: string | undefined
 }
 
+/**
+ * What this caller may do with this document.
+ *
+ * Papan's lattice, verbatim (`shared/database/src/repositories/permissions.ts`),
+ * rather than a boolean. A boolean loses three distinctions that are already
+ * load-bearing there:
+ *
+ *  - **`readcopy` is not `none`.** It is a real, common state: a person who can
+ *    open a workbook and take a copy of it, and cannot change the original.
+ *    Collapsed into `canEdit: false` it becomes indistinguishable from having
+ *    no access, and Save As -- the one thing that state exists to allow -- gets
+ *    refused.
+ *  - **`hidden` is not `none` either.** It means the document must not be
+ *    confirmed to exist, which is a different answer, not a different message.
+ *  - **`owner` and `admin` are not `readwrite`.** Nothing here distinguishes
+ *    them today, and the day something does (delete, share, permission change)
+ *    it will be a value that already arrived rather than a contract change.
+ *
+ * Widening is deliberate: a host that maps its own model onto this has to
+ * decide what a viewer is, rather than have `false` decide for it.
+ */
+export type FilePermission = 'owner' | 'admin' | 'readwrite' | 'readcopy' | 'hidden' | 'none'
+
+/** May open the document at all. Papan's `canRead`. */
+export const canRead = (permission: FilePermission): boolean =>
+  permission !== 'none' && permission !== 'hidden'
+
+/** May change the document. Papan's `canWrite`. */
+export const canWrite = (permission: FilePermission): boolean =>
+  permission === 'owner' || permission === 'admin' || permission === 'readwrite'
+
+/**
+ * May take a copy away -- Save As, CSV export.
+ *
+ * Anything readable, which is what `readcopy` is named for. Worth flagging that
+ * Papan's WOPI layer additionally sets `DisablePrint` / `HidePrintOption` for
+ * read-only sessions, so if copying is meant to be narrower than reading, this
+ * is the single line to change.
+ */
+export const canCopy = (permission: FilePermission): boolean => canRead(permission)
+
 /** Who is asking, and for which document. Resolved per request by the host. */
 export interface RequestIdentity {
   readonly userId: string
   /** Groups quota accounting. Use the userId when there is no tenancy. */
   readonly tenantId: string
   readonly documentId: string
-  /** When false, every mutating channel is rejected before it reaches a session. */
-  readonly canEdit: boolean
+  /**
+   * Resolved **per request**, and enforced per request.
+   *
+   * Not cached on the session on purpose. A grant revoked mid-session has to
+   * fail on the very next call, fail-closed -- the session records what was
+   * true when the workbook opened, and that is a fact about the past, not an
+   * authorisation.
+   */
+  readonly permission: FilePermission
 }
 
 /**

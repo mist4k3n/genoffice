@@ -21,7 +21,7 @@ const identity: RequestIdentity = {
   userId: 'ada',
   tenantId: 'acme',
   documentId: 'budget.xlsx',
-  canEdit: true,
+  permission: 'owner',
 }
 
 /** Minimal .xlsx: a zip local-file header is all the format sniffer reads. */
