@@ -251,6 +251,22 @@ export class SessionRegistry {
   }
 
   /**
+   * Sessions on this document that are behind the given version.
+   *
+   * Used to answer "the document moved" precisely: a session already at the
+   * new version produced it and has nothing to be told.
+   */
+  staleSessions(documentId: string, version: VersionToken): WorkbookSession[] {
+    const stale: WorkbookSession[] = []
+    for (const session of this.sessions.values()) {
+      if (session.documentId !== documentId) continue
+      if (session.openedFromVersion === version) continue
+      stale.push(session)
+    }
+    return stale
+  }
+
+  /**
    * The renderer's unsaved-edit count for this document. Held so an idle sweep
    * can tell the difference between dropping a clean session and a dirty one.
    */

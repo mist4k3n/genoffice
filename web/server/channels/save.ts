@@ -14,7 +14,12 @@ import {
 import { IPC_CHANNELS } from '../../../apps/sheets/src/shared/ipc-channels'
 import { SheetsError, VersionConflictError } from '../errors'
 import { exportIdentityKey } from '../exports'
-import type { WorkbookSaveExportResult } from '../../protocol'
+import {
+  CONFLICT_CHANNEL,
+  conflictFor,
+  type HostCallOptions,
+  type WorkbookSaveExportResult,
+} from '../../protocol'
 import type { WorkbookSession } from '../sessions'
 import type { ChannelContext, ChannelHandler, ChannelTable } from '../router-types'
 import { writeWorkbookTo, type SaveMutation } from './save-plan'
@@ -62,10 +67,18 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
 
   // The web equivalent of upstream's "the file changed on disk" guard. Same
   // intent, better outcome: the client is handed the version it lost to.
+  //
+  // `overwrite` is the conflict banner's own button, so it does not skip the
+  // check -- it moves it. The save becomes a compare-and-set against what
+  // storage holds *now*, which means a document that moves again between this
+  // read and the write still conflicts. What the person approved was
+  // overwriting the version they were shown, not whatever arrives next.
   const current = await context.storage.head(session.documentId)
-  if (current.version !== session.openedFromVersion) {
+  const overwrite = hostOptions(context).overwrite === true
+  if (!overwrite && current.version !== session.openedFromVersion) {
     throw new VersionConflictError(current.version)
   }
+  const expectedVersion = overwrite ? current.version : session.openedFromVersion
 
   const assembled = await assemble(context, session, request, current.name)
   const { mutation } = assembled
@@ -73,13 +86,25 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
 
   // Only now does the document change. A failure above leaves storage
   // untouched and the session still usable.
-  const saved = await context.storage.put(session.documentId, bytes, session.openedFromVersion)
+  const saved = await context.storage.put(session.documentId, bytes, expectedVersion)
 
   // The sidecar session still streams the pre-save bytes. Upstream swaps it
   // for a fresh session over the saved file so later reads match what was
   // written; the same is true here, and skipping it would serve stale cells
   // for the rest of the session.
   const file = await context.registry.reopenAfterSave(session, saved, context.pool, context.locale)
+
+  // Two tabs on one document is the conflict case the host cannot see: its
+  // realtime layer learns about writes through *its* storage, and this write
+  // went through ours. Telling the other sessions now is the difference
+  // between a banner and a rejected save ten minutes later.
+  //
+  // Runs after the reopen so this session is already at the new version and is
+  // therefore not among the stale ones.
+  const stale = context.registry.staleSessions(session.documentId, saved.version)
+  if (stale.length > 0) {
+    context.push.send(session.documentId, CONFLICT_CHANNEL, conflictFor(saved.version, stale))
+  }
 
   return { canceled: false, file, touchedEntries: mutation.touchedEntries }
 }
@@ -211,4 +236,18 @@ export const saveChannels: ChannelTable = {
 /** Exposed so the server can drop a departing session's queued upload. */
 export function discardTransfersForSession(sessionId: string): void {
   transfers.discardSession(sessionId)
+}
+
+/**
+ * The host's own options, which ride in `args[1]`.
+ *
+ * Upstream's preload sends exactly one argument per channel, so a second one
+ * is unambiguously ours. That is what keeps upstream's `.strict()` request
+ * schemas usable verbatim: a flag added to the request the renderer builds
+ * would fail the renderer's own validation before it ever left the browser.
+ */
+function hostOptions(context: ChannelContext): HostCallOptions {
+  const options = context.args[1]
+  if (typeof options !== 'object' || options === null) return {}
+  return options as HostCallOptions
 }

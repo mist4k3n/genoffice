@@ -4,6 +4,7 @@ import { Hono } from 'hono'
 
 import { toSheetsError } from './errors'
 import { ExportStore, exportIdentityKey } from './exports'
+import { CONFLICT_CHANNEL, READ_ONLY_HEADER, conflictFor } from '../protocol'
 import {
   DEFAULT_PREFERENCES,
   DEFAULT_SIDECAR,
@@ -40,6 +41,18 @@ export interface SheetsRouter {
   attachSocket(documentId: string, socket: PushSocket): () => void
   /** Push `{channel, args}` to every socket watching a document. */
   push(documentId: string, channel: string, ...args: unknown[]): void
+  /**
+   * Tell every session that this document moved underneath it.
+   *
+   * The host calls this from wherever it learns that storage changed -- its
+   * own realtime layer, a webhook, the write path of another editor. There is
+   * no port for storage to announce itself, and polling `head()` would be a
+   * guess dressed up as a fact.
+   *
+   * Sessions already at the new version produced it and are not told. Resolves
+   * with how many were.
+   */
+  documentChanged(documentId: string, version?: string): Promise<number>
   dispose(): Promise<void>
 }
 
@@ -104,7 +117,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
 
     let identity: RequestIdentity
     try {
-      identity = await options.identify(c.req.raw)
+      identity = readOnlyIfAsked(await options.identify(c.req.raw), c.req.raw)
     } catch (error) {
       // Never leak why. An identify() that throws has already decided.
       const failure = toSheetsError(error)
@@ -219,6 +232,12 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     app,
     attachSocket: (documentId, socket) => push.attach(documentId, socket),
     push: (documentId, channel, ...args) => push.send(documentId, channel, ...args),
+    async documentChanged(documentId, version) {
+      const current = version ?? (await options.storage.head(documentId)).version
+      const stale = registry.staleSessions(documentId, current)
+      if (stale.length > 0) push.send(documentId, CONFLICT_CHANNEL, conflictFor(current, stale))
+      return stale.length
+    },
     async dispose() {
       exports.dispose()
       push.dispose()
@@ -240,3 +259,17 @@ export const SESSION_LOST_CHANNEL = 'sheets:session-lost'
  * only differs in the manifest, and a host that cares reads the name.
  */
 const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+/**
+ * Honour a request to open read-only.
+ *
+ * A downgrade only, and that asymmetry is the whole safety argument: a client
+ * can give up rights `identify()` granted it, and can never claim rights it
+ * did not. The conflict banner's "show saved version" needs it -- it mounts a
+ * second editor on the stored bytes beside the dirty one, and that one must
+ * not be able to write.
+ */
+function readOnlyIfAsked(identity: RequestIdentity, request: Request): RequestIdentity {
+  if (!identity.canEdit) return identity
+  return request.headers.get(READ_ONLY_HEADER) ? { ...identity, canEdit: false } : identity
+}
