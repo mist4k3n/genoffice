@@ -117,6 +117,44 @@ export interface SecretsAdapter {
   workbookPassword(documentId: string): Promise<string | null>
 }
 
+/**
+ * Somewhere to put unsaved work that is not a version of the document.
+ *
+ * The distinction is the point, and it is not ours -- it is what Papan's
+ * Collabora deployment already does, and #617 flags reproducing it as
+ * load-bearing: *"or we get version spam or silent exit-save data loss."*
+ * A 30-second recovery copy must never enter version history; a person
+ * pressing Save must always create one.
+ *
+ * Upstream draws the same line, which is why nothing here needed inventing.
+ * Its renderer writes a crash-recovery copy on its own 30-second timer through
+ * a *separate* channel (`workbook:write-recovery`) that never touches the
+ * document. On the desktop that copy lands under userData. Here it lands in
+ * whatever the host gives us.
+ *
+ * Optional. Without it the recovery channel reports failure, which is what
+ * upstream's renderer already expects from a best-effort write, and nothing
+ * else changes.
+ */
+export interface DraftAdapter {
+  /**
+   * Store unsaved bytes for this document.
+   *
+   * `baseVersion` is the storage version they were edited from. It is what
+   * makes staleness decidable later: a draft whose base no longer matches the
+   * document describes edits to something that no longer exists.
+   */
+  put(
+    identity: RequestIdentity,
+    bytes: Uint8Array,
+    baseVersion: VersionToken,
+  ): Promise<void>
+  /** The stored draft, or null. */
+  get(identity: RequestIdentity): Promise<{ bytes: Uint8Array; baseVersion: VersionToken } | null>
+  /** Drop it. Called when a real save supersedes it, and when it goes stale. */
+  delete(identity: RequestIdentity): Promise<void>
+}
+
 export interface QuotaOptions {
   /** Concurrent open sessions per tenant. */
   readonly maxSessionsPerTenant: number
@@ -167,6 +205,11 @@ export interface SheetsServerOptions {
   /** Resolve the caller. Throw to reject; the router maps the throw to 401. */
   readonly identify: (request: Request) => RequestIdentity | Promise<RequestIdentity>
   readonly secrets?: SecretsAdapter | undefined
+  /**
+   * Where unsaved work goes between saves. Without one, the editor's recovery
+   * timer is a no-op and an interrupted session loses whatever was pending.
+   */
+  readonly drafts?: DraftAdapter | undefined
   readonly preferences?: Partial<AppPreferences> | undefined
   readonly sidecar?: Partial<SidecarOptions> | undefined
   readonly quota?: Partial<QuotaOptions> | undefined

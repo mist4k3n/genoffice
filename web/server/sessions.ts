@@ -12,6 +12,7 @@ import { workbookDisplayPath } from './workbook-handle'
 import { SidecarPool } from './sidecar/pool'
 import {
   DEFAULT_QUOTA,
+  type DraftAdapter,
   type QuotaOptions,
   type RequestIdentity,
   type StorageAdapter,
@@ -53,12 +54,27 @@ export interface WorkbookSession {
   releaseSnapshot: () => Promise<void>
 }
 
+/** What an open needs: bytes on disk the sidecar can hold, and their provenance. */
+export interface Snapshot {
+  readonly snapshotPath: string
+  readonly byteLength: number
+  readonly sha256: string
+  /** The *storage* version these bytes derive from, draft or not. */
+  readonly version: VersionToken
+  readonly name: string
+  readonly displayPath: string | undefined
+  readonly cleanup: () => Promise<void>
+  /** True when the bytes came from unsaved work rather than from storage. */
+  readonly fromDraft?: boolean | undefined
+}
+
 export interface SessionRegistryOptions {
   readonly pool: SidecarPool
   readonly storage: StorageAdapter
   readonly quota: QuotaOptions
   readonly scratchDir: string
   readonly locale: string
+  readonly drafts?: DraftAdapter | undefined
 }
 
 /** The sidecar's open result: a workbook file minus the two fields we supply. */
@@ -107,22 +123,34 @@ export class SessionRegistry {
    * Fetch the document, write the private copy, and hand the path to the
    * caller to open. The caller registers the resulting session.
    */
-  async prepareSnapshot(identity: RequestIdentity): Promise<{
-    snapshotPath: string
-    byteLength: number
-    sha256: string
-    version: VersionToken
-    name: string
-    displayPath: string | undefined
-    cleanup: () => Promise<void>
-  }> {
+  async prepareSnapshot(identity: RequestIdentity): Promise<Snapshot> {
     this.enforceQuota(identity)
+
+    // Unsaved work outranks the stored document, and does so silently. That is
+    // Papan's own rule -- its WOPI GetFile serves a non-stale draft ahead of
+    // storage -- and it is the difference between "your edits came back" and a
+    // restore prompt asking a question the user cannot evaluate.
+    const draft = await this.#freshDraft(identity)
+    if (draft) {
+      const stored = await this.options.storage.head(identity.documentId)
+      return {
+        ...(await this.#snapshotFromBytes(draft.bytes, {
+          version: stored.version,
+          name: stored.name,
+          displayPath: stored.displayPath,
+        })),
+        fromDraft: true,
+      }
+    }
 
     // Content-addressed storage is already a snapshot: a blob named by the
     // hash of its contents cannot change under an open session. Where the
     // adapter offers that, skip the copy entirely -- it is the difference
     // between every open costing a full duplicate of the workbook and costing
     // nothing.
+    //
+    // Below the draft check on purpose: the fast path is a pointer at what
+    // storage holds, and a draft is by definition not that.
     const direct = await this.options.storage.localPath?.(identity.documentId)
     if (direct) {
       assertOpenable(await classifyWorkbookAt(direct.path))
@@ -141,21 +169,49 @@ export class SessionRegistry {
     }
 
     const stored = await this.options.storage.get(identity.documentId)
+    return this.#snapshotFromBytes(stored.bytes, stored)
+  }
 
+  /**
+   * The draft for this document, if there is one and it still applies.
+   *
+   * A draft records the storage version it was edited from. Once the document
+   * has moved, those edits describe something that no longer exists, so the
+   * draft is deleted rather than offered -- the same rule Papan applies with
+   * `draftHash !== file.contentHash`.
+   */
+  async #freshDraft(
+    identity: RequestIdentity,
+  ): Promise<{ bytes: Uint8Array; baseVersion: VersionToken } | null> {
+    const drafts = this.options.drafts
+    if (!drafts) return null
+    const draft = await drafts.get(identity)
+    if (!draft) return null
+    const stored = await this.options.storage.head(identity.documentId)
+    if (draft.baseVersion === stored.version) return draft
+    await drafts.delete(identity)
+    return null
+  }
+
+  /** Write bytes into a private snapshot the sidecar can open. */
+  async #snapshotFromBytes(
+    bytes: Uint8Array,
+    metadata: { version: VersionToken; name: string; displayPath?: string | undefined },
+  ): Promise<Snapshot> {
     // Fail with something actionable before the sidecar turns this into an
     // EOCD error indistinguishable from corruption.
-    assertOpenable(classifyWorkbookBytes(stored.bytes))
+    assertOpenable(classifyWorkbookBytes(bytes))
     const dir = join(this.options.scratchDir, randomUUID())
     await mkdir(dir, { recursive: true })
-    const snapshotPath = join(dir, sanitizeName(stored.name))
-    await writeFile(snapshotPath, stored.bytes)
+    const snapshotPath = join(dir, sanitizeName(metadata.name))
+    await writeFile(snapshotPath, bytes)
     return {
       snapshotPath,
-      byteLength: stored.bytes.byteLength,
-      sha256: createHash('sha256').update(stored.bytes).digest('hex'),
-      version: stored.version,
-      name: stored.name,
-      displayPath: stored.displayPath,
+      byteLength: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      version: metadata.version,
+      name: metadata.name,
+      displayPath: metadata.displayPath,
       cleanup: () => rm(dir, { recursive: true, force: true }),
     }
   }

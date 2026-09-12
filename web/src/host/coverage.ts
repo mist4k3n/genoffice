@@ -119,7 +119,9 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   beginSaveEditsTransfer: { status: 'http', channel: IPC_CHANNELS.saveEditsBegin },
   sendSaveEditsChunk: { status: 'http', channel: IPC_CHANNELS.saveEditsChunk },
   abortSaveEditsTransfer: { status: 'http', channel: IPC_CHANNELS.saveEditsAbort },
-  writeWorkbookRecovery: { status: 'todo', channel: IPC_CHANNELS.writeWorkbookRecovery },
+  // Unsaved work, written every 30s while dirty -- and never a version. See
+  // ports.ts, DraftAdapter, for why that distinction is the whole point.
+  writeWorkbookRecovery: { status: 'http', channel: IPC_CHANNELS.writeWorkbookRecovery },
   replyRecoveryPrompt: { status: 'todo', channel: IPC_CHANNELS.recoveryPromptReply },
   reportCloseSaveResult: { status: 'todo', channel: IPC_CHANNELS.closeSaveResult },
   autoRenameWorkbook: { status: 'todo', channel: IPC_CHANNELS.autoRenameWorkbook },

@@ -88,6 +88,11 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
   // untouched and the session still usable.
   const saved = await context.storage.put(session.documentId, bytes, expectedVersion)
 
+  // The draft described unsaved work, and there is none now. Left behind it
+  // would be stale on the next open anyway -- deleting it here is what makes
+  // that the exception rather than the common case.
+  await context.drafts?.delete(context.identity).catch(() => {})
+
   // The sidecar session still streams the pre-save bytes. Upstream swaps it
   // for a fresh session over the saved file so later reads match what was
   // written; the same is true here, and skipping it would serve stale cells
@@ -185,6 +190,47 @@ async function exportPatchedBytes(
 }
 
 /**
+ * The crash-recovery copy: unsaved work, saved nowhere near the document.
+ *
+ * Upstream's renderer writes one of these every 30 seconds while a workbook is
+ * dirty, on its own timer, through its own channel -- deliberately separate
+ * from Save, and deliberately not the document. On the desktop it lands under
+ * userData; here it lands in whatever draft store the host supplies.
+ *
+ * That separation is the draft/version split, and it arrived with upstream
+ * rather than being invented: a periodic copy must never enter version
+ * history, and #617 names the two ways of getting this wrong -- *"version spam
+ * or silent exit-save data loss."*
+ *
+ * Best-effort by contract. Upstream's renderer already treats a failure as
+ * "this tick's copy is skipped", so a host without a draft store degrades to
+ * exactly the desktop behaviour with recovery disabled.
+ */
+const writeWorkbookRecovery: ChannelHandler = async (context) => {
+  const request = resolveTransferredEdits(workbookSaveRequestSchema.parse(context.args[0]))
+  const session = context.registry.require(request.sessionId, context.identity)
+  if (!session.canEdit || !context.drafts) return { ok: false }
+
+  const current = await context.storage.head(session.documentId)
+  // A recovery copy of edits to a version the document has already left is
+  // worse than none: it would be offered on the next open as if it applied.
+  // The conflict banner is where that gets resolved, not here.
+  if (current.version !== session.openedFromVersion) return { ok: false }
+
+  const assembled = await assemble(context, session, request, current.name)
+  try {
+    await context.drafts.put(
+      context.identity,
+      await readFile(assembled.path),
+      session.openedFromVersion,
+    )
+    return { ok: true }
+  } finally {
+    assembled.discard()
+  }
+}
+
+/**
  * The chunked transfer. Edits above SAVE_EDITS_INLINE_MAX arrive as ordered
  * JSON slices rather than one request, then the save references the transfer
  * id. Upstream's store does the accumulating, expiry and re-interning.
@@ -228,6 +274,7 @@ function requireEditableSession(context: ChannelContext, sessionId: string): voi
 
 export const saveChannels: ChannelTable = {
   [IPC_CHANNELS.saveWorkbook]: saveWorkbookEdits,
+  [IPC_CHANNELS.writeWorkbookRecovery]: writeWorkbookRecovery,
   [IPC_CHANNELS.saveEditsBegin]: beginSaveEditsTransfer,
   [IPC_CHANNELS.saveEditsChunk]: sendSaveEditsChunk,
   [IPC_CHANNELS.saveEditsAbort]: abortSaveEditsTransfer,

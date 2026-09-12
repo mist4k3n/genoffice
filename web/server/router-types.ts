@@ -1,5 +1,5 @@
 import type { ExportStore } from './exports'
-import type { AppPreferences, RequestIdentity, StorageAdapter } from './ports'
+import type { AppPreferences, DraftAdapter, RequestIdentity, StorageAdapter } from './ports'
 import type { PushHub } from './push'
 import type { SessionRegistry } from './sessions'
 import type { SidecarPool } from './sidecar/pool'
@@ -20,6 +20,8 @@ export interface ChannelContext {
   readonly scratchDir: string
   /** Save As parks its assembled bytes here for the host to fetch once. */
   readonly exports: ExportStore
+  /** Unsaved work between saves. Absent when the host supplies no draft store. */
+  readonly drafts: DraftAdapter | undefined
 }
 
 export type ChannelHandler = (context: ChannelContext) => Promise<unknown>

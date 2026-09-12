@@ -104,6 +104,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     quota,
     scratchDir,
     locale,
+    drafts: options.drafts,
   })
 
   pool.start()
@@ -158,6 +159,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
         storage: options.storage,
         scratchDir,
         exports,
+        drafts: options.drafts,
       })
       // An undefined result drops out of JSON.stringify entirely, and the
       // transport reads the missing key back as undefined. Right for the void
