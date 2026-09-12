@@ -1,4 +1,6 @@
-import type { DesktopApi } from '../../../apps/sheets/src/shared/desktop-api'
+import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
+import { exportPath, type WorkbookSaveExportResult } from '../../protocol'
+import type { HostCommandBus } from './commands'
 import { COVERAGE, type Entry } from './coverage'
 import { LOCAL_HANDLERS } from './local-api'
 import { createRangePrefetcher, type RangePrefetcher } from './range-prefetch'
@@ -56,6 +58,27 @@ export interface HttpDesktopApiOptions extends HttpTransportOptions {
    * exists. Read-only: it cannot change what the renderer receives.
    */
   readonly observer?: HostObserver | undefined
+  /**
+   * How the embedding application drives the renderer -- its Save As button,
+   * its keyboard shortcuts. Absent in a standalone page, where the renderer's
+   * own ribbon is the only chrome.
+   */
+  readonly commands?: HostCommandBus | undefined
+  /**
+   * Receives the bytes a Save As produced. Called for every save-as,
+   * whoever started it: the host's own command, or the ribbon's Save As
+   * button, which a user can click at any time.
+   */
+  readonly onExport?: ((event: ExportedWorkbook) => void) | undefined
+}
+
+/** A Save As, resolved to bytes the host can write wherever it likes. */
+export interface ExportedWorkbook {
+  readonly bytes: Uint8Array
+  /** The document's own file name, to seed the host's picker. */
+  readonly suggestedName: string
+  /** Package parts the patch rewrote. Empty when nothing was pending. */
+  readonly touchedEntries: readonly string[]
 }
 
 export interface HostObserver {
@@ -69,7 +92,8 @@ export interface HostObserver {
 }
 
 /** Methods that are subscriptions: called synchronously, return an unsubscribe. */
-const isSubscription = (entry: Entry) => entry.status === 'push' || entry.status === 'shell'
+const isSubscription = (entry: Entry) =>
+  entry.status === 'push' || entry.status === 'shell' || entry.status === 'host'
 
 export function createHttpDesktopApi(options: HttpDesktopApiOptions): DesktopApi {
   const transport = createHttpTransport(options)
@@ -78,6 +102,8 @@ export function createHttpDesktopApi(options: HttpDesktopApiOptions): DesktopApi
     unsavedGuard: options.unsavedGuard,
     prefetchRanges: options.prefetchRanges,
     observer: options.observer,
+    commands: options.commands,
+    onExport: options.onExport,
   })
 }
 
@@ -85,22 +111,9 @@ export interface BuildOptions {
   readonly onNotImplemented?: ((method: string, entry: Entry) => void) | undefined
   readonly unsavedGuard?: UnsavedGuard | undefined
   readonly prefetchRanges?: boolean | undefined
-  /**
-   * Sees every HTTP call and its outcome, so a host can derive its own UI
-   * state (loaded, saved, conflicted) without the renderer knowing a host
-   * exists. Read-only: it cannot change what the renderer receives.
-   */
   readonly observer?: HostObserver | undefined
-}
-
-export interface HostObserver {
-  (event: {
-    readonly method: string
-    readonly channel: string
-    readonly args: readonly unknown[]
-    readonly result?: unknown
-    readonly error?: unknown
-  }): void
+  readonly commands?: HostCommandBus | undefined
+  readonly onExport?: ((event: ExportedWorkbook) => void) | undefined
 }
 
 /**
@@ -114,6 +127,8 @@ interface Interceptors {
   readonly unsavedGuard: UnsavedGuard | undefined
   readonly prefetcher: RangePrefetcher | undefined
   readonly observer: HostObserver | undefined
+  readonly transport: HostTransport
+  readonly onExport: ((event: ExportedWorkbook) => void) | undefined
 }
 
 export function buildDesktopApi(
@@ -131,7 +146,13 @@ export function buildDesktopApi(
     options.prefetchRanges && rangeChannel !== null
       ? createRangePrefetcher((request) => transport.invoke(rangeChannel, request))
       : undefined
-  const interceptors: Interceptors = { unsavedGuard, prefetcher, observer: options.observer }
+  const interceptors: Interceptors = {
+    unsavedGuard,
+    prefetcher,
+    observer: options.observer,
+    transport,
+    onExport: options.onExport,
+  }
 
   for (const [method, entry] of Object.entries(COVERAGE)) {
     // Only 'todo' may carry a null channel. Asserting per branch rather than
@@ -173,6 +194,17 @@ export function buildDesktopApi(
         // renderer mode runs the same way.
         api[method] = () => () => {}
         break
+
+      case 'host': {
+        // The embedding application is the source. Without one -- a standalone
+        // page, a test -- this is a 'shell' entry again, and the renderer's own
+        // ribbon still works, because it calls the same handlers directly.
+        const commands = options.commands
+        api[method] = commands
+          ? (listener: (action: MenuAction) => void) => commands.subscribe(listener)
+          : () => () => {}
+        break
+      }
 
       case 'todo':
         api[method] = isSubscription(entry)
@@ -253,6 +285,10 @@ function httpMethod(
     }
   }
 
+  if (method === 'saveWorkbookEdits') {
+    return saveOrExport(channel, transport, interceptors)
+  }
+
   if (method === 'readWorkbookRange' && prefetcher) {
     return (...args: unknown[]) =>
       prefetcher.read(args[0] as Parameters<RangePrefetcher['read']>[0])
@@ -282,3 +318,47 @@ export function installDesktopApi(api: DesktopApi): void {
     configurable: true,
   })
 }
+
+/**
+ * Save, or Save As -- which on the web are two different operations behind one
+ * upstream method.
+ *
+ * A plain save writes through and comes back as upstream's result, untouched.
+ * A Save As cannot write through: the destination is a document this package
+ * has no port to create, and on Papan it is a tree node its own picker
+ * chooses. So the server assembles the patched bytes, parks them, and answers
+ * with a token; this fetches them and hands them to the host.
+ *
+ * What the renderer receives is `{ canceled: true }` -- upstream's own shape,
+ * and the honest one. Nothing was saved to *this* document, so the journal
+ * stays pending and the session keeps its identity, which is exactly what
+ * upstream does for its CSV Save As (`save-actions.ts`: "the journal stays
+ * pending; the session keeps its identity (a copy semantics)"). The `export`
+ * half never reaches the renderer, so upstream's strict result schema stays
+ * satisfied on the only side that parses it.
+ */
+function saveOrExport(
+  channel: string,
+  transport: HostTransport,
+  interceptors: Interceptors,
+): (...args: unknown[]) => Promise<unknown> {
+  const { prefetcher, onExport } = interceptors
+  return async (...args: unknown[]) => {
+    prefetcher?.invalidate()
+    const result = await transport.invoke<unknown>(channel, ...args)
+    if (!isExportResult(result)) return result
+
+    const { token, name, touchedEntries } = result.export
+    const bytes = await transport.fetchBytes(exportPath(token))
+    // After the fetch, never before: a host told the export succeeded and then
+    // handed nothing would have no way to tell which half failed.
+    onExport?.({ bytes, suggestedName: name, touchedEntries })
+    return { canceled: true }
+  }
+}
+
+const isExportResult = (value: unknown): value is WorkbookSaveExportResult =>
+  typeof value === 'object' &&
+  value !== null &&
+  (value as WorkbookSaveExportResult).canceled === true &&
+  typeof (value as WorkbookSaveExportResult).export?.token === 'string'
