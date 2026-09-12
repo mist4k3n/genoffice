@@ -1,4 +1,5 @@
 import type { MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
+import type { HostCallOptions } from '../../protocol'
 
 /**
  * The host's way in.
@@ -27,15 +28,48 @@ import type { MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
 export interface HostCommandBus {
   /** Drive the renderer. No-op until it has subscribed. */
   dispatch(action: MenuAction): void
+  /**
+   * Drive the renderer with the host's intent attached.
+   *
+   * Only a person can decide to overwrite a document that moved, so the
+   * decision cannot originate in the renderer -- and `onMenuAction` carries an
+   * action and nothing else, by upstream's design. The intent is therefore
+   * latched here and claimed by the bridge on the call the action produces.
+   *
+   * One-shot on purpose. An overwrite that survived into the *next* save would
+   * be a flag nobody set clobbering a document nobody looked at.
+   */
+  dispatchWith(action: MenuAction, options: HostCallOptions): void
+  /** Claim the pending intent, if the action that set it is the one calling. */
+  takeOptions(): HostCallOptions
   /** The `onMenuAction` implementation handed to the renderer. */
   subscribe(listener: (action: MenuAction) => void): () => void
   /** True once the renderer is listening, so a caller can wait rather than lose the action. */
   readonly connected: boolean
 }
 
+/** How long a dispatched intent stays claimable. See dispatchWith. */
+const INTENT_TTL_MS = 30_000
+
 export function createHostCommandBus(): HostCommandBus {
   const listeners = new Set<(action: MenuAction) => void>()
+  let pending: { options: HostCallOptions; expiresAt: number } | null = null
   return {
+    dispatchWith(action, options) {
+      // The intent expires. Collecting a large journal and chunking it takes
+      // time, so it cannot be cleared on the next tick -- but a command the
+      // renderer returned early from produces no call at all, and an overwrite
+      // left standing would attach itself to whatever saved next. An autosave
+      // inheriting a person's decision about a document they are no longer
+      // looking at is the failure this window exists to close.
+      pending = { options, expiresAt: Date.now() + INTENT_TTL_MS }
+      this.dispatch(action)
+    },
+    takeOptions() {
+      const claimed = pending
+      pending = null
+      return claimed && claimed.expiresAt > Date.now() ? claimed.options : {}
+    },
     dispatch(action) {
       for (const listener of [...listeners]) {
         try {

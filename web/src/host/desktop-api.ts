@@ -129,6 +129,7 @@ interface Interceptors {
   readonly observer: HostObserver | undefined
   readonly transport: HostTransport
   readonly onExport: ((event: ExportedWorkbook) => void) | undefined
+  readonly commands: HostCommandBus | undefined
 }
 
 export function buildDesktopApi(
@@ -152,6 +153,7 @@ export function buildDesktopApi(
     observer: options.observer,
     transport,
     onExport: options.onExport,
+    commands: options.commands,
   }
 
   for (const [method, entry] of Object.entries(COVERAGE)) {
@@ -342,10 +344,17 @@ function saveOrExport(
   transport: HostTransport,
   interceptors: Interceptors,
 ): (...args: unknown[]) => Promise<unknown> {
-  const { prefetcher, onExport } = interceptors
+  const { prefetcher, onExport, commands } = interceptors
   return async (...args: unknown[]) => {
     prefetcher?.invalidate()
-    const result = await transport.invoke<unknown>(channel, ...args)
+    // The host's intent for *this* save, claimed from the command that started
+    // it. It rides as a second argument, which upstream never sends, so the
+    // request the renderer built stays exactly what its schema expects.
+    const options = commands?.takeOptions() ?? {}
+    const result = await transport.invoke<unknown>(
+      channel,
+      ...(Object.keys(options).length > 0 ? [args[0], options] : args),
+    )
     if (!isExportResult(result)) return result
 
     const { token, name, touchedEntries } = result.export
