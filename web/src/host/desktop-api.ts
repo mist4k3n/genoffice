@@ -50,6 +50,22 @@ export interface HttpDesktopApiOptions extends HttpTransportOptions {
    * optimisation for real networks and pure overhead against a local server.
    */
   readonly prefetchRanges?: boolean | undefined
+  /**
+   * Sees every HTTP call and its outcome, so a host can derive its own UI
+   * state (loaded, saved, conflicted) without the renderer knowing a host
+   * exists. Read-only: it cannot change what the renderer receives.
+   */
+  readonly observer?: HostObserver | undefined
+}
+
+export interface HostObserver {
+  (event: {
+    readonly method: string
+    readonly channel: string
+    readonly args: readonly unknown[]
+    readonly result?: unknown
+    readonly error?: unknown
+  }): void
 }
 
 /** Methods that are subscriptions: called synchronously, return an unsubscribe. */
@@ -61,6 +77,7 @@ export function createHttpDesktopApi(options: HttpDesktopApiOptions): DesktopApi
     onNotImplemented: options.onNotImplemented,
     unsavedGuard: options.unsavedGuard,
     prefetchRanges: options.prefetchRanges,
+    observer: options.observer,
   })
 }
 
@@ -68,6 +85,22 @@ export interface BuildOptions {
   readonly onNotImplemented?: ((method: string, entry: Entry) => void) | undefined
   readonly unsavedGuard?: UnsavedGuard | undefined
   readonly prefetchRanges?: boolean | undefined
+  /**
+   * Sees every HTTP call and its outcome, so a host can derive its own UI
+   * state (loaded, saved, conflicted) without the renderer knowing a host
+   * exists. Read-only: it cannot change what the renderer receives.
+   */
+  readonly observer?: HostObserver | undefined
+}
+
+export interface HostObserver {
+  (event: {
+    readonly method: string
+    readonly channel: string
+    readonly args: readonly unknown[]
+    readonly result?: unknown
+    readonly error?: unknown
+  }): void
 }
 
 /**
@@ -80,6 +113,7 @@ export interface BuildOptions {
 interface Interceptors {
   readonly unsavedGuard: UnsavedGuard | undefined
   readonly prefetcher: RangePrefetcher | undefined
+  readonly observer: HostObserver | undefined
 }
 
 export function buildDesktopApi(
@@ -97,7 +131,7 @@ export function buildDesktopApi(
     options.prefetchRanges && rangeChannel !== null
       ? createRangePrefetcher((request) => transport.invoke(rangeChannel, request))
       : undefined
-  const interceptors: Interceptors = { unsavedGuard, prefetcher }
+  const interceptors: Interceptors = { unsavedGuard, prefetcher, observer: options.observer }
 
   for (const [method, entry] of Object.entries(COVERAGE)) {
     // Only 'todo' may carry a null channel. Asserting per branch rather than
@@ -113,7 +147,7 @@ export function buildDesktopApi(
     switch (entry.status) {
       case 'http': {
         const target = wire()
-        api[method] = httpMethod(method, target, transport, interceptors)
+        api[method] = observed(method, target, httpMethod(method, target, transport, interceptors), interceptors)
         break
       }
 
@@ -158,6 +192,32 @@ export function buildDesktopApi(
   // One cast, at the boundary. Everything above is driven by a table the
   // compiler has already checked covers every key of DesktopApi.
   return api as unknown as DesktopApi
+}
+
+/**
+ * Report each call's outcome to the host without altering it.
+ *
+ * Range reads are excluded: they fire on every scroll step, and a host has no
+ * use for them. Everything else is rare enough that observing it is free.
+ */
+function observed(
+  method: string,
+  channel: string,
+  call: (...args: unknown[]) => Promise<unknown>,
+  interceptors: Interceptors,
+): (...args: unknown[]) => Promise<unknown> {
+  const { observer } = interceptors
+  if (!observer || method === 'readWorkbookRange') return call
+  return async (...args: unknown[]) => {
+    try {
+      const result = await call(...args)
+      observer({ method, channel, args, result })
+      return result
+    } catch (error) {
+      observer({ method, channel, args, error })
+      throw error
+    }
+  }
 }
 
 /** Reads that a prefetcher may answer; everything else invalidates it. */
