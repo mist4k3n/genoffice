@@ -37,6 +37,22 @@ export interface WorkbookSaveExportResult {
   }
 }
 
+/**
+ * Marker the open result carries when the session was restored from a draft.
+ *
+ * Stripped by the host bridge before the renderer sees the result, the same
+ * way the Save As token is -- upstream's `workbookFileSchema` is `.strict()`
+ * and the renderer has no concept of a draft.
+ *
+ * It exists because the dirty indicator would otherwise lie. A restored draft
+ * leaves the edit journal empty -- the edits are in the bytes the sidecar
+ * opened -- so the renderer honestly reports zero pending edits while the
+ * document still differs from the version in storage. Papan persists dirty
+ * state server-side for exactly this reason: it has to survive a session
+ * ending.
+ */
+export const DRAFT_RESTORED_KEY = 'draftRestored'
+
 /** Path of the one-shot download, relative to the router's mount point. */
 export const exportPath = (token: string): string => `/export/${encodeURIComponent(token)}`
 

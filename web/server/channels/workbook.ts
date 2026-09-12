@@ -7,6 +7,7 @@ import {
   workbookRangeResultSchema,
 } from '../../../apps/sheets/src/shared/desktop-api'
 import { SheetsError } from '../errors'
+import { DRAFT_RESTORED_KEY } from '../../protocol'
 import { workbookDisplayPath } from '../workbook-handle'
 import type { ChannelHandler, ChannelTable } from '../router-types'
 
@@ -61,7 +62,7 @@ const selectWorkbook: ChannelHandler = async (context) => {
       pendingEdits: 0,
     })
 
-    return workbookFileSchema.parse({
+    const file = workbookFileSchema.parse({
       ...opened,
       name: snapshot.name,
       // A path-shaped handle, never the server's snapshot path. See
@@ -72,6 +73,10 @@ const selectWorkbook: ChannelHandler = async (context) => {
       // Read-only is an authorisation outcome here, not a filesystem one.
       readOnly: !identity.canEdit,
     })
+    // Added after the parse, and only when true, so an ordinary open is
+    // byte-identical to what it was. The host bridge strips it again before
+    // the renderer sees the result -- see protocol.ts.
+    return snapshot.fromDraft ? { ...file, [DRAFT_RESTORED_KEY]: true } : file
   } catch (error) {
     // The snapshot outlives a failed open only as garbage.
     await snapshot.cleanup()

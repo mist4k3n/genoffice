@@ -96,6 +96,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
         },
         commands,
         onExport: (exported) => deliverExport(exported, awaitingExport.current, handlers.current),
+        onDraftRestored: () => handlers.current.onDraftRestored?.(),
       })
       // The document moved while it is open -- someone else's save, or the
       // host's own storage layer telling the server so. This is the banner's

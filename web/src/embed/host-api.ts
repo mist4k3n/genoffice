@@ -100,6 +100,17 @@ export interface SheetsHostEvents {
    * on the ribbon, or it does nothing.
    */
   readonly onSaveAsRequest?: ((event: SheetsExport) => void) | undefined
+  /**
+   * This session opened from unsaved work rather than from the stored
+   * document, so it is dirty before anyone has typed anything.
+   *
+   * A host that shows a dirty indicator needs this, because `onDirtyChange`
+   * cannot supply it: restoring a draft leaves the edit journal empty -- the
+   * edits are already in the bytes -- so the editor honestly reports zero
+   * pending edits for a document that differs from what storage holds. Papan
+   * persists its dirty flag server-side for the same reason.
+   */
+  readonly onDraftRestored?: (() => void) | undefined
   readonly onError?: ((error: Error) => void) | undefined
 }
 

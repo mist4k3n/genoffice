@@ -1,5 +1,5 @@
 import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
-import { exportPath, type WorkbookSaveExportResult } from '../../protocol'
+import { DRAFT_RESTORED_KEY, exportPath, type WorkbookSaveExportResult } from '../../protocol'
 import type { HostCommandBus } from './commands'
 import { COVERAGE, type Entry } from './coverage'
 import { LOCAL_HANDLERS } from './local-api'
@@ -114,6 +114,15 @@ export interface BuildOptions {
   readonly observer?: HostObserver | undefined
   readonly commands?: HostCommandBus | undefined
   readonly onExport?: ((event: ExportedWorkbook) => void) | undefined
+  /**
+   * The session opened from unsaved work rather than from storage.
+   *
+   * Worth a callback of its own because the edit journal is empty in that
+   * case -- the edits are already in the bytes -- so the renderer's own
+   * pending-edit count honestly reports zero for a document that differs from
+   * what storage holds.
+   */
+  readonly onDraftRestored?: (() => void) | undefined
 }
 
 /**
@@ -130,6 +139,7 @@ interface Interceptors {
   readonly transport: HostTransport
   readonly onExport: ((event: ExportedWorkbook) => void) | undefined
   readonly commands: HostCommandBus | undefined
+  readonly onDraftRestored: (() => void) | undefined
 }
 
 export function buildDesktopApi(
@@ -154,6 +164,7 @@ export function buildDesktopApi(
     transport,
     onExport: options.onExport,
     commands: options.commands,
+    onDraftRestored: options.onDraftRestored,
   }
 
   for (const [method, entry] of Object.entries(COVERAGE)) {
@@ -291,6 +302,10 @@ function httpMethod(
     return saveOrExport(channel, transport, interceptors)
   }
 
+  if (method === 'selectWorkbook') {
+    return openWorkbook(channel, transport, interceptors)
+  }
+
   if (method === 'readWorkbookRange' && prefetcher) {
     return (...args: unknown[]) =>
       prefetcher.read(args[0] as Parameters<RangePrefetcher['read']>[0])
@@ -371,3 +386,29 @@ const isExportResult = (value: unknown): value is WorkbookSaveExportResult =>
   value !== null &&
   (value as WorkbookSaveExportResult).canceled === true &&
   typeof (value as WorkbookSaveExportResult).export?.token === 'string'
+
+/**
+ * Open, minus the one field the renderer must not see.
+ *
+ * Upstream's `workbookFileSchema` is `.strict()` and its renderer has no
+ * concept of a draft, so the marker is read here and removed. The host learns
+ * what the renderer cannot tell it: the journal is empty, and the document is
+ * still unsaved.
+ */
+function openWorkbook(
+  channel: string,
+  transport: HostTransport,
+  interceptors: Interceptors,
+): (...args: unknown[]) => Promise<unknown> {
+  const { prefetcher, onDraftRestored } = interceptors
+  return async (...args: unknown[]) => {
+    prefetcher?.invalidate()
+    const result = await transport.invoke<unknown>(channel, ...args)
+    if (typeof result !== 'object' || result === null) return result
+    const file = result as Record<string, unknown>
+    if (file[DRAFT_RESTORED_KEY] !== true) return result
+    delete file[DRAFT_RESTORED_KEY]
+    onDraftRestored?.()
+    return file
+  }
+}
