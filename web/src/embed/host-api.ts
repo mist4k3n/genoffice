@@ -27,6 +27,22 @@ export interface SheetsSavedEvent {
   readonly touchedEntries: readonly string[]
 }
 
+/**
+ * A Save As that produced bytes and no destination.
+ *
+ * Where the copy goes is the host's question: Papan's picker already takes a
+ * `customSave` callback, and its documents are tree nodes this package has no
+ * port to create. The editor's own document is untouched and its unsaved
+ * edits stay pending -- this is a copy, not a move.
+ */
+export interface SheetsExport {
+  readonly bytes: Uint8Array
+  /** The document's current file name, to seed the host's picker. */
+  readonly suggestedName: string
+  /** Package parts the patch rewrote. Empty when nothing was pending. */
+  readonly touchedEntries: readonly string[]
+}
+
 export interface SheetsConflictEvent {
   /** The version the document is at now, which this session did not produce. */
   readonly currentVersion: string
@@ -63,12 +79,31 @@ export interface SheetsHostEvents {
    * is part of the contract rather than a patch.
    */
   readonly onSelectionChange?: ((selection: SheetsSelection | null) => void) | undefined
+  /**
+   * Someone asked for Save As from inside the editor -- its ribbon button, or
+   * ⇧⌘S -- and here are the bytes.
+   *
+   * Not fired for `handle.exportBytes()`, which returns them to the caller
+   * instead. This is the unprompted half: a host that offers Save As only
+   * through its own chrome still needs to answer the button that is already
+   * on the ribbon, or it does nothing.
+   */
+  readonly onSaveAsRequest?: ((event: SheetsExport) => void) | undefined
   readonly onError?: ((error: Error) => void) | undefined
 }
 
-/** Imperative commands, reached through a ref. */
+/**
+ * Imperative commands, reached through a ref.
+ *
+ * Every one of these drives the renderer through the same path its own
+ * keyboard shortcuts use -- upstream's `onMenuAction`, repointed from the
+ * native menu at the host (see `web/src/host/commands.ts`). That is not an
+ * implementation detail worth hiding: it is why Save As here collects the
+ * pending edit journal correctly, rather than by a second implementation of
+ * the several hundred lines that do it.
+ */
 export interface SheetsHandle {
-  /** Explicit save. Writes a version. */
+  /** Explicit save. Writes a version. Resolves when the save has landed. */
   save(): Promise<void>
   /**
    * Produce the patched bytes without persisting them, so the host's own Save
@@ -78,10 +113,20 @@ export interface SheetsHandle {
    * so "Save As" is the host's flow with our bytes — not a second dialog and
    * not a create-document port on our side.
    */
-  exportBytes(): Promise<Uint8Array>
-  /** Download the active sheet as CSV, through the browser. */
+  exportBytes(): Promise<SheetsExport>
+  /**
+   * Download the active sheet as CSV, through the browser.
+   *
+   * Resolves once the editor has the request; the download itself is the
+   * browser's, and it does not report back.
+   */
   exportCsv(): Promise<void>
-  /** Discard local state and reload from storage. */
+  /**
+   * Discard local state and reload from storage.
+   *
+   * Unsaved edits are lost, which is the point -- this is the other half of a
+   * conflict banner's "discard mine". The host is expected to have asked.
+   */
   reload(): Promise<void>
   pendingEdits(): number
 }
@@ -110,4 +155,6 @@ export interface SheetsEditorProps extends SheetsHostEvents {
    * mount-time effect never fires again.
    */
   readonly visible?: boolean | undefined
+  /** Imperative commands. React 19 passes a ref as a plain prop. */
+  readonly ref?: React.Ref<SheetsHandle> | undefined
 }
