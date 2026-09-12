@@ -1,25 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { App } from '../../../apps/sheets/src/renderer/App'
+import { HostApiProvider } from '../../../apps/sheets/src/renderer/host-api'
 import { LocaleProvider, setModuleLang } from '../../../apps/sheets/src/renderer/i18n/locale'
 import type { Lang } from '../../../packages/i18n/src/index'
 import type { SheetsEditorProps, SheetsSelection } from './host-api'
 import { HostTransportError } from '../host/transport'
-import { observeSelection } from './selection'
+import { observeSelection, type UniverApiLike } from './selection'
 import { installGlobalsOnce } from './globals'
 import { createHttpDesktopApi } from '../host/desktop-api'
 import type { DesktopApi } from '../../../apps/sheets/src/shared/desktop-api'
-import {
-  claimSingletons,
-  enqueueMount,
-  installSingletonRouter,
-  noteStrayCall,
-  ownsSingletons,
-  registerEditor,
-  releaseSingletons,
-  unregisterEditor,
-  whenGridReady,
-} from './singletons'
+import { claimContainerId, enqueueMount, releaseContainerId, whenGridReady } from './singletons'
 import { installUnsavedGuard } from '../host/unsaved-guard'
 
 /**
@@ -32,16 +23,16 @@ import { installUnsavedGuard } from '../host/unsaved-guard'
  *
  * ## Several editors on one page
  *
- * Upstream has two page-level singletons — the `univer-container` element id
- * and `window.desktopApi` — because in Electron a window holds exactly one
- * workbook. `singletons.ts` hands both to one editor at a time rather than
- * changing upstream; see that file for why it works and where it stops.
+ * Each editor gets its own host bridge, passed to `App` as a prop rather than
+ * read from `window.desktopApi` — that is the upstream change recorded in
+ * `web/UPSTREAM-CHANGES.md`. The container element id is still a page-level
+ * global upstream, so `singletons.ts` hands it to one editor at a time; that
+ * part needs no upstream change.
  */
 export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   const { documentId, apiBase, theme = 'system', locale = 'en', visible = true } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const [ready, setReady] = useState(false)
-  const [refused, setRefused] = useState<Error | null>(null)
 
   // Host callbacks change identity on every host render; reading them through
   // a ref keeps that from tearing down the editor.
@@ -51,34 +42,21 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   // Identity for singleton ownership. Stable for this editor's lifetime.
   const token = useMemo(() => Symbol('sheets-editor'), [])
   const apiRef = useRef<DesktopApi | null>(null)
+  // This editor's own Univer runtime, so the selection bridge reports the
+  // right document when a page holds several editors.
+  const univerApiRef = useRef<UniverApiLike | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    // Refuse before doing any work: a second editor on a different document
-    // would silently render the first one's data.
-    try {
-      registerEditor(token, documentId)
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error))
-      setRefused(failure)
-      handlers.current.onError?.(failure)
-      return () => unregisterEditor(token)
-    }
     void (async () => {
       await installGlobalsOnce()
       if (cancelled) return
       setModuleLang(locale as Lang)
-      installSingletonRouter()
       apiRef.current = createHttpDesktopApi({
         baseUrl: apiBase,
         documentId,
         unsavedGuard: installUnsavedGuard(),
-        observer: (event) => {
-          // A call from an editor that does not own the singletons reached the
-          // owner's document. Count it rather than assume it never happens.
-          if (!ownsSingletons(token)) noteStrayCall(event.method)
-          reportToHost(event, handlers.current)
-        },
+        observer: (event) => reportToHost(event, handlers.current),
       })
       // Start-up is serialised: see enqueueMount. The editor does not render
       // until its turn, and holds the queue until its grid exists.
@@ -91,7 +69,6 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
     })()
     return () => {
       cancelled = true
-      unregisterEditor(token)
     }
   }, [apiBase, documentId, locale, token])
 
@@ -102,12 +79,11 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
    */
   useLayoutEffect(() => {
     const root = containerRef.current
-    const api = apiRef.current
-    if (!root || !api || !ready) return
+    if (!root || !ready) return
     // Claimed on mount as well as on becoming visible: an editor needs the
     // container id while *it* initialises, not only while it is on screen.
-    claimSingletons(token, root, api)
-    return () => releaseSingletons(token, root)
+    claimContainerId(token, root)
+    return () => releaseContainerId(token, root)
   }, [ready, visible, token])
 
   /**
@@ -118,8 +94,9 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
    */
   useEffect(() => {
     if (!ready || !visible) return
-    return observeSelection((selection: SheetsSelection | null) =>
-      handlers.current.onSelectionChange?.(selection),
+    return observeSelection(
+      () => univerApiRef.current,
+      (selection: SheetsSelection | null) => handlers.current.onSelectionChange?.(selection),
     )
   }, [ready, visible])
 
@@ -145,14 +122,20 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
       data-theme={theme === 'system' ? resolveSystemTheme() : theme}
       style={{ display: 'contents' }}
     >
-      {refused ? (
-        <div role="alert" style={{ padding: 16, font: '13px system-ui', color: 'var(--text)' }}>
-          {refused.message}
-        </div>
-      ) : ready ? (
-        <LocaleProvider initial={locale as Lang}>
-          <App />
-        </LocaleProvider>
+      {ready && apiRef.current ? (
+        // The provider wraps LocaleProvider too: it renders above App and
+        // reads the bridge through the same hook, so it must be inside.
+        <HostApiProvider value={apiRef.current}>
+          <LocaleProvider initial={locale as Lang}>
+            <App
+              api={apiRef.current}
+              onRuntime={(runtime) => {
+                univerApiRef.current =
+                  (runtime?.univerAPI as unknown as UniverApiLike | undefined) ?? null
+              }}
+            />
+          </LocaleProvider>
+        </HostApiProvider>
       ) : null}
     </div>
   )

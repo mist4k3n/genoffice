@@ -3,11 +3,10 @@ import type { SheetsSelection } from './host-api'
 /**
  * Report the active cell or range to the host.
  *
- * The renderer exposes its Univer instance on `window.__univerAPI` for
- * debugging, and that is what this reads. Using a global would be wrong if two
- * editors could be mounted at once -- but they cannot, for the reasons in
- * SheetsEditor's header, and when that changes this should take the instance
- * as an argument instead.
+ * Takes the editor's own Univer API rather than reading the `__univerAPI` dev
+ * global, which names whichever editor mounted last -- with two editors open
+ * that global reported the wrong document's selection, which is exactly the
+ * kind of quiet wrongness this bridge is prone to.
  *
  * Univer's selection events differ across versions, so this polls rather than
  * subscribing: the active range is cheap to read, the interval is idle-cheap,
@@ -20,7 +19,7 @@ interface UniverRangeLike {
   getA1Notation?: () => string
 }
 
-interface UniverApiLike {
+export interface UniverApiLike {
   getActiveWorkbook?: () => {
     getActiveSheet?: () => {
       getSheetName?: () => string
@@ -33,12 +32,13 @@ interface UniverApiLike {
 const POLL_MS = 250
 
 export function observeSelection(
+  getUniverApi: () => UniverApiLike | null | undefined,
   onChange: (selection: SheetsSelection | null) => void,
 ): () => void {
   let previous = ''
 
   const read = (): SheetsSelection | null => {
-    const api = (window as unknown as { __univerAPI?: UniverApiLike }).__univerAPI
+    const api = getUniverApi()
     const sheet = api?.getActiveWorkbook?.()?.getActiveSheet?.()
     const active = sheet?.getActiveRange?.()
     const bounds = active?.getRange?.()
