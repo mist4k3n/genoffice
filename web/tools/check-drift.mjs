@@ -54,17 +54,33 @@ const changed = [...new Set([...tracked, ...untracked])]
   .filter((f) => !f.startsWith('web/'))
   .sort()
 
-console.log(`Invariant: nothing outside web/ differs from ${base}`)
-if (changed.length === 0) {
-  console.log('  OK — fork delta is entirely under web/\n')
+// The fork now carries a deliberate upstream change (see UPSTREAM-CHANGES.md).
+// The invariant is no longer "nothing differs" but "only what we declared
+// differs" — which keeps the same discipline: an undeclared edit outside web/
+// is still a failure, and every declared one has a written justification.
+const declared = JSON.parse(readFileSync(resolve(here, '../upstream-changes.json'), 'utf8'))
+const declaredFiles = new Set(declared.files)
+const undeclared = changed.filter((f) => !declaredFiles.has(f))
+const stale = [...declaredFiles].filter((f) => !changed.includes(f))
+
+console.log(`Invariant: only declared upstream files differ from ${base}`)
+if (undeclared.length === 0) {
+  console.log(
+    `  OK — ${changed.length} declared file(s) differ, nothing undeclared` +
+      ` (web/UPSTREAM-CHANGES.md)\n`,
+  )
 } else {
   failed = true
-  console.log(`  VIOLATED — ${changed.length} file(s) outside web/ differ:\n`)
-  for (const f of changed) console.log(`    ${f}`)
+  console.log(`  VIOLATED — ${undeclared.length} undeclared file(s) outside web/ differ:\n`)
+  for (const f of undeclared) console.log(`    ${f}`)
   console.log('\n  Each of these makes every future rebase conflict.')
-  console.log('  Move it into web/, send it upstream as a PR, or record it as a')
-  console.log('  tracked patch under web/patches/ (see PLAN.md, escalation policy).\n')
+  console.log('  Move it into web/, or — if the change is genuinely necessary —')
+  console.log('  declare it in web/upstream-changes.json AND justify it in')
+  console.log('  web/UPSTREAM-CHANGES.md. Read that file before adding to the list.\n')
 }
+// A declared file that no longer differs is stale bookkeeping, usually because
+// upstream adopted the change. Worth saying, not worth failing over.
+for (const f of stale) console.log(`  NOTE — ${f} is declared but matches upstream\n`)
 
 // ── 2. Watch-list movement ──────────────────────────────────────────────────
 const driftDoc = readFileSync(resolve(here, '../DRIFT.md'), 'utf8')

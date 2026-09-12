@@ -12,6 +12,7 @@
     "check:channels": "node tools/check-channels.mjs",
     "check:server": "node tools/check-server.mjs",
     "check:mirror": "node tools/check-mirror.mjs",
+    "check:host-global": "node tools/check-host-global.mjs",
     "compat": "node tools/compat.mjs",
     "bench": "node tools/bench-range.mjs",
     "bench:memory": "node tools/bench-memory.mjs",

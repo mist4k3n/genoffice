@@ -1,0 +1,29 @@
+{
+  "baseline": "d2b898f",
+  "reason": "Per-instance host bridge, so one browser page can hold several editors. See web/UPSTREAM-CHANGES.md.",
+  "files": [
+    "apps/sheets/src/renderer/host-api.ts",
+    "apps/sheets/src/renderer/App.tsx",
+    "apps/sheets/src/renderer/ColorDropdown.tsx",
+    "apps/sheets/src/renderer/ScreenshotDialog.tsx",
+    "apps/sheets/src/renderer/WorkbookVisuals.tsx",
+    "apps/sheets/src/renderer/ai/AiChatPanel.tsx",
+    "apps/sheets/src/renderer/ai/aggregate-range.ts",
+    "apps/sheets/src/renderer/ai/create-document.ts",
+    "apps/sheets/src/renderer/ai/files-skill.ts",
+    "apps/sheets/src/renderer/ai/formula-audit.ts",
+    "apps/sheets/src/renderer/ai/image-skill.ts",
+    "apps/sheets/src/renderer/ai/search-skill.ts",
+    "apps/sheets/src/renderer/ai/transport.ts",
+    "apps/sheets/src/renderer/csv-export.ts",
+    "apps/sheets/src/renderer/i18n/locale.tsx",
+    "apps/sheets/src/renderer/merge-workbooks.ts",
+    "apps/sheets/src/renderer/op-executor.ts",
+    "apps/sheets/src/renderer/page-layout-actions.ts",
+    "apps/sheets/src/renderer/plan-operations.ts",
+    "apps/sheets/src/renderer/ribbon-actions.ts",
+    "apps/sheets/src/renderer/save-actions.ts",
+    "apps/sheets/src/renderer/univer-state.ts",
+    "apps/sheets/src/renderer/univer-sync.ts"
+  ]
+}
