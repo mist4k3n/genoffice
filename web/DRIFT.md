@@ -55,7 +55,7 @@ upstream original and fails when it changes.
 | Sidecar protocol accepting bytes instead of a `PathBuf` | 1 | not filed | phase 05, only if plaintext must never touch disk |
 | `onExit` callback on `XlsxSidecarClient` | 1 | not filed | nothing. Would delete the pid-polling in `web/server/sidecar/pool.ts` — see `FINDINGS-02.md` |
 | Export `writeWorkbookTo` from `sheets-main.ts` | 1 | not filed | nothing. Would delete `web/server/channels/save-plan.ts`, the fork's only mirrored implementation |
-| Injectable container id + host API (instead of `id="univer-container"` and `window.desktopApi`) | 1 | not filed | **multi-document embedding**. Two editors on one page currently leave both blank — see `FINDINGS-EMBED.md`. Additive; no desktop behaviour changes |
+| Pass the host API to `App` instead of reading `window.desktopApi` | 1 | not filed | **multi-document embedding only.** The container-id half was solved in `web/` (see `FINDINGS-EMBED.md`); this half cannot be, because calls leave at times no ordering controls. Without it, a second editor on a different document is refused. Additive; no desktop behaviour changes |
 
 ## Rebase runbook
 

@@ -1,9 +1,10 @@
 # Embedding the spreadsheet in a host application
 
-Status: **the component works; two of them do not.** A single editor mounts
+Status: **the component works; one document at a time.** A single editor mounts
 into a host React tree, drives a real document, and reports everything the host
-needs. Mounting two at once produces a blank editor, and that is an upstream
-constraint rather than a bug in the embed.
+needs. Tab switching works at ~450ms. Two editors on *different* documents are
+refused with an explanatory error rather than silently showing one document's
+data in the other's tab.
 
 ```sh
 cd web
@@ -38,53 +39,90 @@ renderer stays unmodified and does not know a host exists. Theme scopes to our
 container rather than `<html>`, because the tokens key off a bare
 `[data-theme]` attribute selector.
 
-## The blocker: one editor per page
+## Two page-level singletons, and how far they can be fixed in this repo
 
-Two `<SheetsEditor>` instances mounted together leave the second blank, and
-switching to it leaves the *first* blank too.
+Upstream has two, both because an Electron window holds exactly one workbook:
 
-Measured in the harness — two tabs, both mounted, one hidden:
-
-| | container | canvases |
-| --- | --- | --- |
-| visible tab | 1254×733 | toolbar + grid (2508×1335) |
-| hidden tab | 0×0 | **none** |
-
-After switching tabs, the newly visible one still had **zero canvases** and the
-newly hidden one collapsed to 0×0. Neither is usable.
-
-Two hard singletons underneath, both from the Electron model of one window per
-workbook:
-
-1. **`window.desktopApi` is a global**, and the transport baked into it carries
-   the document id. Two documents need two of them.
-2. **`App` renders `<div id="univer-container">`**, which Univer resolves *by id*
-   (`createUniver({ container: 'univer-container' })`), and which
+1. **`App` renders `<div id="univer-container">`**, which Univer resolves *by
+   id* (`createUniver({ container: 'univer-container' })`), and which
    `shape-draw.ts`, the formula-bar toggle and the keyboard handler all find
-   with `getElementById`. Two instances produce two elements with one id, and
-   every one of those lookups silently returns the first.
+   with `getElementById`.
+2. **`window.desktopApi` is a global**, and the transport inside it carries the
+   document id.
 
-### The workaround, measured
+Mounting two editors originally collapsed both onto whichever came first: the
+second was blank, and after a tab switch the first was blank too.
 
-Mounting only the active tab works. A tab switch is a full remount and reopen:
+### The container id: fixed here, no upstream change
+
+Made *owned* rather than shared — exactly one editor holds the id at a time, and
+ownership moves on mount and on becoming visible. Two facts make it work, both
+measured rather than assumed:
+
+- **Univer resolves the id once and keeps the element.** Renaming a live
+  container left its canvases untouched and cells still writable through it.
+- **`createUniver` runs in a `useEffect`**, and React runs a parent's
+  `useLayoutEffect` first — so an editor can take ownership after its own
+  markup exists and before the lookup happens.
+
+Start-up is also serialised. React runs every layout effect in a commit before
+any passive effect, so two editors mounting together both claim and only then
+both call `createUniver`; the second claim wins and the first resolves the wrong
+element. An editor now waits for the previous one's grid before rendering.
+
+### The host API: cannot be fixed here
+
+Ownership routing was tried and **measured to fail**: with two editors on
+different documents, *both loaded the same one*.
+
+The reason is structural. The document load is not part of mounting — the
+renderer asks for it well after the grid exists — and every later call (a scroll
+read, a save) leaves at a time nobody controls. Whoever owns the API then
+answers. No ordering trick fixes it, because a call has no way to say which
+React tree it came from.
+
+So a second editor on a **different** document is refused outright:
 
 ```
-switch → grid ready:  502ms, 464ms, 471ms, 433ms
+Cannot open "gamma-sales.xlsx" while "acme-budget.xlsx" is open in this page:
+the renderer reads a single global host API, so both editors would share one
+document.
 ```
 
-**~450ms per tab switch.** Noticeable, and far better than an iframe reload,
-but it is a remount — unsaved state lives in the server session, so nothing is
-lost, but scroll position and selection are.
+Showing a user someone else's spreadsheet in a tab labelled with their filename
+is far worse than showing them an error. Two editors on the *same* document are
+allowed — they share a session, which is what they would do anyway.
 
-### The fix
+### What a host does today, measured
 
-A small, well-shaped upstream change: thread a container id through
-`App` → `ExcelShell` → the three helpers, and let the host API be injected
-rather than read from `window`. Both are additive and neither changes desktop
-behaviour. Filed in `DRIFT.md` as a Tier 1 PR.
+Mount the active document only. A tab switch is a remount:
 
-Until then a host with tabs mounts the active document only, and
-`mount=active` is the supported mode.
+```
+switch → grid ready:  515ms, 433ms, 466ms, 419ms
+```
+
+**~450ms per tab switch**, with each editor loading its own document
+(`Budget!A1` and `Sales!A1` respectively) and no errors. Unsaved work is not
+lost — it lives in the server session — but scroll position and selection are.
+
+### Two bugs found building it
+
+Both from releasing ownership too eagerly, and both worth recording because
+neither was visible in review:
+
+- The routing proxy returned `undefined` for methods once ownership was
+  released, so the renderer's own teardown call to `closeWorkbook` threw
+  mid-unmount and left the page unable to mount anything afterwards. The last
+  owner's API now survives release.
+- An editor that unmounted during start-up held the mount queue for its full
+  timeout, turning every tab switch into a twenty-second wait.
+
+### If true multi-document is wanted
+
+Either pass the host API to `App` instead of reading a global — a small
+additive upstream change, tracked in `DRIFT.md` — or give each editor its own
+iframe, since a frame has its own realm and therefore its own globals, at the
+cost of a second copy of the bundle.
 
 ## What this does not yet cover
 
