@@ -7,6 +7,7 @@ import type { Lang } from '../../../packages/i18n/src/index'
 import type { SheetsEditorProps, SheetsExport, SheetsHandle, SheetsSelection } from './host-api'
 import { HostTransportError } from '../host/transport'
 import { observeSelection, type UniverApiLike } from './selection'
+import { trackWorkbookUnit, type UniverPermissionLike } from './read-only'
 import { installGlobalsOnce } from './globals'
 import { buildDesktopApi, type ExportedWorkbook } from '../host/desktop-api'
 import { createHttpTransport, type HostTransport } from '../host/transport'
@@ -206,6 +207,22 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
     }),
     [dispatch, props.ref],
   )
+
+  /**
+   * A viewer's grid must not take input.
+   *
+   * The server already refuses their save, but upstream's renderer ignores the
+   * workbook's `readOnly` flag, so without this a viewer types freely and
+   * learns the truth from a 403. Papan's Collabora does not behave that way and
+   * neither does Excel.
+   */
+  useEffect(() => {
+    if (!ready) return
+    return trackWorkbookUnit(() => univerApiRef.current as UniverPermissionLike | null, {
+      readOnly,
+      report: (message) => handlers.current.onError?.(new Error(message)),
+    })
+  }, [ready, readOnly])
 
   /**
    * A canvas inside a `display: none` subtree has no size, so Univer's
