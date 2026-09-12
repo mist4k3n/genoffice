@@ -10,6 +10,8 @@
  * Channel names are upstream's, verbatim — see DRIFT.md.
  */
 
+import { READ_ONLY_HEADER } from '../../protocol'
+
 export interface HostTransport {
   /** request/response, mirroring ipcRenderer.invoke */
   invoke<T>(channel: string, ...args: unknown[]): Promise<T>
@@ -67,6 +69,15 @@ export interface HttpTransportOptions {
   readonly fetchImpl?: typeof fetch | undefined
   /** Injected for tests; defaults to the global WebSocket. */
   readonly webSocketImpl?: typeof WebSocket | undefined
+  /**
+   * Ask the server to open this connection read-only.
+   *
+   * A downgrade the server intersects with what it already decided, so it can
+   * only ever give up rights. The conflict banner's "show saved version"
+   * mounts a second editor on the stored bytes beside the dirty one, and that
+   * second one must not be able to write.
+   */
+  readonly readOnly?: boolean | undefined
 }
 
 /** Wire envelope for a push. The server multiplexes every channel over one socket. */
@@ -149,6 +160,7 @@ export function createHttpTransport(options: HttpTransportOptions): HostTranspor
         ...(await options.headers?.()),
       }
       if (options.documentId) headers['x-document-id'] = options.documentId
+      if (options.readOnly) headers[READ_ONLY_HEADER] = '1'
 
       let response: Response
       try {
@@ -187,6 +199,7 @@ export function createHttpTransport(options: HttpTransportOptions): HostTranspor
     async fetchBytes(path: string): Promise<Uint8Array> {
       const headers: Record<string, string> = { ...(await options.headers?.()) }
       if (options.documentId) headers['x-document-id'] = options.documentId
+      if (options.readOnly) headers[READ_ONLY_HEADER] = '1'
 
       let response: Response
       try {

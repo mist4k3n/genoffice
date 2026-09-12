@@ -21,6 +21,7 @@ import { Hono } from 'hono'
 
 import { SheetsError, VersionConflictError } from './errors'
 import { createSheetsRouter } from './router'
+import { READ_ONLY_HEADER } from '../protocol'
 import type { RequestIdentity, StorageAdapter, WorkbookMetadata } from './ports'
 
 const args = process.argv.slice(2)
@@ -149,7 +150,7 @@ const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 // CORS for the Vite dev server on another port. Production pins an origin.
 app.use('*', async (c, next) => {
   c.header('access-control-allow-origin', '*')
-  c.header('access-control-allow-headers', 'content-type, x-document-id')
+  c.header('access-control-allow-headers', `content-type, x-document-id, ${READ_ONLY_HEADER}`)
   c.header('access-control-allow-methods', 'GET, POST, OPTIONS')
   if (c.req.method === 'OPTIONS') return c.body(null, 204)
   await next()
@@ -180,6 +181,21 @@ app.get(
 // told twice. Pointing it at a different folder than the server serves
 // silently compares two unrelated sets of bytes.
 app.get('/dev-info', (c) => c.json({ documentRoot: root }))
+
+/**
+ * Stand-in for the host's realtime layer.
+ *
+ * Papan learns that a document changed from its own broadcast and tells the
+ * banner; there is no port for storage to announce itself, so the server has
+ * to be told. This is that call, reachable from a terminal:
+ *
+ *   curl -X POST 'http://127.0.0.1:5274/dev-touch?doc=acme-budget.xlsx'
+ */
+app.post('/dev-touch', async (c) => {
+  const documentId = c.req.query('doc')
+  if (!documentId) return c.json({ error: 'pass ?doc=<filename>' }, 400)
+  return c.json({ notified: await sheets.documentChanged(documentId) })
+})
 
 app.route('/', sheets.app)
 
