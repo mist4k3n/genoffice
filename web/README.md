@@ -76,6 +76,31 @@ keeps its unsaved edits — the copy carries them too. Add `onSaveAsRequest` to
 answer the editor's own ribbon Save As button, which produces the same bytes
 without anyone calling the handle.
 
+### Conflict
+
+`onConflict` fires while the document is open, not only when a save fails, so
+a host can show a banner while there is still a choice to make. Tell the server
+when your storage moves:
+
+```ts
+// wherever you learn the document changed — realtime, webhook, another writer
+await sheets.documentChanged(fileId)
+```
+
+The three resolutions a banner offers map to three calls:
+
+| Button | Call |
+| --- | --- |
+| Keep mine | dismiss the banner; nothing to call |
+| Overwrite | `handle.save({ overwrite: true })` |
+| Discard mine | `handle.reload()` |
+| Show saved version | mount a second `<SheetsEditor readOnly />` on the same document |
+
+`overwrite` does not skip the version check — it moves it to a compare-and-set
+against what storage holds now, so a document that moves *again* mid-save still
+conflicts. `readOnly` is a downgrade the server intersects with the rights
+`identify()` granted; it can never raise them.
+
 ## Serving it
 
 ```ts

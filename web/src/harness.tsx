@@ -2,7 +2,12 @@ import { useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 
 import { SheetsEditor } from './embed/SheetsEditor'
-import type { SheetsExport, SheetsHandle, SheetsSelection } from './embed/host-api'
+import type {
+  SheetsConflictEvent,
+  SheetsExport,
+  SheetsHandle,
+  SheetsSelection,
+} from './embed/host-api'
 import type { UiTheme } from '../../apps/sheets/src/shared/desktop-api'
 
 /**
@@ -40,6 +45,10 @@ function Harness(): React.JSX.Element {
   const [active, setActive] = useState(0)
   const [theme, setTheme] = useState<UiTheme>('light')
   const [log, setLog] = useState<string[]>([])
+  // Papan's ConflictBanner state, reproduced: which tabs are conflicted, and
+  // which of them is showing the stored version beside its own edits.
+  const [conflicts, setConflicts] = useState<Record<string, SheetsConflictEvent>>({})
+  const [comparing, setComparing] = useState<Record<string, boolean>>({})
 
   const note = (line: string) =>
     setLog((previous) => [`${new Date().toLocaleTimeString()}  ${line}`, ...previous].slice(0, 40))
@@ -61,16 +70,61 @@ function Harness(): React.JSX.Element {
   }
 
   /** The rest of the handle, so the harness exercises all of it. */
-  async function command(tabId: string | undefined, name: 'save' | 'reload'): Promise<void> {
+  async function command(
+    tabId: string | undefined,
+    name: 'save' | 'reload',
+    options?: { overwrite?: boolean },
+  ): Promise<void> {
     const handle = tabId ? handles.current.get(tabId) : null
     if (!handle) return note(`no editor to ${name}`)
     try {
-      note(`${name} requested (${handle.pendingEdits()} pending)…`)
-      await handle[name]()
+      note(`${name}${options?.overwrite ? ' (overwrite)' : ''} requested (${handle.pendingEdits()} pending)…`)
+      if (name === 'save') await handle.save(options)
+      else await handle.reload()
       note(`${name} done`)
+      // The banner clears on a resolution, never on its own: a conflict the
+      // user has not answered must not disappear because time passed.
+      if (tabId) clearConflict(tabId)
     } catch (error) {
       note(`${name.toUpperCase()} FAILED ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  function clearConflict(tabId: string): void {
+    setConflicts(({ [tabId]: _gone, ...rest }) => rest)
+    setComparing((current) => ({ ...current, [tabId]: false }))
+  }
+
+  /**
+   * Papan's three buttons, and nothing more: keep-mine is dismissing the
+   * banner, overwrite is a save that wins, show-saved-version is a second
+   * read-only editor on the stored bytes.
+   */
+  function ConflictBanner({ tabId }: { tabId: string }): React.JSX.Element | null {
+    const conflict = conflicts[tabId]
+    if (!conflict) return null
+    return (
+      <div
+        style={{
+          display: 'flex', gap: 8, alignItems: 'center', padding: '6px 10px',
+          background: '#fff4e5', borderBottom: '1px solid #f0b37e', fontSize: 12,
+        }}
+      >
+        <strong>This document changed elsewhere.</strong>
+        <span style={{ opacity: 0.75 }}>
+          now at {conflict.currentVersion.slice(0, 12)} · {conflict.pendingEdits} unsaved edit(s) ·
+          {' '}{conflict.source}
+        </span>
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <button onClick={() => clearConflict(tabId)}>Keep mine</button>
+          <button onClick={() => void command(tabId, 'save', { overwrite: true })}>Overwrite</button>
+          <button onClick={() => void command(tabId, 'reload')}>Discard mine</button>
+          <button onClick={() => setComparing((c) => ({ ...c, [tabId]: !c[tabId] }))}>
+            {comparing[tabId] ? 'Hide saved version' : 'Show saved version'}
+          </button>
+        </span>
+      </div>
+    )
   }
 
   function receive(exported: SheetsExport, via: string): void {
@@ -122,8 +176,16 @@ function Harness(): React.JSX.Element {
             <div
               key={tab.id}
               // The hazard, reproduced exactly: hidden, not unmounted.
-              style={{ display: visible ? 'flex' : 'none', position: 'absolute', inset: 0 }}
+              style={{
+                display: visible ? 'flex' : 'none',
+                flexDirection: 'column',
+                position: 'absolute',
+                inset: 0,
+              }}
             >
+              <ConflictBanner tabId={tab.id} />
+              <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
+              <div style={{ flex: 1, display: 'flex', minWidth: 0 }}>
               <SheetsEditor
                 ref={(handle) => void handles.current.set(tab.id, handle)}
                 documentId={tab.documentId}
@@ -135,15 +197,37 @@ function Harness(): React.JSX.Element {
                 onSaved={(e) =>
                   note(`${tab.documentId}: SAVED, rewrote [${e.touchedEntries.join(', ') || 'nothing'}]`)
                 }
-                onConflict={(e) =>
-                  note(`${tab.documentId}: CONFLICT, current version ${e.currentVersion}`)
-                }
+                onConflict={(e) => {
+                  note(`${tab.documentId}: CONFLICT (${e.source}) at ${e.currentVersion}`)
+                  setConflicts((current) => ({ ...current, [tab.id]: e }))
+                }}
                 onSelectionChange={(s: SheetsSelection | null) =>
                   note(`${tab.documentId}: selection ${s ? `${s.sheetName}!${s.range}` : 'none'}`)
                 }
                 onSaveAsRequest={(exported) => receive(exported, 'ribbon Save As')}
                 onError={(error) => note(`${tab.documentId}: ERROR ${error.message}`)}
               />
+              </div>
+              {comparing[tab.id] ? (
+                // "Show saved version": a second editor on the same document,
+                // opened read-only, so the stored bytes sit beside the dirty
+                // ones. It is a fresh session, so it reads what storage holds
+                // now rather than what this tab has pending.
+                <div style={{ flex: 1, display: 'flex', minWidth: 0, borderLeft: '2px solid #f0b37e' }}>
+                  <SheetsEditor
+                    documentId={tab.documentId}
+                    apiBase={API}
+                    theme={theme}
+                    visible={visible}
+                    readOnly
+                    onLoaded={(file) =>
+                      note(`${tab.documentId}: saved version mounted, readOnly=${file.readOnly}`)
+                    }
+                    onError={(error) => note(`${tab.documentId} (saved): ERROR ${error.message}`)}
+                  />
+                </div>
+              ) : null}
+              </div>
             </div>
           )
         })}

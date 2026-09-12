@@ -175,6 +175,99 @@ produces the same export, which arrives at the host as `onSaveAsRequest`.
 offers Save As only through its own chrome still answers the button that is
 already on screen, instead of doing nothing.
 
+## Conflict
+
+Papan's `ConflictBanner` has three buttons — keep-mine, overwrite,
+show-saved-version — and its trigger is a realtime `oo-conflict` broadcast:
+*the file changed while the room is dirty*. All three, and the trigger, now
+work. Verified in the harness, which reproduces the banner.
+
+### The trigger is the part that was missing
+
+Upstream's guard is a re-hash at save time, so it can only ever report a
+conflict **after** someone tried to save. A banner exists to say so while there
+is still a choice, which means the editor has to learn about it while idle.
+
+`SheetsRouter.documentChanged(documentId)` is how. The host calls it from
+wherever it learns that storage moved — its own realtime layer, a webhook, the
+write path of another editor — and the server tells every session that is
+behind. There is no port for storage to announce itself and polling `head()`
+would be a guess dressed up as a fact, so the host is the source of truth
+about its own storage.
+
+Our own save path raises it too, for the case the host cannot see: two tabs on
+one document, where the write went through *our* storage adapter rather than
+through anything Papan's realtime layer watches.
+
+`onConflict` now carries `source`: `'announced'` (idle, banner-shaped) or
+`'rejected'` (a save that already failed). Same conflict, found early or late.
+
+### Addressing, and why it is not optional
+
+A push reaches every socket watching a document — including the socket whose
+own save caused the change. So the message names the **stale sessions**, and a
+client recognises itself by the session id it got when it opened. Without
+that, saving in one tab raises a banner in that same tab, which is the fastest
+way to teach people to ignore banners.
+
+The session id changes on every save (the server reopens the sidecar over the
+saved bytes), so the client re-reads it from the save result as well as from
+the open.
+
+### Overwrite
+
+`handle.save({ overwrite: true })`. It does not skip the version check, it
+*moves* it: the save becomes a compare-and-set against what storage holds now,
+so a document that moves **again** mid-save still conflicts. What the person
+approved was overwriting the version they were shown.
+
+The flag cannot originate in the renderer — it is a decision a person made —
+and `onMenuAction` carries an action and nothing else. So it is latched on the
+host command bus and claimed by the bridge on the call the action produces,
+one-shot with a 30-second window. A command the renderer returns early from
+produces no call at all, and an overwrite left standing would attach itself to
+whatever saved next; an autosave inheriting a person's decision about a
+document they are no longer looking at is the failure that window closes.
+
+It rides as a **second argument**. Upstream's preload sends exactly one, so
+`args[1]` is unambiguously ours, and upstream's `.strict()` request schema
+stays usable verbatim — a flag folded into the request the renderer builds
+would fail the renderer's own validation before leaving the browser.
+
+### Show saved version
+
+`readOnly` on the component, which travels as a header the server **intersects**
+with what `identify()` returned. A downgrade only: a client can give up rights
+it has and can never claim rights it does not. Mounting a second editor on the
+same document with `readOnly` gives the side-by-side compare view, on a fresh
+session that reads what storage holds now.
+
+### Measured
+
+```
+tab A edits, saves          → tab B: CONFLICT (announced), tab A: no banner
+tab B saves                 → rejected, version_conflict, current version carried
+tab B Overwrite             → saved; tab B's edit is in the file, tab A's is gone
+external change + notify    → both tabs: CONFLICT (announced)
+Show saved version          → second editor mounts, readOnly=true
+```
+
+## Theme scoping is half-broken
+
+Found while testing the above, and it is not what this component's own comment
+claimed. `theme="dark"` scopes correctly. **`theme="light"` does not**, on a
+browser whose OS prefers dark.
+
+Upstream's `tokens.css` defines the dark palette under a bare
+`[data-theme='dark']` selector, which any container matches — but the light
+palette only under `:root`, and `:root` is `<html>`. A container asking for
+light therefore defines nothing and inherits the dark values `<html>` picked up
+from the `prefers-color-scheme` block.
+
+Stamping `<html>` would fix it and is what upstream's `main.tsx` does, but the
+attribute is page-global and Papan has its own theming. This belongs with the
+theme mapping work below, now with a known mechanism rather than a suspicion.
+
 ### Fixed on the way past
 
 `HostTransportError` now carries the server's `detail`. The conflict event read
@@ -188,7 +281,8 @@ a host had ever mounted kept one open for the life of the page.
 ## What this does not yet cover
 
 - Theme: Papan has `dark` / `dim` / `light`; upstream has `light` / `dark` /
-  `system`. `dim` has no mapping yet.
+  `system`. `dim` has no mapping yet, and scoped `light` does not work at all —
+  see "Theme scoping is half-broken" above.
 - Locale: Papan ships `en`, `zh-CN`, `zh-TW`, `ms`; upstream has eleven with
   different codes. The mapping is unwritten.
 - The selection bridge **polls at 250ms** rather than subscribing. Univer's
