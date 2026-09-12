@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 
 import { SheetsEditor } from './embed/SheetsEditor'
-import type { SheetsSelection } from './embed/host-api'
+import type { SheetsExport, SheetsHandle, SheetsSelection } from './embed/host-api'
 import type { UiTheme } from '../../apps/sheets/src/shared/desktop-api'
 
 /**
@@ -35,12 +35,56 @@ function Harness(): React.JSX.Element {
   const mountAll = params.get('mount') !== 'active'
 
   const [tabs] = useState<Tab[]>(docs.map((documentId, i) => ({ id: `tab-${i}`, documentId })))
+  // One handle per tab, the way a host keeps a ref per open editor.
+  const handles = useRef(new Map<string, SheetsHandle | null>())
   const [active, setActive] = useState(0)
   const [theme, setTheme] = useState<UiTheme>('light')
   const [log, setLog] = useState<string[]>([])
 
   const note = (line: string) =>
     setLog((previous) => [`${new Date().toLocaleTimeString()}  ${line}`, ...previous].slice(0, 40))
+
+  /**
+   * The host half of Save As: the editor produces bytes, the host decides
+   * where they go. Papan passes them to its picker's `customSave`; a browser
+   * harness has no VFS, so a download is the honest equivalent.
+   */
+  async function saveAs(tabId: string | undefined): Promise<void> {
+    const handle = tabId ? handles.current.get(tabId) : null
+    if (!handle) return note('no editor to export')
+    try {
+      note('export requested…')
+      receive(await handle.exportBytes(), 'handle.exportBytes()')
+    } catch (error) {
+      note(`EXPORT FAILED ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** The rest of the handle, so the harness exercises all of it. */
+  async function command(tabId: string | undefined, name: 'save' | 'reload'): Promise<void> {
+    const handle = tabId ? handles.current.get(tabId) : null
+    if (!handle) return note(`no editor to ${name}`)
+    try {
+      note(`${name} requested (${handle.pendingEdits()} pending)…`)
+      await handle[name]()
+      note(`${name} done`)
+    } catch (error) {
+      note(`${name.toUpperCase()} FAILED ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  function receive(exported: SheetsExport, via: string): void {
+    note(
+      `export via ${via}: ${exported.bytes.byteLength} bytes, ` +
+        `rewrote [${exported.touchedEntries.join(', ') || 'nothing'}]`,
+    )
+    const url = URL.createObjectURL(new Blob([exported.bytes as unknown as BlobPart]))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = exported.suggestedName.replace(/\.xlsx$/i, ' (copy).xlsx')
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', font: '13px system-ui' }}>
@@ -54,6 +98,9 @@ function Harness(): React.JSX.Element {
             {tab.documentId}
           </button>
         ))}
+        <button onClick={() => void command(tabs[active]?.id, 'save')}>Save</button>
+        <button onClick={() => void saveAs(tabs[active]?.id)}>Save As…</button>
+        <button onClick={() => void command(tabs[active]?.id, 'reload')}>Reload</button>
         <span style={{ marginLeft: 'auto' }}>
           theme{' '}
           <select value={theme} onChange={(e) => setTheme(e.target.value as UiTheme)}>
@@ -78,6 +125,7 @@ function Harness(): React.JSX.Element {
               style={{ display: visible ? 'flex' : 'none', position: 'absolute', inset: 0 }}
             >
               <SheetsEditor
+                ref={(handle) => void handles.current.set(tab.id, handle)}
                 documentId={tab.documentId}
                 apiBase={API}
                 theme={theme}
@@ -93,6 +141,7 @@ function Harness(): React.JSX.Element {
                 onSelectionChange={(s: SheetsSelection | null) =>
                   note(`${tab.documentId}: selection ${s ? `${s.sheetName}!${s.range}` : 'none'}`)
                 }
+                onSaveAsRequest={(exported) => receive(exported, 'ribbon Save As')}
                 onError={(error) => note(`${tab.documentId}: ERROR ${error.message}`)}
               />
             </div>
