@@ -13,6 +13,7 @@ import {
 } from '../../../apps/sheets/src/shared/desktop-api'
 import { IPC_CHANNELS } from '../../../apps/sheets/src/shared/ipc-channels'
 import { SheetsError, VersionConflictError } from '../errors'
+import { canCopy, canWrite } from '../ports'
 import { exportIdentityKey } from '../exports'
 import {
   CONFLICT_CHANNEL,
@@ -59,11 +60,16 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
   const request = resolveTransferredEdits(workbookSaveRequestSchema.parse(context.args[0]))
   const session = context.registry.require(request.sessionId, context.identity)
 
-  if (!session.canEdit) {
-    throw new SheetsError('forbidden', 'This workbook is open read-only.')
-  }
-
+  // Save As is a copy, and copying is what `readcopy` names. It gets its own
+  // check rather than riding the write check -- refusing a viewer the one
+  // thing their permission exists to allow was the concrete cost of treating
+  // permission as a boolean.
   if (request.mode === 'save-as') return exportPatchedBytes(context, session, request)
+
+  // The *request's* permission, never the session's. A grant revoked
+  // mid-session has to fail on the next call: the session's value is a record
+  // of what was true when the workbook opened.
+  requireWritable(context)
 
   // The web equivalent of upstream's "the file changed on disk" guard. Same
   // intent, better outcome: the client is handed the version it lost to.
@@ -173,6 +179,17 @@ async function exportPatchedBytes(
   session: WorkbookSession,
   request: WorkbookSaveRequest,
 ): Promise<WorkbookSaveExportResult> {
+  const { permission } = context.identity
+  if (!canCopy(permission)) {
+    throw new SheetsError('forbidden', 'This workbook may not be copied.')
+  }
+  // A viewer may take the document away; a viewer may not launder edits
+  // through the copy. The renderer of a read-only session produces none, so
+  // this only ever fires for a request that did not come from one.
+  if (!canWrite(permission) && !isUnmodified(request)) {
+    throw new SheetsError('forbidden', 'This workbook is open read-only.')
+  }
+
   const current = await context.storage.head(session.documentId)
   const assembled = await assemble(context, session, request, current.name)
   try {
@@ -209,7 +226,7 @@ async function exportPatchedBytes(
 const writeWorkbookRecovery: ChannelHandler = async (context) => {
   const request = resolveTransferredEdits(workbookSaveRequestSchema.parse(context.args[0]))
   const session = context.registry.require(request.sessionId, context.identity)
-  if (!session.canEdit || !context.drafts) return { ok: false }
+  if (!canWrite(context.identity.permission) || !context.drafts) return { ok: false }
 
   const current = await context.storage.head(session.documentId)
   // A recovery copy of edits to a version the document has already left is
@@ -268,8 +285,34 @@ const abortSaveEditsTransfer: ChannelHandler = async (context) => {
 }
 
 function requireEditableSession(context: ChannelContext, sessionId: string): void {
-  const session = context.registry.require(sessionId, context.identity)
-  if (!session.canEdit) throw new SheetsError('forbidden', 'This workbook is open read-only.')
+  context.registry.require(sessionId, context.identity)
+  requireWritable(context)
+}
+
+/** Fail-closed on this request's permission, not on what the session recorded. */
+function requireWritable(context: ChannelContext): void {
+  if (!canWrite(context.identity.permission)) {
+    throw new SheetsError('forbidden', 'This workbook is open read-only.')
+  }
+}
+
+/**
+ * Does this save request ask to change anything?
+ *
+ * Derived from the payload rather than from a list of field names, and that is
+ * the point: upstream adds mutation kinds regularly -- sparklines, pivot
+ * refreshes, protected ranges -- and a hand-written list would silently stop
+ * covering them. Anything that is not the request's own identity counts, so a
+ * field added upstream is refused for a viewer by default rather than allowed
+ * by omission.
+ */
+export function isUnmodified(request: WorkbookSaveRequest): boolean {
+  const identityFields = new Set(['sessionId', 'mode', 'editsTransferId'])
+  for (const [key, value] of Object.entries(request)) {
+    if (identityFields.has(key) || value === undefined || value === null) continue
+    if (Array.isArray(value) ? value.length > 0 : true) return false
+  }
+  return true
 }
 
 export const saveChannels: ChannelTable = {

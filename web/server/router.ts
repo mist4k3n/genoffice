@@ -2,10 +2,12 @@ import { readFile } from 'node:fs/promises'
 
 import { Hono } from 'hono'
 
-import { toSheetsError } from './errors'
+import { SheetsError, toSheetsError } from './errors'
 import { ExportStore, exportIdentityKey } from './exports'
 import { CONFLICT_CHANNEL, READ_ONLY_HEADER, conflictFor } from '../protocol'
 import {
+  canRead,
+  canWrite,
   DEFAULT_PREFERENCES,
   DEFAULT_SIDECAR,
   type RequestIdentity,
@@ -125,6 +127,17 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
       return c.json({ error: { code: 'unauthorized', message: failure.message } }, 401)
     }
 
+    // Separate from the block above so it keeps its own status. Who you are
+    // failing to be (401) and what you may not do (403, or 404 for a document
+    // you must not learn exists) are different answers.
+    const unreadable = readableOrError(identity)
+    if (unreadable) {
+      return c.json(
+        { error: { code: unreadable.code, message: unreadable.message } },
+        unreadable.status as 403,
+      )
+    }
+
     const handler = CHANNELS[channel]
     if (!handler) {
       return c.json(
@@ -195,6 +208,13 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     } catch (error) {
       const failure = toSheetsError(error)
       return c.json({ error: { code: 'unauthorized', message: failure.message } }, 401)
+    }
+    const unreadable = readableOrError(identity)
+    if (unreadable) {
+      return c.json(
+        { error: { code: unreadable.code, message: unreadable.message } },
+        unreadable.status as 403,
+      )
     }
 
     let slot: ReturnType<ExportStore['take']>
@@ -270,8 +290,31 @@ const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadshe
  * did not. The conflict banner's "show saved version" needs it -- it mounts a
  * second editor on the stored bytes beside the dirty one, and that one must
  * not be able to write.
+ *
+ * It caps at `readcopy` rather than dropping to `none`: the point is a session
+ * that reads and cannot write, and `none` cannot even open.
  */
-function readOnlyIfAsked(identity: RequestIdentity, request: Request): RequestIdentity {
-  if (!identity.canEdit) return identity
-  return request.headers.get(READ_ONLY_HEADER) ? { ...identity, canEdit: false } : identity
+export function readOnlyIfAsked(identity: RequestIdentity, request: Request): RequestIdentity {
+  if (!canWrite(identity.permission)) return identity
+  return request.headers.get(READ_ONLY_HEADER)
+    ? { ...identity, permission: 'readcopy' }
+    : identity
+}
+
+/**
+ * The one gate every channel passes through.
+ *
+ * `hidden` is answered as `not_found` rather than `forbidden`, because that is
+ * what it means: the caller must not learn the document exists. `none` is a
+ * refusal about a document they already know about, so it says so.
+ *
+ * This runs per request, on the permission `identify()` just resolved. That is
+ * the fail-closed property the briefing asks for: a grant revoked mid-session
+ * stops the next call, not the next open.
+ */
+export function readableOrError(identity: RequestIdentity): SheetsError | null {
+  if (canRead(identity.permission)) return null
+  return identity.permission === 'hidden'
+    ? new SheetsError('not_found', 'No such document.')
+    : new SheetsError('forbidden', 'You do not have access to this document.')
 }
