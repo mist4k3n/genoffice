@@ -11,6 +11,7 @@ import { installGlobalsOnce } from './globals'
 import { buildDesktopApi, type ExportedWorkbook } from '../host/desktop-api'
 import { createHttpTransport, type HostTransport } from '../host/transport'
 import { createHostCommandBus } from '../host/commands'
+import { CONFLICT_CHANNEL, type DocumentConflict, type HostCallOptions } from '../../protocol'
 import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
 import { claimContainerId, enqueueMount, releaseContainerId, whenGridReady } from './singletons'
 import { installUnsavedGuard } from '../host/unsaved-guard'
@@ -32,7 +33,14 @@ import { installUnsavedGuard } from '../host/unsaved-guard'
  * part needs no upstream change.
  */
 export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
-  const { documentId, apiBase, theme = 'system', locale = 'en', visible = true } = props
+  const {
+    documentId,
+    apiBase,
+    theme = 'system',
+    locale = 'en',
+    visible = true,
+    readOnly = false,
+  } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const [ready, setReady] = useState(false)
 
@@ -57,6 +65,10 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   // Mirrors notifyPendingEdits, so pendingEdits() can answer synchronously
   // the way a host reading it during a close prompt needs.
   const pendingEditsRef = useRef(0)
+  // This editor's session, learned from the open result. A conflict push
+  // reaches every socket watching the document, including the one whose own
+  // save caused it, so a client has to recognise itself in the message.
+  const sessionIdRef = useRef<string | null>(null)
   // Callers of save()/exportBytes() waiting on the renderer to come back.
   const awaitingSave = useRef(createWaiters<void>())
   const awaitingExport = useRef(createWaiters<SheetsExport>())
@@ -64,6 +76,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   useEffect(() => {
     let cancelled = false
     let transport: HostTransport | null = null
+    let unsubscribeConflict: (() => void) | null = null
     void (async () => {
       await installGlobalsOnce()
       if (cancelled) return
@@ -71,18 +84,33 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
       // The transport is built here rather than inside createHttpDesktopApi so
       // that unmounting can close its socket. Without that, every editor a
       // host ever mounted keeps a WebSocket open for the life of the page.
-      transport = createHttpTransport({ baseUrl: apiBase, documentId })
+      transport = createHttpTransport({ baseUrl: apiBase, documentId, readOnly })
       apiRef.current = buildDesktopApi(transport, {
         unsavedGuard: installUnsavedGuard(),
         observer: (event) => {
-          trackLocally(event, pendingEditsRef, {
+          trackLocally(event, pendingEditsRef, sessionIdRef, {
             save: awaitingSave.current,
             export: awaitingExport.current,
           })
-          reportToHost(event, handlers.current)
+          reportToHost(event, handlers.current, pendingEditsRef)
         },
         commands,
         onExport: (exported) => deliverExport(exported, awaitingExport.current, handlers.current),
+      })
+      // The document moved while it is open -- someone else's save, or the
+      // host's own storage layer telling the server so. This is the banner's
+      // trigger, and the whole reason it can be a banner: upstream's desktop
+      // guard can only report a conflict once a save has already failed.
+      unsubscribeConflict = transport.subscribe(CONFLICT_CHANNEL, (...args: unknown[]) => {
+        const conflict = args[0] as DocumentConflict | undefined
+        if (!conflict || !sessionIdRef.current) return
+        if (!conflict.sessions.includes(sessionIdRef.current)) return
+        handlers.current.onConflict?.({
+          currentVersion: conflict.currentVersion,
+          pendingEdits: conflict.pendingEdits,
+          message: 'The document changed since this session opened it.',
+          source: 'announced',
+        })
       })
       // Start-up is serialised: see enqueueMount. The editor does not render
       // until its turn, and holds the queue until its grid exists.
@@ -95,13 +123,15 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
     })()
     return () => {
       cancelled = true
+      unsubscribeConflict?.()
+      sessionIdRef.current = null
       transport?.dispose()
       apiRef.current = null
       // Anyone still waiting is waiting on a renderer that no longer exists.
       awaitingSave.current.abandon(new Error('The editor was closed.'))
       awaitingExport.current.abandon(new Error('The editor was closed.'))
     }
-  }, [apiBase, documentId, locale, token, commands, generation])
+  }, [apiBase, documentId, locale, readOnly, token, commands, generation])
 
   /**
    * Take the singletons before upstream's `useEffect` resolves the container
@@ -138,9 +168,10 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
    * listening would be dropped -- hence the wait.
    */
   const dispatch = useCallback(
-    async (action: MenuAction): Promise<void> => {
+    async (action: MenuAction, options?: HostCallOptions): Promise<void> => {
       if (!commands.connected) await waitFor(() => commands.connected, 'The editor is still opening.')
-      commands.dispatch(action)
+      if (options) commands.dispatchWith(action, options)
+      else commands.dispatch(action)
     },
     [commands],
   )
@@ -148,14 +179,14 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   useImperativeHandle(
     props.ref,
     (): SheetsHandle => ({
-      async save() {
+      async save(options) {
         // Upstream's save returns early, silently, when the journal is empty
         // (`appNoEditsToSave`). Answering that here rather than waiting for a
         // request that will never be made is the difference between a no-op
         // and a hung promise.
         if (pendingEditsRef.current === 0) return
         const landed = awaitingSave.current.next()
-        await dispatch('save')
+        await dispatch('save', options?.overwrite ? { overwrite: true } : undefined)
         return landed
       },
       async exportBytes() {
@@ -191,9 +222,14 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
     <div
       ref={containerRef}
       className="genoffice-sheets-embed"
-      // Scoped, not stamped on <html>: the tokens key off a bare [data-theme]
-      // attribute selector, so descendants pick it up. 'system' cannot be
-      // scoped -- its fallback is a :root media query -- so resolve it here.
+      // Scoped, not stamped on <html>. This works for 'dark' and does NOT
+      // currently work for 'light' on a system-dark browser: upstream's
+      // tokens.css defines the dark palette under a bare [data-theme='dark']
+      // selector, which a container matches, but the light palette only under
+      // `:root` -- and `:root` is <html>. So a container asking for light
+      // defines nothing and inherits the dark values <html> got from the
+      // prefers-color-scheme block. Measured, not assumed. See
+      // FINDINGS-EMBED.md, "Theme scoping is half-broken".
       data-theme={theme === 'system' ? resolveSystemTheme() : theme}
       style={{ display: 'contents' }}
     >
@@ -226,6 +262,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
 function reportToHost(
   event: { method: string; args: readonly unknown[]; result?: unknown; error?: unknown },
   handlers: SheetsEditorProps,
+  pendingEdits: { current: number },
 ): void {
   if (event.error) {
     // A version conflict is the host's to present, not the editor's: Papan
@@ -233,10 +270,14 @@ function reportToHost(
     // and deliberately removed the editor-native path because it duplicated
     // that UI.
     if (event.error instanceof HostTransportError && event.error.code === 'version_conflict') {
-      const detail = (event.error as { detail?: { currentVersion?: string } }).detail
+      const detail = event.error.detail as { currentVersion?: string } | undefined
       handlers.onConflict?.({
         currentVersion: detail?.currentVersion ?? '',
+        pendingEdits: pendingEdits.current,
         message: event.error.message,
+        // Late. The announced path above is what a banner is built on; this is
+        // the same conflict found only because a save was already attempted.
+        source: 'rejected',
       })
       return
     }
@@ -357,8 +398,22 @@ async function waitFor(ready: () => boolean, message: string): Promise<void> {
 function trackLocally(
   event: { method: string; args: readonly unknown[]; result?: unknown; error?: unknown },
   pendingEdits: { current: number },
+  sessionId: { current: string | null },
   awaiting: { save: Waiters<void>; export: Waiters<SheetsExport> },
 ): void {
+  // Both an open and a save hand back a workbook file, and a save's carries a
+  // *new* session id -- the server reopens the sidecar over the saved bytes,
+  // so the old session no longer exists. Missing that would leave this editor
+  // unable to recognise a conflict addressed to it.
+  if (!event.error) {
+    const result = event.result as
+      | { sessionId?: unknown; file?: { sessionId?: unknown } }
+      | null
+      | undefined
+    const opened = result?.sessionId ?? result?.file?.sessionId
+    if (typeof opened === 'string') sessionId.current = opened
+  }
+
   if (event.method === 'notifyPendingEdits' && !event.error) {
     const [count] = event.args
     pendingEdits.current = typeof count === 'number' ? count : 0

@@ -47,6 +47,17 @@ export interface SheetsConflictEvent {
   /** The version the document is at now, which this session did not produce. */
   readonly currentVersion: string
   readonly message: string
+  /** Unsaved edits at stake. Zero means reloading costs the user nothing. */
+  readonly pendingEdits: number
+  /**
+   * How this was learned.
+   *
+   * `'announced'` arrives while the document is still open and nothing has
+   * been attempted -- this is the banner's trigger, and the state Papan's
+   * `useWopiConflict` is built around. `'rejected'` is a save that already
+   * failed, which is the same conflict found late.
+   */
+  readonly source: 'announced' | 'rejected'
 }
 
 /**
@@ -103,8 +114,15 @@ export interface SheetsHostEvents {
  * the several hundred lines that do it.
  */
 export interface SheetsHandle {
-  /** Explicit save. Writes a version. Resolves when the save has landed. */
-  save(): Promise<void>
+  /**
+   * Explicit save. Writes a version. Resolves when the save has landed.
+   *
+   * `overwrite` is the conflict banner's own button: it replaces the
+   * open-version guard with a compare-and-set against what storage holds now,
+   * so a document that moves *again* mid-save still conflicts. Only a person
+   * can make that choice, which is why it enters here and not in the editor.
+   */
+  save(options?: { overwrite?: boolean }): Promise<void>
   /**
    * Produce the patched bytes without persisting them, so the host's own Save
    * As dialog can write them wherever the user chose.
@@ -155,6 +173,15 @@ export interface SheetsEditorProps extends SheetsHostEvents {
    * mount-time effect never fires again.
    */
   readonly visible?: boolean | undefined
+  /**
+   * Open this editor read-only, whatever rights the viewer has.
+   *
+   * A downgrade the server intersects with its own decision, so it can only
+   * give up rights. This is what the conflict banner's "show saved version"
+   * needs: a second editor on the stored bytes, mounted beside the dirty one
+   * and unable to write.
+   */
+  readonly readOnly?: boolean | undefined
   /** Imperative commands. React 19 passes a ref as a plain prop. */
   readonly ref?: React.Ref<SheetsHandle> | undefined
 }
