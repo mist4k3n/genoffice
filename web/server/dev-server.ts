@@ -22,13 +22,22 @@ import { Hono } from 'hono'
 import { SheetsError, VersionConflictError } from './errors'
 import { createSheetsRouter } from './router'
 import { READ_ONLY_HEADER } from '../protocol'
-import type { DraftAdapter, RequestIdentity, StorageAdapter, WorkbookMetadata } from './ports'
+import type {
+  DraftAdapter,
+  FilePermission,
+  RequestIdentity,
+  StorageAdapter,
+  WorkbookMetadata,
+} from './ports'
 
 const args = process.argv.slice(2)
 const flag = (name: string, fallback: string): string => {
   const index = args.indexOf(`--${name}`)
   return index >= 0 ? (args[index + 1] ?? fallback) : fallback
 }
+
+/** Dev-only: pretend the caller has this permission. Never a production idea. */
+const DEV_PERMISSION_HEADER = 'x-dev-permission'
 
 const root = resolve(flag('dir', 'fixtures'))
 // Beside the corpus, never inside it: a draft that showed up as a document
@@ -168,7 +177,13 @@ function devIdentity(request: Request): RequestIdentity {
   const url = new URL(request.url)
   const documentId = request.headers.get('x-document-id') ?? url.searchParams.get('doc')
   if (!documentId) throw new Error('No document id. Pass ?doc=<file> or x-document-id.')
-  return { userId: 'dev', tenantId: 'dev', documentId, canEdit: true }
+  // Exercises the lattice without a real permission directory. A header as
+  // well as a query parameter because the browser's calls are POSTs to a fixed
+  // path -- only the page URL carries the query string.
+  const permission = (request.headers.get(DEV_PERMISSION_HEADER) ??
+    url.searchParams.get('as') ??
+    'owner') as FilePermission
+  return { userId: 'dev', tenantId: 'dev', documentId, permission }
 }
 
 const sheets = createSheetsRouter({
@@ -191,7 +206,10 @@ const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 // CORS for the Vite dev server on another port. Production pins an origin.
 app.use('*', async (c, next) => {
   c.header('access-control-allow-origin', '*')
-  c.header('access-control-allow-headers', `content-type, x-document-id, ${READ_ONLY_HEADER}`)
+  c.header(
+    'access-control-allow-headers',
+    `content-type, x-document-id, ${READ_ONLY_HEADER}, ${DEV_PERMISSION_HEADER}`,
+  )
   c.header('access-control-allow-methods', 'GET, POST, OPTIONS')
   if (c.req.method === 'OPTIONS') return c.body(null, 204)
   await next()

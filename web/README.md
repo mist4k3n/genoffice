@@ -106,11 +106,32 @@ conflicts. `readOnly` is a downgrade the server intersects with the rights
 ```ts
 app.route('/sheets', createSheetsRouter({
   storage,                 // head / get / put with version tokens
-  identify: (req) => …,    // { userId, tenantId, documentId, canEdit }
+  identify: (req) => …,    // { userId, tenantId, documentId, permission }
   secrets,                 // optional: passwords for encrypted workbooks
   drafts,                  // optional: where unsaved work lives between saves
 }).app)
 ```
+
+### Permission is a lattice, resolved per request
+
+`permission` is `owner | admin | readwrite | readcopy | hidden | none`, not a
+boolean, because three distinctions matter:
+
+| | |
+| --- | --- |
+| `owner` `admin` `readwrite` | read, copy, write |
+| `readcopy` | read and copy — Save As works, saving does not |
+| `hidden` | answered as `404`: the caller must not learn the document exists |
+| `none` | answered as `403` |
+
+`identify()` runs on every request and **every mutation is checked against that
+result**, never against what the session recorded at open. A grant you revoke
+fails on the next call, not at the next open.
+
+One caveat worth knowing before you mount a viewer: read-only is enforced at
+the server, not in the editor's UI. Upstream's renderer ignores the workbook's
+`readOnly` flag, so a viewer can type and will be refused on save. Say so in
+your own chrome.
 
 ### Drafts are not versions
 

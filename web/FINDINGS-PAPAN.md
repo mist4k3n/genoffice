@@ -109,12 +109,12 @@ disk-backed draft store; only explicit saves create versions. Ours always writes
 a version. #617 calls getting this wrong *"version spam or silent exit-save data
 loss"*. A 30-second recovery copy is a draft, never a version.
 
-**`canEdit: boolean` is too coarse and checked in the wrong place.** The lattice
-is `owner | admin | readwrite | readcopy | hidden | none`; `readcopy` and
-`hidden` are distinct read states that map onto the workbook's `readOnly`.
-Permission must be **re-resolved on every read and every save** — a revoked
-grant has to fail on the next call, fail-closed. Our `identify()` runs per
-request, which is right, but nothing enforces that an implementation re-checks.
+**`canEdit: boolean` is too coarse and checked in the wrong place.** ~~The
+lattice is~~ *Done — see FINDINGS-EMBED.md, "Permission".* `identify()` now
+returns the lattice, `hidden` answers 404 and `none` 403, `readcopy` can Save
+As, and every mutation is checked against the request's permission rather than
+the session's. That last part was a real fail-open bug: a grant revoked
+mid-session kept saving until the workbook was reopened.
 
 **Identity has shapes I did not model.** A caller may be a *share principal*
 with a synthetic id and no row in `users` (writes must stamp `actor.type =

@@ -330,6 +330,76 @@ Exit-save. A browser tab closing cannot reliably finish an async save, so the
 warning. Papan's Collabora is in the same position — its exit-save is a
 best-effort write from a server-side process, which we do not have.
 
+## Permission
+
+`identify()` returned `canEdit: boolean`. It now returns Papan's lattice
+verbatim — `owner | admin | readwrite | readcopy | hidden | none` — because the
+boolean was answering three different questions with one bit, and getting two
+of them wrong.
+
+**`readcopy` was indistinguishable from `none`.** It is a real and common
+state: a person who may open a workbook and take a copy, and may not change the
+original. Under a boolean it collapsed to `canEdit: false`, and Save As — the
+one thing that state exists to allow — was refused. It now works.
+
+**`hidden` was indistinguishable from `none` too.** It means the caller must
+not learn the document exists, which is a different *answer*, not a different
+message. `hidden` is now `404 not_found`; `none` is `403 forbidden`.
+
+`owner` and `admin` are not yet distinguished from `readwrite`. Nothing here
+needs to be, and the day something does (delete, share, change permissions) the
+value will already have arrived rather than being a contract change.
+
+### The fail-closed bug this found
+
+The write checks read **the session's** captured permission, so a grant revoked
+mid-session kept saving until the workbook was reopened. The briefing is
+explicit that permission must be re-resolved on every read and every save, and
+this was failing open.
+
+Every mutation gate now reads the **request's** permission. The session still
+records what was true at open, because the workbook's `readOnly` flag was
+reported from it and the reopen after a save has to report the same thing — but
+that is a fact about the past, not an authorisation.
+
+Measured, against a session opened as `owner`:
+
+```
+readcopy + save (with edits)      → 403 forbidden
+readcopy + save-as, unmodified    → export token          ← the readcopy unblock
+readcopy + save-as, with edits    → 403 forbidden         ← no laundering
+owner    + save-as, with edits    → export token
+owner session, permission revoked → 403 forbidden         ← fail-closed
+owner    + save                   → a version
+hidden   / none  at open          → 404 / 403
+```
+
+### A viewer may copy, and may not launder
+
+Save As for a read-only session is allowed only when the request carries no
+changes. Otherwise "export a copy" becomes a write path that produces modified
+bytes for someone who may not modify.
+
+That check is derived from the payload rather than from a list of field names,
+and the reason is drift: upstream adds mutation kinds regularly — sparklines,
+pivot refreshes, protected ranges — and a hand-written list would silently stop
+covering them. Anything in the request that is not its own identity counts, so
+a field upstream adds later is refused for a viewer by default rather than
+allowed by omission.
+
+### Read-only is enforced at the server, not in the UI
+
+Worth knowing before wiring a viewer: **upstream's renderer ignores
+`WorkbookFile.readOnly`.** It is in the schema, the server sets it honestly,
+and nothing in `apps/sheets/src/renderer` reads it. So a read-only session
+looks fully editable — a viewer can type, and finds out on Save, with a 403.
+
+The boundary is correct and fail-closed; the affordance is wrong. Fixing it
+properly is an upstream change (the renderer has no read-only mode to turn on).
+Until then a host that mounts a viewer should say so in its own chrome. The
+same applies to the conflict banner's "show saved version": the comparison copy
+is scribble-able and nothing persists.
+
 ## Theme scoping is half-broken
 
 Found while testing the above, and it is not what this component's own comment
