@@ -17,6 +17,13 @@ const readWorkbookRange = vi.fn(async (call: RangeCall) => ({
 
 function state(): LazyWorkbookState {
   return {
+    // The host bridge is per workbook state, not a page-level global, so one
+    // page can hold several editors each bound to its own document. A getter,
+    // not a value: several cases install the stub after building the state,
+    // and some run with no `window` at all.
+    get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
     file: { sessionId: 'session-1', sheets: [] },
     generation: 1,
     loadedRanges: new Map(),

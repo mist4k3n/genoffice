@@ -12,6 +12,12 @@ import type { LazyWorkbookState } from '../src/renderer/univer-state'
 
 function state(overrides: Record<string, unknown> = {}): LazyWorkbookState {
   return {
+    // The host bridge is per workbook state, not a page-level global, so that one
+    // page can hold several editors each bound to its own document. Tests build
+    // this state by hand, so they supply it the same way the app does.
+    get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
     file: {
       sessionId: 'session-1',
       sheets: [

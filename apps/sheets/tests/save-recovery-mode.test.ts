@@ -48,6 +48,12 @@ function ctxWith(opts: { dirty: boolean; needsSaveAs?: boolean; restoredFromReco
             formulaCells: new Map(),
             overlay,
           },
+          // The host bridge is per workbook state, not a page-level global, so that one
+          // page can hold several editors each bound to its own document. Tests build
+          // this state by hand, so they supply it the same way the app does.
+          get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
           file: {
             sessionId: '11111111-1111-4111-8111-111111111111',
             needsSaveAs: !!opts.needsSaveAs,

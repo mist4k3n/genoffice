@@ -133,6 +133,12 @@ describe('traceWorkbookDependents: lazy workbook', () => {
       },
       lazyWorkbookRef: {
         current: {
+          // The host bridge is per workbook state, not a page-level global, so that one
+          // page can hold several editors each bound to its own document. Tests build
+          // this state by hand, so they supply it the same way the app does.
+          get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
           file: {
             sessionId: 'session-1',
             sheets: [{ id: 'sh1', name: 'Data', rowCount: 5, columnCount: 3 }],
@@ -229,6 +235,9 @@ describe('traceWorkbookDependents: lazy workbook', () => {
       },
       lazyWorkbookRef: {
         current: {
+          get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
           file: {
             sessionId: 'session-1',
             sheets: [
@@ -278,6 +287,9 @@ describe('traceWorkbookPrecedents: lazy workbook with structural ops', () => {
       },
       lazyWorkbookRef: {
         current: {
+          get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
           file: {
             sessionId: 'session-1',
             sheets: [{ id: 'sh1', name: 'Data', rowCount: 5, columnCount: 3 }],
