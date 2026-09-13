@@ -1,3 +1,5 @@
+import type { Lang } from '../../packages/i18n/src/index'
+
 /**
  * The ports a host application plugs into.
  *
@@ -231,7 +233,15 @@ export interface SidecarOptions {
  * per-user can close over the request in `identify` and pass them in.
  */
 export interface AppPreferences {
-  readonly language: 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'
+  /**
+   * Upstream's own union, imported rather than retyped.
+   *
+   * It was spelled out here as eleven codes, which was upstream's list at the
+   * time and is now twenty -- a hand-copied union goes stale silently, where
+   * an import makes a new language available the day it lands. Hosts sending a
+   * BCP-47 tag want `normalizeLang` from the same package.
+   */
+  readonly language: Lang
   readonly theme: 'light' | 'dark' | 'system'
   readonly autoSave: boolean
   /** Shape owned by @genoffice/ui's AiPanelPrefs; an empty object is valid. */

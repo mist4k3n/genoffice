@@ -1,4 +1,5 @@
-import type { UiTheme, WorkbookFile } from '../../../apps/sheets/src/shared/desktop-api'
+import type { WorkbookFile } from '../../../apps/sheets/src/shared/desktop-api'
+import type { HostTheme } from './theme'
 
 /**
  * The contract between a host application and an embedded spreadsheet.
@@ -168,12 +169,22 @@ export interface SheetsEditorProps extends SheetsHostEvents {
   /**
    * Applied to this component's own container, not to `<html>`.
    *
-   * The design tokens key off a bare `[data-theme]` attribute selector, so
-   * scoping works — but only for an explicit theme. 'system' resolves through
-   * a `:root`-scoped media query that a container cannot reach, so a host
-   * passing 'system' gets it resolved here instead.
+   * Both palettes are bound to an explicit `[data-theme]` attribute, so either
+   * one scopes to a subtree. `'system'` cannot be scoped -- it is answered by
+   * a `prefers-color-scheme` block guarded on `:root`, and a container is not
+   * `:root` -- so it is resolved here, live, as the OS appearance changes.
+   *
+   * `'dim'` is accepted and resolved to dark: see {@link HostTheme}. Changing
+   * this prop is an event, not a remount -- the renderer's own listeners hear
+   * it, so Univer's canvas repaints with the chrome.
    */
-  readonly theme?: UiTheme | undefined
+  readonly theme?: HostTheme | undefined
+  /**
+   * Any BCP-47 tag. It is mapped onto upstream's dictionary key by upstream's
+   * own `normalizeLang`, so `'zh-CN'`, `'zh-TW'`, `'ms-MY'` and `'en-GB'` all
+   * land somewhere real and an unknown tag falls back to English rather than
+   * rendering keys. Like `theme`, changing it is an event, not a remount.
+   */
   readonly locale?: string | undefined
   /**
    * False while the host keeps this mounted but hidden.

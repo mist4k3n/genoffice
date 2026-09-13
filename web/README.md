@@ -41,7 +41,8 @@ contract change is a compile error naming the method.
 <SheetsEditor
   documentId={fileId}
   apiBase="/sheets"
-  theme="dark"
+  theme={papanTheme}
+  locale={papanLocale}
   visible={isActiveTab}
   onDirtyChange={(n) => setDirty(n > 0)}
   onSaved={(e) => toast(`Saved — rewrote ${e.touchedEntries.length} part(s)`)}
@@ -54,6 +55,14 @@ Several editors may be mounted at once, each on its own document. `visible`
 matters: a host that hides a tab with `display: none` rather than unmounting it
 must say so, because a canvas in a hidden subtree measures zero and nothing
 resizes it back.
+
+`theme` and `locale` are scoped to each editor's container, so two editors can
+differ and neither touches the host's `<html>`. Both take the host's own
+values: `theme` accepts `light` / `dark` / `dim` / `system` (`dim` has no
+upstream palette and resolves to dark, `system` is resolved here and follows
+the OS live), and `locale` accepts any BCP-47 tag. Changing either one is an
+event on the live session — the grid repaints, the strings change, the document
+stays open.
 
 ### Commands
 

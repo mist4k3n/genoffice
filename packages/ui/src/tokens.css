@@ -5,7 +5,13 @@
  * app's styles.css. Document content colors (paper, cells, exports, chart
  * palettes) never live here and never reference these tokens. */
 
-:root {
+/* The light palette is also bound to an explicit [data-theme='light'] so that
+ * it can be scoped to a subtree. :root is <html> and nothing else, so a
+ * container asking for light used to define no tokens at all and inherited
+ * whatever <html> had -- dark, on a system-dark browser. Equal specificity to
+ * the dark block below, which wins on source order, so nesting still works. */
+:root,
+[data-theme='light'] {
   /* chrome */
   --surface: #ffffff;
   --surface-subtle: #f6f7f9;

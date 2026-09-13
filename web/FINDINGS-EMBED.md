@@ -461,21 +461,37 @@ a grid whose session the server holds read-only and loses the scribbles; a
 locked editor loses the user's real work with nothing to indicate anything is
 wrong.
 
-## Theme scoping is half-broken
+## Theme scoping was half-broken — fixed
 
-Found while testing the above, and it is not what this component's own comment
-claimed. `theme="dark"` scopes correctly. **`theme="light"` does not**, on a
-browser whose OS prefers dark.
+`theme="dark"` scoped correctly. **`theme="light"` did not**, on a browser
+whose OS prefers dark, or inside a host whose own chrome is dark.
 
-Upstream's `tokens.css` defines the dark palette under a bare
+Upstream's `tokens.css` defined the dark palette under a bare
 `[data-theme='dark']` selector, which any container matches — but the light
 palette only under `:root`, and `:root` is `<html>`. A container asking for
-light therefore defines nothing and inherits the dark values `<html>` picked up
-from the `prefers-color-scheme` block.
+light therefore defined nothing and inherited the dark values `<html>` had.
 
-Stamping `<html>` would fix it and is what upstream's `main.tsx` does, but the
-attribute is page-global and Papan has its own theming. This belongs with the
-theme mapping work below, now with a known mechanism rather than a suspicion.
+Two further things surfaced while fixing it, and the second was worse than the
+reported bug:
+
+- **Univer's canvas never followed the scoped attribute at all.** `App.tsx`
+  mirrors `<html data-theme>` into Univer's `darkMode`, because the grid is
+  painted on canvas and cannot read CSS tokens. Embedded, that is the *host's*
+  theme — so a `theme="dark"` editor inside a light Papan page drew dark chrome
+  around a light grid. Measured, then fixed: `isDarkTheme()` now resolves from
+  the editor's own grid container upward.
+- **Changing the prop never reached the renderer.** `onThemeChanged` and
+  `onLanguageChanged` are push channels — the server announces — which is right
+  on the desktop and backwards here: the switcher is in the same document and
+  the server never hears the click. They now have a host-side source beside the
+  wire one (`web/src/host/settings.ts`), so a theme or locale change is an
+  event on the live session rather than a remount.
+
+Verified in the harness with `<html>` resolving dark from
+`prefers-color-scheme` and the editor asking for light: the editor stays
+`#ffffff`, `<html>` stays `#1e1e1e`, and `<html lang>` is never rewritten.
+
+See `UPSTREAM-CHANGES.md`, Change 4.
 
 ### Fixed on the way past
 
@@ -489,11 +505,11 @@ a host had ever mounted kept one open for the life of the page.
 
 ## What this does not yet cover
 
-- Theme: Papan has `dark` / `dim` / `light`; upstream has `light` / `dark` /
-  `system`. `dim` has no mapping yet, and scoped `light` does not work at all —
-  see "Theme scoping is half-broken" above.
-- Locale: Papan ships `en`, `zh-CN`, `zh-TW`, `ms`; upstream has eleven with
-  different codes. The mapping is unwritten.
+- Theme: `dim` has no upstream palette and is resolved to dark. That is a
+  documented approximation, not a mapping — a real dim palette is a design
+  decision, and the seam for it is one block in `tokens.css`.
+- RTL: `ar` and `he` are supported languages and nothing sets `dir="rtl"` for
+  them, upstream included.
 - The selection bridge **polls at 250ms** rather than subscribing. Univer's
   selection events differ across versions and an event name that stops firing
   after an upgrade is exactly the silent breakage the Papan briefing warns this

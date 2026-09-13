@@ -3,7 +3,7 @@ import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState 
 import { App } from '../../../apps/sheets/src/renderer/App'
 import { HostApiProvider } from '../../../apps/sheets/src/renderer/host-api'
 import { LocaleProvider, setModuleLang } from '../../../apps/sheets/src/renderer/i18n/locale'
-import type { Lang } from '../../../packages/i18n/src/index'
+import { htmlLang, normalizeLang } from '../../../packages/i18n/src/index'
 import type { SheetsEditorProps, SheetsExport, SheetsHandle, SheetsSelection } from './host-api'
 import { HostTransportError } from '../host/transport'
 import { observeSelection, type UniverApiLike } from './selection'
@@ -12,6 +12,8 @@ import { installGlobalsOnce } from './globals'
 import { buildDesktopApi, type ExportedWorkbook } from '../host/desktop-api'
 import { createHttpTransport, type HostTransport } from '../host/transport'
 import { createHostCommandBus } from '../host/commands'
+import { createHostSettingsBus } from '../host/settings'
+import { resolveTheme, systemPrefersDark, watchSystemTheme } from './theme'
 import { CONFLICT_CHANNEL, type DocumentConflict, type HostCallOptions } from '../../protocol'
 import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
 import { enqueueMount, whenGridReady } from './singletons'
@@ -44,6 +46,16 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const [ready, setReady] = useState(false)
 
+  // `system` is not scopable -- the token file answers it with a
+  // prefers-color-scheme block guarded on `:root`, and a container is not
+  // `:root` -- so it is resolved here, and re-resolved when the OS flips.
+  const [prefersDark, setPrefersDark] = useState(systemPrefersDark)
+  useEffect(() => watchSystemTheme(setPrefersDark), [])
+  const resolvedTheme = resolveTheme(theme, prefersDark)
+  // Papan sends BCP-47 ('zh-CN', 'ms-MY'); upstream keys its dictionaries by a
+  // shorter code. The mapping is upstream's own, not a table invented here.
+  const lang = normalizeLang(locale)
+
   // Host callbacks change identity on every host render; reading them through
   // a ref keeps that from tearing down the editor.
   const handlers = useRef(props)
@@ -57,6 +69,17 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   // How the host drives the renderer: one bus per editor, so an action aimed
   // at this document cannot reach the one in the next tab.
   const commands = useMemo(createHostCommandBus, [])
+  // Theme and language live here rather than on the wire: the host is in this
+  // same document and its switcher has already changed. See host/settings.ts.
+  // Seeded from the first render, so the effect below publishes nothing until
+  // something actually differs.
+  const settings = useMemo(
+    () => createHostSettingsBus({ theme: resolvedTheme, language: lang }),
+    [],
+  )
+  useEffect(() => {
+    settings.publish({ theme: resolvedTheme, language: lang })
+  }, [settings, resolvedTheme, lang])
   // Bumped by reload(): re-runs the effect below, which tears the bridge down
   // and opens a fresh session over whatever storage holds now.
   const [generation, setGeneration] = useState(0)
@@ -78,7 +101,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
     void (async () => {
       await installGlobalsOnce()
       if (cancelled) return
-      setModuleLang(locale as Lang)
+      setModuleLang(lang)
       // The transport is built here rather than inside createHttpDesktopApi so
       // that unmounting can close its socket. Without that, every editor a
       // host ever mounted keeps a WebSocket open for the life of the page.
@@ -93,6 +116,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
           reportToHost(event, handlers.current, pendingEditsRef)
         },
         commands,
+        settings,
         onExport: (exported) => deliverExport(exported, awaitingExport.current, handlers.current),
         onDraftRestored: () => handlers.current.onDraftRestored?.(),
       })
@@ -130,7 +154,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
       awaitingSave.current.abandon(new Error('The editor was closed.'))
       awaitingExport.current.abandon(new Error('The editor was closed.'))
     }
-  }, [apiBase, documentId, locale, readOnly, commands, generation])
+  }, [apiBase, documentId, readOnly, commands, settings, generation])
 
   /**
    * The selection bridge. Papan fed the active cell to its AI chat from a
@@ -223,22 +247,28 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
     <div
       ref={containerRef}
       className="genoffice-sheets-embed"
-      // Scoped, not stamped on <html>. This works for 'dark' and does NOT
-      // currently work for 'light' on a system-dark browser: upstream's
-      // tokens.css defines the dark palette under a bare [data-theme='dark']
-      // selector, which a container matches, but the light palette only under
-      // `:root` -- and `:root` is <html>. So a container asking for light
-      // defines nothing and inherits the dark values <html> got from the
-      // prefers-color-scheme block. Measured, not assumed. See
-      // FINDINGS-EMBED.md, "Theme scoping is half-broken".
-      data-theme={theme === 'system' ? resolveSystemTheme() : theme}
+      // Scoped, not stamped on <html>: the host owns that element and may
+      // have two editors on the page. Both palettes are bound to an explicit
+      // attribute in tokens.css so that either one can be scoped, and Univer's
+      // canvas resolves `data-theme` from this container rather than from
+      // <html> -- without that the grid painted the host's theme while the
+      // chrome painted ours.
+      data-theme={resolvedTheme}
+      // Drives CSS :lang() and Chromium's per-language font fallback, which
+      // upstream gets from <html lang>. Scoped for the same reason.
+      lang={htmlLang(lang)}
+      // `display: contents` keeps the element in the tree -- which is what
+      // makes the two attributes above reachable by selectors and closest() --
+      // while removing its box, so it cannot disturb the host's layout.
       style={{ display: 'contents' }}
     >
       {ready && apiRef.current ? (
         // The provider wraps LocaleProvider too: it renders above App and
         // reads the bridge through the same hook, so it must be inside.
         <HostApiProvider value={apiRef.current}>
-          <LocaleProvider initial={locale as Lang}>
+          {/* `<html lang>` belongs to the host page, so the provider does
+              not write it; the container above carries it instead. */}
+          <LocaleProvider initial={lang} stampDocumentLang={false}>
             <App
               api={apiRef.current}
               onRuntime={(runtime) => {
@@ -311,10 +341,6 @@ function reportToHost(
     }
     default:
   }
-}
-
-function resolveSystemTheme(): 'light' | 'dark' {
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
 /**

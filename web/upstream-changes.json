@@ -1,6 +1,6 @@
 {
   "baseline": "d2b898f",
-  "reason": "Per-instance host bridge and per-instance grid container, so one browser page can hold several editors. See web/UPSTREAM-CHANGES.md.",
+  "reason": "Per-instance host bridge, per-instance grid container, and a theme/language that the embedding page owns, so one browser page can hold several editors differing in document, theme and language. See web/UPSTREAM-CHANGES.md.",
   "files": [
     "apps/sheets/src/renderer/App.tsx",
     "apps/sheets/src/renderer/ColorDropdown.tsx",
@@ -39,7 +39,8 @@
     "apps/sheets/tests/read-sheet-range-batching.test.ts",
     "apps/sheets/tests/save-recovery-mode.test.ts",
     "apps/sheets/tests/structural-delete-guard.test.ts",
-    "apps/sheets/tests/univer-range-loading.test.ts"
+    "apps/sheets/tests/univer-range-loading.test.ts",
+    "packages/ui/src/tokens.css"
   ],
   "allowedFailures": [
     "parseCsv ignores delimiters inside escaped quotes when sniffing"

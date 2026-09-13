@@ -73,14 +73,30 @@ export const DATE_LOCALES: Record<Lang, string> = {
 
 const LocaleContext = createContext<Lang>('zh')
 
-export function LocaleProvider({ initial, children }: { initial: Lang; children: ReactNode }) {
+export function LocaleProvider({
+  initial,
+  children,
+  stampDocumentLang = true,
+}: {
+  initial: Lang
+  children: ReactNode
+  /**
+   * Write the language onto `<html lang>`.
+   *
+   * True for the desktop renderer, which owns the document. False when the
+   * spreadsheet is embedded in a host page: `<html>` belongs to the host
+   * there, and two editors in two languages would fight over one attribute.
+   * The embedder scopes the attribute to its own container instead.
+   */
+  stampDocumentLang?: boolean
+}) {
   const hostApi = useHostApi()
   const [lang, setLang] = useState<Lang>(initial)
   useEffect(
     () =>
       hostApi.onLanguageChanged((next) => {
         setModuleLang(next)
-        document.documentElement.lang = htmlLang(next)
+        if (stampDocumentLang) document.documentElement.lang = htmlLang(next)
         setLang(next)
       }),
     [],

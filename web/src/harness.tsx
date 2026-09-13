@@ -8,7 +8,7 @@ import type {
   SheetsHandle,
   SheetsSelection,
 } from './embed/host-api'
-import type { UiTheme } from '../../apps/sheets/src/shared/desktop-api'
+import type { HostTheme } from './embed/theme'
 
 /**
  * A host harness shaped like Papan, so the embedding hazards show up here
@@ -50,7 +50,9 @@ function Harness(): React.JSX.Element {
   // One handle per tab, the way a host keeps a ref per open editor.
   const handles = useRef(new Map<string, SheetsHandle | null>())
   const [active, setActive] = useState(0)
-  const [theme, setTheme] = useState<UiTheme>('light')
+  const [theme, setTheme] = useState<HostTheme>('light')
+  // Papan's four, in the shapes it actually sends.
+  const [locale, setLocale] = useState('en')
   const [log, setLog] = useState<string[]>([])
   // Papan's ConflictBanner state, reproduced: which tabs are conflicted, and
   // which of them is showing the stored version beside its own edits.
@@ -164,10 +166,18 @@ function Harness(): React.JSX.Element {
         <button onClick={() => void command(tabs[active]?.id, 'reload')}>Reload</button>
         <span style={{ marginLeft: 'auto' }}>
           theme{' '}
-          <select value={theme} onChange={(e) => setTheme(e.target.value as UiTheme)}>
+          <select value={theme} onChange={(e) => setTheme(e.target.value as HostTheme)}>
             <option value="light">light</option>
             <option value="dark">dark</option>
+            <option value="dim">dim</option>
             <option value="system">system</option>
+          </select>{' '}
+          locale{' '}
+          <select value={locale} onChange={(e) => setLocale(e.target.value)}>
+            <option value="en">en</option>
+            <option value="zh-CN">zh-CN</option>
+            <option value="zh-TW">zh-TW</option>
+            <option value="ms-MY">ms-MY</option>
           </select>
         </span>
         <span style={{ opacity: 0.6 }}>
@@ -198,6 +208,7 @@ function Harness(): React.JSX.Element {
                 documentId={tab.documentId}
                 apiBase={API}
                 theme={theme}
+                locale={locale}
                 visible={visible}
                 readOnly={isReadOnly(index)}
                 onLoaded={(file) =>
@@ -234,6 +245,7 @@ function Harness(): React.JSX.Element {
                     documentId={tab.documentId}
                     apiBase={API}
                     theme={theme}
+                    locale={locale}
                     visible={visible}
                     readOnly
                     onLoaded={(file) =>

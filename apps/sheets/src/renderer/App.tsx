@@ -1427,9 +1427,22 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
     // Univer paints the grid on canvas, so it can't follow the CSS tokens —
     // mirror the <html data-theme> state into its official darkMode flag
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)')
-    const isDarkTheme = () =>
-      document.documentElement.getAttribute('data-theme') === 'dark' ||
-      (!document.documentElement.hasAttribute('data-theme') && prefersDark.matches)
+    // The attribute is not necessarily on <html>. Embedded, the theme is
+    // scoped to the editor's own container so that two editors on one page can
+    // differ, and reading <html> there gives the *host's* theme -- dark chrome
+    // over a light grid. Resolving from this instance's grid container upward
+    // finds <html> on the desktop, where it is the nearest ancestor carrying
+    // the attribute, so the desktop behaviour is unchanged.
+    const themeHost = (): Element =>
+      document.getElementById(gridContainerId)?.closest('[data-theme]') ??
+      document.documentElement
+    const isDarkTheme = () => {
+      const host = themeHost()
+      return (
+        host.getAttribute('data-theme') === 'dark' ||
+        (!host.hasAttribute('data-theme') && prefersDark.matches)
+      )
+    }
     const runtime = createUniver({
       // green selection/highlight instead of Univer's default blue
       theme: greenTheme,

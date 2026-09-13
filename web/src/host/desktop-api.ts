@@ -2,6 +2,7 @@ import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/des
 import { DRAFT_RESTORED_KEY, exportPath, type WorkbookSaveExportResult } from '../../protocol'
 import type { HostCommandBus } from './commands'
 import { COVERAGE, type Entry } from './coverage'
+import { HOST_SOURCED_PUSH, type HostSettingsBus } from './settings'
 import { LOCAL_HANDLERS } from './local-api'
 import { createRangePrefetcher, type RangePrefetcher } from './range-prefetch'
 import type { UnsavedGuard } from './unsaved-guard'
@@ -123,6 +124,14 @@ export interface BuildOptions {
    * what storage holds.
    */
   readonly onDraftRestored?: (() => void) | undefined
+  /**
+   * Theme and language as the embedding page holds them.
+   *
+   * Supplied, the two `app:*-changed` subscriptions listen to it as well as to
+   * the wire, so a host switching its own theme reaches the renderer. Absent,
+   * they are wire-only, which is what a standalone page wants.
+   */
+  readonly settings?: HostSettingsBus | undefined
 }
 
 /**
@@ -187,8 +196,20 @@ export function buildDesktopApi(
 
       case 'push': {
         const target = wire()
-        api[method] = (listener: (...args: unknown[]) => void) =>
-          transport.subscribe(target, listener)
+        // Two of these have a second, closer source: see settings.ts. The
+        // renderer subscribes once and hears from both, so neither side has
+        // to know the other exists.
+        const setting = HOST_SOURCED_PUSH[method]
+        const settings = options.settings
+        api[method] = (listener: (...args: unknown[]) => void) => {
+          const offWire = transport.subscribe(target, listener)
+          if (!setting || !settings) return offWire
+          const offHost = settings.subscribe(setting, (value) => listener(value))
+          return () => {
+            offWire()
+            offHost()
+          }
+        }
         break
       }
 

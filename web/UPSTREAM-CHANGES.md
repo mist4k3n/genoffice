@@ -198,3 +198,80 @@ their stub after building the state and some run with no `window` at all.
 `npm run check:upstream` compiles `apps/sheets` and runs its suite, so the next
 change to these modules cannot break them quietly. One failure is allowed and
 listed in `upstream-changes.json`: it fails at the baseline commit too.
+
+---
+
+## Change 4 — theme and language are scoped, and the host owns them
+
+**Files:** `packages/ui/src/tokens.css`, `apps/sheets/src/renderer/App.tsx`,
+`apps/sheets/src/renderer/i18n/locale.tsx`.
+
+### Why
+
+Upstream's renderer owns the whole document, so it puts `data-theme` and `lang`
+on `<html>` and reads them back from there. Embedded, `<html>` belongs to the
+host: Papan has its own theme switcher on that element, and two editors on one
+page may legitimately differ — the conflict banner's compare view is precisely
+a read-only editor beside an editable one.
+
+Scoping the attributes to each editor's own container is the fix, and three
+upstream assumptions stood in the way.
+
+### What changed
+
+**1. The light palette is bound to an attribute, not only to `:root`.**
+`tokens.css` defined the dark palette under a bare `[data-theme='dark']`
+selector — which any element matches — but the light palette only under
+`:root`, which is `<html>` and nothing else. A container asking for light
+therefore defined no tokens at all and inherited whatever `<html>` had. On a
+system-dark browser, or inside a host whose own chrome is dark, that is dark
+values under a `data-theme="light"` attribute. The selector is now
+`:root, [data-theme='light']`. Equal specificity to the dark block, which
+follows it, so nesting a dark editor inside a light page still resolves.
+
+**2. Univer's `darkMode` resolves from the grid container, not from `<html>`.**
+`App.tsx` mirrored `<html data-theme>` into Univer's own dark flag, because the
+grid is painted on canvas and cannot follow CSS tokens. Embedded, that read the
+*host's* theme: dark chrome over a light grid. `isDarkTheme()` now starts at
+this instance's `gridContainerId` and walks up to the nearest `[data-theme]`
+ancestor. On the desktop that ancestor is `<html>`, so the behaviour is
+unchanged; in the browser it is the editor's own container.
+
+**3. `LocaleProvider` no longer insists on writing `<html lang>`.**
+A new `stampDocumentLang` prop, defaulting to `true`, so `main.tsx` is
+untouched. The embedder passes `false` and puts the tag on its own container,
+where it still drives `:lang()` and Chromium's per-language font fallback.
+
+### What this makes possible, in `web/`
+
+`web/src/host/settings.ts` gives the bridge a local source for
+`onThemeChanged` and `onLanguageChanged` beside the wire one. These were push
+channels — the server announces, the renderer listens — which is right on the
+desktop and backwards in a browser, where the host's switcher is in the same
+document and the server never hears the click. With both sources, changing the
+`theme` or `locale` prop is an event rather than a remount: Univer's canvas
+repaints and every non-React translator follows, on the same session.
+
+`locale` is also no longer cast. Papan sends BCP-47 (`zh-CN`, `ms-MY`) and
+upstream keys its dictionaries by a shorter code; `normalizeLang` — upstream's
+own function — does the mapping, so all four of Papan's locales land on a real
+dictionary and an unknown tag falls back to English instead of rendering keys.
+
+### What did *not* change
+
+`'dim'`. Papan's switcher offers light / dim / dark; upstream has no dim
+palette, and a dim palette is twenty-odd colour decisions belonging to whoever
+owns the design, not a shade this package can derive. The embed accepts `dim`
+and resolves it to dark. If a real one lands it is a third block in
+`tokens.css` and one more case in `web/src/embed/theme.ts`.
+
+`dir`. `ar` and `he` are supported languages and nothing upstream sets
+`dir="rtl"` for them. That is upstream's gap, not one this change introduces,
+and fixing it is not a scoping question.
+
+### Rebasing
+
+The `tokens.css` hunk is a two-line selector and will conflict only if upstream
+restructures the file; keep `[data-theme='light']` beside `:root`. The
+`App.tsx` hunk conflicts if upstream touches `isDarkTheme`; keep the walk up
+from `gridContainerId`. The `locale.tsx` hunk is additive.
