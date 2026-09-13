@@ -102,7 +102,7 @@ own flag while the server took it separately, so once the first run had saved
 anything the two pointed at different bytes — and the second run reported three
 `entryCount` failures that were entirely the harness's own. (The underlying
 difference was legitimate: a save drops `xl/calcChain.xml`, which is what Excel
-does when a cell changes.) The harness now discovers the directory from the
+does when a cell changes — see the correction below.) The harness now discovers the directory from the
 server, so the two cannot disagree.
 
 ## Decisions
@@ -158,7 +158,7 @@ the corpus — and the *second* run passes, because both the service and the
 baseline are now reading what the first run wrote. The clean gate was a second
 run.
 
-Against a **fresh copy** of the corpus the result is **11 passing, 3 failing**:
+Against a **fresh copy** of the corpus the result was **11 passing, 3 failing**:
 
 ```
 Book 1.xlsx    DIFF   entry lost: xl/calcChain.xml
@@ -166,13 +166,32 @@ Book 4.xlsx    DIFF   entry lost: xl/calcChain.xml
 Book.xlsx      DIFF   entry lost: xl/calcChain.xml
 ```
 
-The HTTP save drops `xl/calcChain.xml` where a directly-spawned engine keeps
-it. Verified to predate the Save As work: the same three fail identically at
-the commit before it.
+**This was the harness, not the service, and the sentence that stood here —
+"the HTTP save drops it where a directly-spawned engine keeps it" — was wrong
+twice over.** The save check never compared an HTTP save to a direct one; it
+compares a document's bytes before and after its own save, and the direct
+sidecar never saves at all. And the drop is deliberate: `xlsx-gateway.ts` drops
+`xl/calcChain.xml`, with its content-type override and its workbook
+relationship, whenever a save wrote any worksheet part, because calcChain is a
+recalculation-order cache that any worksheet edit can invalidate — overwriting
+a formula cell with a literal leaves an entry pointing at a cell with no `<f>`,
+which Excel repairs with a prompt. It is documented in
+`apps/sheets/docs/compatibility.md` and it is what Excel does. The desktop app
+drops it identically.
 
-`calcChain` is a recalculation hint, not data — Excel rebuilds it — so this is
-a fidelity difference rather than data loss. It is still a real difference, and
-it is open.
+The three workbooks that "failed" are exactly the three fixtures that ship a
+calcChain at all; the other eleven passed because they had none to drop.
+
+Whitelisting the name would have replaced a false failure with no check. What
+`compat` asserts now is the part that can actually go wrong: once the part is
+gone, nothing may still point at it. It inflates `[Content_Types].xml` and
+`xl/_rels/workbook.xml.rels` out of the saved archive — by hand, like the rest
+of its zip reading, so it never depends on the library the save path uses — and
+fails if either still names calcChain. `web/tests/calc-chain.test.ts` builds
+synthetic packages for both dangling cases and for a genuinely lost worksheet,
+so the check has been seen to fail.
+
+Fresh corpus, twice: **14 passing, 0 failing, 1 skipped as known-unsupported.**
 
 `npm run compat` now **refuses to run** against a server serving `web/fixtures`,
 because a harness that quietly destroys its own baseline is worth more as an

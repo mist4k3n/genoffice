@@ -31,10 +31,11 @@
  * entirely the harness's own.
  */
 import { createHash } from 'node:crypto'
+import { inflateRawSync } from 'node:zlib'
 import { mkdtemp, readFile, readdir, rm, copyFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { Sidecar } from './sidecar-client.mjs'
 
@@ -385,18 +386,55 @@ async function archiveDiff(beforeBytes, afterBytes) {
   const [before, after] = [readCentralDirectory(beforeBytes), readCentralDirectory(afterBytes)]
   const problems = []
   let identical = 0
-  for (const [entryName, crc] of before) {
+  for (const [entryName, entry] of before) {
     if (!after.has(entryName)) {
+      if (entryName === CALC_CHAIN) {
+        // Not a loss. Any worksheet edit invalidates the calculation chain,
+        // so the gateway drops it and lets Excel rebuild it -- deliberate,
+        // documented in apps/sheets/docs/compatibility.md, and what Excel
+        // itself does. Assert the harder half instead: a dropped part whose
+        // content-type override or workbook relationship survives is exactly
+        // the dangling reference Excel repairs with a scary prompt.
+        problems.push(...danglingCalcChainRefs(afterBytes, after))
+        continue
+      }
       problems.push(`entry lost: ${entryName}`)
       continue
     }
-    if (after.get(entryName) === crc) identical += 1
+    if (after.get(entryName).crc === entry.crc) identical += 1
   }
   for (const entryName of after.keys()) {
     if (!before.has(entryName)) problems.push(`entry added: ${entryName}`)
   }
   if (after.size === 0) problems.push('saved archive has no entries')
   return { problems, identical, total: before.size }
+}
+
+const CALC_CHAIN = 'xl/calcChain.xml'
+
+/**
+ * The parts that must stop mentioning calcChain once it is gone.
+ *
+ * Excel does not merely tolerate a missing calcChain -- it rebuilds it. What
+ * it does not tolerate is a `[Content_Types].xml` override or a workbook
+ * relationship naming a part that is not in the package.
+ */
+function danglingCalcChainRefs(bytes, entries) {
+  const problems = []
+  for (const [path, pattern] of [
+    ['[Content_Types].xml', /PartName="\/xl\/calcChain\.xml"/],
+    ['xl/_rels/workbook.xml.rels', /Target="calcChain\.xml"/],
+  ]) {
+    const entry = entries.get(path)
+    if (!entry) {
+      problems.push(`calcChain dropped but ${path} is missing from the package`)
+      continue
+    }
+    if (pattern.test(readEntryText(bytes, entry))) {
+      problems.push(`calcChain dropped but still referenced from ${path}`)
+    }
+  }
+  return problems
 }
 
 /**
@@ -422,16 +460,46 @@ function readCentralDirectory(bytes) {
   let offset = view.readUInt32LE(eocd + 16)
   for (let index = 0; index < count; index += 1) {
     if (view.readUInt32LE(offset) !== 0x02014b50) throw new Error('corrupt central directory')
+    const method = view.readUInt16LE(offset + 10)
     const crc = view.readUInt32LE(offset + 16)
+    const compressedSize = view.readUInt32LE(offset + 20)
     const nameLength = view.readUInt16LE(offset + 28)
     const extraLength = view.readUInt16LE(offset + 30)
     const commentLength = view.readUInt16LE(offset + 32)
+    const localOffset = view.readUInt32LE(offset + 42)
     const name = view.toString('utf8', offset + 46, offset + 46 + nameLength)
-    entries.set(name, crc)
+    entries.set(name, { crc, method, compressedSize, localOffset })
     offset += 46 + nameLength + extraLength + commentLength
   }
   return entries
 }
 
-await mkdir(tmpdir(), { recursive: true }).catch(() => {})
-await main()
+/**
+ * One entry's bytes as text.
+ *
+ * Inflated by hand for the same reason the directory is read by hand: this is
+ * the check that the save path produced a coherent package, so it must not go
+ * through the library that built it. Only the two methods a real xlsx uses.
+ */
+function readEntryText(bytes, entry) {
+  const view = Buffer.from(bytes)
+  if (view.readUInt32LE(entry.localOffset) !== 0x04034b50) {
+    throw new Error('corrupt local file header')
+  }
+  const nameLength = view.readUInt16LE(entry.localOffset + 26)
+  const extraLength = view.readUInt16LE(entry.localOffset + 28)
+  const start = entry.localOffset + 30 + nameLength + extraLength
+  const raw = view.subarray(start, start + entry.compressedSize)
+  if (entry.method === 0) return raw.toString('utf8')
+  if (entry.method === 8) return inflateRawSync(raw).toString('utf8')
+  throw new Error(`unsupported zip compression method ${entry.method}`)
+}
+
+// Importable for `web/tests/calc-chain.test.ts`, which exercises archiveDiff
+// against synthetic packages -- including one this harness must reject.
+export { archiveDiff, readCentralDirectory, readEntryText }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await mkdir(tmpdir(), { recursive: true }).catch(() => {})
+  await main()
+}
