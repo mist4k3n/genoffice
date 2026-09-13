@@ -498,6 +498,7 @@ export const he = {
   appSheetOrderReadFailed: 'לא ניתן לקרוא את סדר הגיליונות — נסה שוב.',
   appSavingEdits: 'שומר {count} עריכות…',
   appSaveCanceled: 'השמירה בוטלה.',
+  appExportedCopy: 'עותק יוצא — {name}.',
   appSaved: 'נשמר.',
   appSaveFailed: 'לא ניתן לשמור את חוברת העבודה.',
   appCfRuleUnsaveable: 'לא ניתן לשמור כלל עיצוב מותנה זה בקובץ xlsx — השתמשו בסוג כלל אחר.',

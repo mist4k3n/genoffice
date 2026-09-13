@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import { buildDesktopApi, type ExportedWorkbook } from '../src/host/desktop-api'
 import type { HostTransport } from '../src/host/transport'
 import { COVERAGE } from '../src/host/coverage'
+import { workbookSaveResultSchema } from '../../apps/sheets/src/shared/desktop-api'
 
 /**
  * Save As is one upstream method standing for two operations, and the split
@@ -48,7 +49,13 @@ test('a save-as reaches the host as bytes and the renderer as a cancel', async (
 
   const result = await api.saveWorkbookEdits({ mode: 'save-as' } as never)
 
-  assert.deepEqual(result, { canceled: true })
+  // `canceled` because nothing was written to *this* document, `copyName`
+  // because something nonetheless happened -- without it the renderer's status
+  // bar reads "Save canceled." after a Save As that produced a file.
+  assert.deepEqual(result, { canceled: true, copyName: 'budget.xlsx' })
+  // The renderer parses this with a .strict() schema, so an extra field is not
+  // a cosmetic difference -- it is a throw at the only place that reads it.
+  assert.deepEqual(workbookSaveResultSchema.parse(result), result)
   assert.deepEqual(fetched, ['/export/tok-1'])
   assert.equal(exported.length, 1)
   assert.equal(exported[0]?.suggestedName, 'budget.xlsx')

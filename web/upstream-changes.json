@@ -30,6 +30,7 @@
     "apps/sheets/src/renderer/univer-state.ts",
     "apps/sheets/src/renderer/univer-sync.ts",
     "apps/sheets/src/renderer/visual-actions.ts",
+    "apps/sheets/src/shared/desktop-api.ts",
     "apps/sheets/tests/aggregate-range.test.ts",
     "apps/sheets/tests/copy-source-direct.test.ts",
     "apps/sheets/tests/csv-save-streamed.test.ts",
@@ -41,6 +42,12 @@
     "apps/sheets/tests/structural-delete-guard.test.ts",
     "apps/sheets/tests/univer-range-loading.test.ts",
     "packages/ui/src/tokens.css"
+  ],
+  "fileGroups": [
+    {
+      "pattern": "apps/sheets/src/renderer/i18n/app/*.ts",
+      "reason": "One key, `appExportedCopy`, added to all 20 locale shards. Each shard carries `satisfies Record<keyof typeof zh, string>`, so the set can only change together -- a partial edit is a type error, not undeclared drift."
+    }
   ],
   "allowedFailures": [
     "parseCsv ignores delimiters inside escaped quotes when sniffing"

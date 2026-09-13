@@ -540,6 +540,7 @@ export const hi = {
   appSheetOrderReadFailed: 'शीट क्रम पढ़ा नहीं जा सका — फिर प्रयास करें।',
   appSavingEdits: '{count} संपादन सहेजे जा रहे हैं…',
   appSaveCanceled: 'सहेजना रद्द किया गया।',
+  appExportedCopy: 'एक प्रति निर्यात की गई — {name}।',
   appSaved: 'सहेजा गया।',
   appSaveFailed: 'कार्यपुस्तिका सहेजी नहीं जा सकी।',
   appCfRuleUnsaveable:

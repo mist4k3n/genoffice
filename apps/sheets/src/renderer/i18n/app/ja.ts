@@ -574,6 +574,7 @@ export const ja = {
   appSheetOrderReadFailed: 'シートの順序を読み取れません — もう一度お試しください。',
   appSavingEdits: '{count} 件の編集を保存中…',
   appSaveCanceled: '保存をキャンセルしました。',
+  appExportedCopy: 'コピーをエクスポートしました — {name}。',
   appSaved: '保存しました。',
   appSaveFailed: 'ブックを保存できません。',
   appCfRuleUnsaveable:

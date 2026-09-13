@@ -367,13 +367,15 @@ export function installDesktopApi(api: DesktopApi): void {
  * chooses. So the server assembles the patched bytes, parks them, and answers
  * with a token; this fetches them and hands them to the host.
  *
- * What the renderer receives is `{ canceled: true }` -- upstream's own shape,
- * and the honest one. Nothing was saved to *this* document, so the journal
- * stays pending and the session keeps its identity, which is exactly what
- * upstream does for its CSV Save As (`save-actions.ts`: "the journal stays
- * pending; the session keeps its identity (a copy semantics)"). The `export`
- * half never reaches the renderer, so upstream's strict result schema stays
- * satisfied on the only side that parses it.
+ * What the renderer receives is `{ canceled: true, copyName }` -- upstream's
+ * own shape. Nothing was saved to *this* document, so the journal stays
+ * pending and the session keeps its identity, which is exactly what upstream
+ * does for its CSV Save As (`save-actions.ts`: "the journal stays pending; the
+ * session keeps its identity (a copy semantics)"). `copyName` is the sibling
+ * of that branch's `csvSaveAsPath`: a canceled result that is not a
+ * cancellation, so the status bar reports the copy rather than "Save
+ * canceled." The `export` half never reaches the renderer, so upstream's
+ * strict result schema stays satisfied on the only side that parses it.
  */
 function saveOrExport(
   channel: string,
@@ -398,7 +400,10 @@ function saveOrExport(
     // After the fetch, never before: a host told the export succeeded and then
     // handed nothing would have no way to tell which half failed.
     onExport?.({ bytes, suggestedName: name, touchedEntries })
-    return { canceled: true }
+    // `canceled: true` with a `copyName`: nothing was written to this
+    // document, so the journal stays pending, but a copy exists and the status
+    // bar says so instead of reporting a cancellation that did not happen.
+    return { canceled: true, copyName: name }
   }
 }
 

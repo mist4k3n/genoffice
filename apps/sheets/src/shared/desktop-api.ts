@@ -2142,6 +2142,14 @@ export const workbookSaveResultSchema = z.union([
       /// written; the renderer serializes the active sheet to this path via
       /// the CSV export channel instead.
       csvSaveAsPath: z.string().min(1).optional(),
+      /// The save assembled a copy and handed it to the embedding application
+      /// rather than writing this document -- Save As where the destination is
+      /// not a path this process can write (see `web/`). Like the CSV branch
+      /// above this is a genuine `canceled` result, because nothing was
+      /// written *here* and the journal must stay pending; unlike a real
+      /// cancellation something happened, and the status bar must say so.
+      /// Never set by the desktop shell.
+      copyName: z.string().min(1).optional(),
     })
     .strict(),
   z

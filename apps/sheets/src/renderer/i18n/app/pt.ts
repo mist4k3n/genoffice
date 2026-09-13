@@ -579,6 +579,7 @@ export const pt = {
   appSheetOrderReadFailed: 'Não foi possível ler a ordem das planilhas — tente novamente.',
   appSavingEdits: 'Salvando {count} edição(ões)…',
   appSaveCanceled: 'Salvamento cancelado.',
+  appExportedCopy: 'Cópia exportada — {name}.',
   appSaved: 'Salvo.',
   appSaveFailed: 'Não foi possível salvar a pasta de trabalho.',
   appCfRuleUnsaveable:

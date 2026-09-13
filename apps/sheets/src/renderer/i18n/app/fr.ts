@@ -597,6 +597,7 @@ export const fr = {
   appSheetOrderReadFailed: "Impossible de lire l'ordre des feuilles — réessayez.",
   appSavingEdits: 'Enregistrement de {count} modification(s)…',
   appSaveCanceled: 'Enregistrement annulé.',
+  appExportedCopy: 'Copie exportée — {name}.',
   appSaved: 'Enregistré.',
   appSaveFailed: "Impossible d'enregistrer le classeur.",
   appCfRuleUnsaveable:

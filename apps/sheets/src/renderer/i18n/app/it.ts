@@ -574,6 +574,7 @@ export const it = {
   appSheetOrderReadFailed: "Impossibile leggere l'ordine dei fogli — riprova.",
   appSavingEdits: 'Salvataggio di {count} modifica/e…',
   appSaveCanceled: 'Salvataggio annullato.',
+  appExportedCopy: 'Copia esportata — {name}.',
   appSaved: 'Salvato.',
   appSaveFailed: 'Impossibile salvare la cartella di lavoro.',
   appCfRuleUnsaveable:

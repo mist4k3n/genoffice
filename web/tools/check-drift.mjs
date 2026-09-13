@@ -60,14 +60,31 @@ const changed = [...new Set([...tracked, ...untracked])]
 // is still a failure, and every declared one has a written justification.
 const declared = JSON.parse(readFileSync(resolve(here, '../upstream-changes.json'), 'utf8'))
 const declaredFiles = new Set(declared.files)
-const undeclared = changed.filter((f) => !declaredFiles.has(f))
-const stale = [...declaredFiles].filter((f) => !changed.includes(f))
+// A declaration may name a directory of siblings that can only ever change
+// together. The i18n shards are the case: each carries
+// `satisfies Record<keyof typeof zh, string>`, so adding one key to one shard
+// is a type error in the other nineteen -- the set is all-or-nothing by
+// construction, and listing twenty one-line inserts individually buries what
+// the fork actually changed. `*` matches within one directory segment only, so
+// a glob can never quietly absorb a file from somewhere else.
+const declaredGlobs = (declared.fileGroups ?? []).map((group) => ({
+  pattern: group.pattern,
+  match: new RegExp(`^${group.pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`),
+}))
+const isDeclared = (file) =>
+  declaredFiles.has(file) || declaredGlobs.some((group) => group.match.test(file))
+const undeclared = changed.filter((f) => !isDeclared(f))
+const stale = [
+  ...[...declaredFiles].filter((f) => !changed.includes(f)),
+  ...declaredGlobs.filter((g) => !changed.some((f) => g.match.test(f))).map((g) => g.pattern),
+]
 
 console.log(`Invariant: only declared upstream files differ from ${base}`)
 if (undeclared.length === 0) {
   console.log(
-    `  OK — ${changed.length} declared file(s) differ, nothing undeclared` +
-      ` (web/UPSTREAM-CHANGES.md)\n`,
+    `  OK — ${changed.length} declared file(s) differ` +
+      `${declaredGlobs.length > 0 ? ` (${declaredGlobs.length} via group(s))` : ''}` +
+      `, nothing undeclared (web/UPSTREAM-CHANGES.md)\n`,
   )
 } else {
   failed = true

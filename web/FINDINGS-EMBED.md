@@ -161,11 +161,16 @@ stays pending; the session keeps its identity (a copy semantics)"*. The
 `export` half is stripped by the bridge, so upstream's `.strict()` result
 schema stays satisfied on the only side that parses it.
 
-**The cost of that choice, stated plainly:** the renderer's status bar reads
-*"Save canceled."* after a Save As that succeeded. It is cosmetic and it is
-wrong. Fixing it means an upstream change — a result the renderer can tell
-apart from a cancel — which is not worth it for a status line while the host's
-own chrome is reporting the real outcome.
+**This cost the status bar, and that is now fixed.** The renderer read
+*"Save canceled."* after a Save As that succeeded, because its only reading of
+`canceled` was "the user dismissed the dialog". Upstream had already drawn the
+distinction once — `csvSaveAsPath` rides on a canceled result to mean "no xlsx
+was written, but something happened" — so `copyName` is that shape a second
+time, and the status bar reports the copy. See `UPSTREAM-CHANGES.md`, Change 5.
+
+Verified in the harness through both entry points, `exportBytes()` and the
+ribbon's own button: *"Exported a copy — acme-budget.xlsx."*, localized, with
+the pending edit still pending afterwards and a later real save consuming it.
 
 ### Who gets the bytes
 

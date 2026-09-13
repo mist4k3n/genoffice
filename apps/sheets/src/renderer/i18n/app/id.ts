@@ -541,6 +541,7 @@ export const id = {
   appSheetOrderReadFailed: 'Tidak dapat membaca urutan lembar — coba lagi.',
   appSavingEdits: 'Menyimpan {count} pengeditan…',
   appSaveCanceled: 'Penyimpanan dibatalkan.',
+  appExportedCopy: 'Salinan diekspor — {name}.',
   appSaved: 'Disimpan.',
   appSaveFailed: 'Tidak dapat menyimpan buku kerja.',
   appCfRuleUnsaveable:

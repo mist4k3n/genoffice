@@ -566,6 +566,7 @@ export const pl = {
   appSheetOrderReadFailed: 'Nie można odczytać kolejności arkuszy — spróbuj ponownie.',
   appSavingEdits: 'Zapisywanie {count} zmian(y)…',
   appSaveCanceled: 'Anulowano zapisywanie.',
+  appExportedCopy: 'Wyeksportowano kopię — {name}.',
   appSaved: 'Zapisano.',
   appSaveFailed: 'Nie można zapisać skoroszytu.',
   appCfRuleUnsaveable:

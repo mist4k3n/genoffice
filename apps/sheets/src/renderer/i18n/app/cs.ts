@@ -546,6 +546,7 @@ export const cs = {
   appSheetOrderReadFailed: 'Nelze načíst pořadí listů — zkuste to znovu.',
   appSavingEdits: 'Ukládá se {count} úprav…',
   appSaveCanceled: 'Ukládání zrušeno.',
+  appExportedCopy: 'Exportována kopie — {name}.',
   appSaved: 'Uloženo.',
   appSaveFailed: 'Sešit nelze uložit.',
   appCfRuleUnsaveable:

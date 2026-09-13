@@ -573,6 +573,7 @@ export const nl = {
   appSheetOrderReadFailed: 'Kan de werkbladvolgorde niet lezen — probeer het opnieuw.',
   appSavingEdits: '{count} bewerking(en) opslaan…',
   appSaveCanceled: 'Opslaan geannuleerd.',
+  appExportedCopy: 'Kopie geëxporteerd — {name}.',
   appSaved: 'Opgeslagen.',
   appSaveFailed: 'Kan de werkmap niet opslaan.',
   appCfRuleUnsaveable:

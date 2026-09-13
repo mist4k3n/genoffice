@@ -556,6 +556,7 @@ export const ru = {
   appSheetOrderReadFailed: 'Не удаётся прочитать порядок листов — повторите попытку.',
   appSavingEdits: 'Сохранение изменений: {count}…',
   appSaveCanceled: 'Сохранение отменено.',
+  appExportedCopy: 'Копия экспортирована — {name}.',
   appSaved: 'Сохранено.',
   appSaveFailed: 'Не удаётся сохранить книгу.',
   appCfRuleUnsaveable:

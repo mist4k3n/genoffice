@@ -275,3 +275,57 @@ The `tokens.css` hunk is a two-line selector and will conflict only if upstream
 restructures the file; keep `[data-theme='light']` beside `:root`. The
 `App.tsx` hunk conflicts if upstream touches `isDarkTheme`; keep the walk up
 from `gridContainerId`. The `locale.tsx` hunk is additive.
+
+---
+
+## Change 5 — a canceled save that is not a cancellation
+
+**Files:** `apps/sheets/src/shared/desktop-api.ts`,
+`apps/sheets/src/renderer/save-actions.ts`, and one key in each of the 20
+locale shards under `apps/sheets/src/renderer/i18n/app/` (declared as a group
+in `upstream-changes.json`: each shard carries
+`satisfies Record<keyof typeof zh, string>`, so they can only change together).
+
+### Why
+
+Web Save As produces a copy the host takes away; nothing is written to the
+document. `{ canceled: true }` is the right result — the journal must stay
+pending and the session must keep its identity — but the renderer's only reading
+of `canceled` was "the user dismissed the dialog", so the status bar said
+**"Save canceled."** after a Save As that had just handed over a file.
+
+### What changed
+
+Upstream had already drawn this distinction once. The `canceled: true` branch
+of `workbookSaveResultSchema` carries `csvSaveAsPath`, and `save-actions.ts`
+treats it as *"no xlsx was written … the journal stays pending; the session
+keeps its identity (a copy semantics)"*. This is that shape a second time:
+
+- `copyName?: string` beside `csvSaveAsPath` in the canceled branch, documented
+  as never set by the desktop shell.
+- A sibling branch in `handleSave` that reports the copy and toasts it instead
+  of falling through to `appSaveCanceled`.
+- `appExportedCopy` — "Exported a copy — {name}." — in every locale.
+
+`web/src/host/desktop-api.ts` fills it from the export slot's name. The desktop
+never sets it, so desktop behaviour is unchanged by construction.
+
+### Why a key and not a reused string
+
+`appCsvExported` reads correctly ("Exported {path}.") and would have cost no
+drift at all. It is a CSV key, and a save path reaching into the CSV dictionary
+is the kind of thing that is fine until someone rewords the CSV message. The
+twenty one-line inserts are the cheapest kind of drift — additive, isolated,
+and flagged by `check:drift` if upstream touches those files.
+
+`check:drift` grew `fileGroups` for this: a declaration may name a directory of
+siblings that can only change together. `*` matches within one path segment, so
+a group cannot quietly absorb a file from anywhere else — verified by making a
+file in the parent directory differ and watching the check fail.
+
+### Rebasing
+
+Both hunks are additive and sit next to the `csvSaveAsPath` they mirror; a
+conflict means upstream restructured the canceled branch, in which case keep
+`copyName` beside whatever `csvSaveAsPath` became. The dictionary inserts
+conflict only if upstream adds a key at the same line.

@@ -542,6 +542,7 @@ export const ms = {
   appSheetOrderReadFailed: 'Tidak dapat membaca susunan helaian — cuba lagi.',
   appSavingEdits: 'Menyimpan {count} suntingan…',
   appSaveCanceled: 'Penyimpanan dibatalkan.',
+  appExportedCopy: 'Salinan dieksport — {name}.',
   appSaved: 'Disimpan.',
   appSaveFailed: 'Tidak dapat menyimpan buku kerja.',
   appCfRuleUnsaveable:

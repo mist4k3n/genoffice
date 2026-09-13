@@ -517,6 +517,7 @@ export const th = {
   appSheetOrderReadFailed: 'อ่านลำดับแผ่นงานไม่ได้ — ลองอีกครั้ง',
   appSavingEdits: 'กำลังบันทึกการแก้ไข {count} รายการ…',
   appSaveCanceled: 'ยกเลิกการบันทึกแล้ว',
+  appExportedCopy: 'ส่งออกสำเนาแล้ว — {name}',
   appSaved: 'บันทึกแล้ว',
   appSaveFailed: 'บันทึกเวิร์กบุ๊กไม่ได้',
   appCfRuleUnsaveable:

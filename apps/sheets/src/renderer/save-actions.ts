@@ -407,6 +407,17 @@ export async function handleSave(
         )
         return
       }
+      if (result.copyName !== undefined) {
+        // A copy left the editor: same semantics as the CSV branch above --
+        // the journal stays pending and the session keeps its identity -- so
+        // this is a cancellation only from this document's point of view.
+        // Reporting it as one is simply wrong, and it is the user's own Save
+        // As that produced it.
+        const exported = t('appExportedCopy', { name: result.copyName })
+        ctx.setMessage(exported)
+        if (!quiet) showToast(exported)
+        return
+      }
       ctx.setMessage(t('appSaveCanceled'))
       return
     }

@@ -579,6 +579,7 @@ export const es = {
   appSheetOrderReadFailed: 'No se puede leer el orden de las hojas — inténtelo de nuevo.',
   appSavingEdits: 'Guardando {count} edición(es)…',
   appSaveCanceled: 'Guardado cancelado.',
+  appExportedCopy: 'Copia exportada — {name}.',
   appSaved: 'Guardado.',
   appSaveFailed: 'No se puede guardar el libro.',
   appCfRuleUnsaveable:

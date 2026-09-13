@@ -518,6 +518,7 @@ export const ar = {
   appSheetOrderReadFailed: 'يتعذر قراءة ترتيب الأوراق — أعد المحاولة.',
   appSavingEdits: 'جارٍ حفظ {count} من التعديلات…',
   appSaveCanceled: 'أُلغي الحفظ.',
+  appExportedCopy: 'تم تصدير نسخة — {name}.',
   appSaved: 'تم الحفظ.',
   appSaveFailed: 'يتعذر حفظ المصنف.',
   appCfRuleUnsaveable: 'لا يمكن حفظ قاعدة التنسيق الشرطي هذه في xlsx — استخدم نوع قاعدة آخر.',

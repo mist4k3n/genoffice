@@ -487,6 +487,7 @@ export const zh = {
   appSheetOrderReadFailed: '无法读取工作表顺序——请重试。',
   appSavingEdits: '正在保存 {count} 处编辑…',
   appSaveCanceled: '保存已取消。',
+  appExportedCopy: '已导出副本 — {name}。',
   appSaved: '已保存。',
   appSaveFailed: '无法保存工作簿。',
   appCfRuleUnsaveable: '这种条件格式规则无法保存到 xlsx——请换用其他规则类型。',

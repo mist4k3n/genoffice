@@ -585,6 +585,7 @@ export const de = {
     'Die Blattreihenfolge kann nicht gelesen werden — versuchen Sie es erneut.',
   appSavingEdits: '{count} Bearbeitung(en) werden gespeichert…',
   appSaveCanceled: 'Speichern abgebrochen.',
+  appExportedCopy: 'Kopie exportiert — {name}.',
   appSaved: 'Gespeichert.',
   appSaveFailed: 'Die Arbeitsmappe kann nicht gespeichert werden.',
   appCfRuleUnsaveable:

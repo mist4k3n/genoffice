@@ -526,6 +526,7 @@ export const en = {
   appSheetOrderReadFailed: 'Unable to read the sheet order — try again.',
   appSavingEdits: 'Saving {count} edit(s)…',
   appSaveCanceled: 'Save canceled.',
+  appExportedCopy: 'Exported a copy — {name}.',
   appSaved: 'Saved.',
   appSaveFailed: 'Unable to save the workbook.',
   appCfRuleUnsaveable:

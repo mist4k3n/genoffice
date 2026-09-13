@@ -477,6 +477,7 @@ export const zhTW = {
   appSheetOrderReadFailed: '無法讀取工作表順序——請重試。',
   appSavingEdits: '正在儲存 {count} 處編輯…',
   appSaveCanceled: '儲存已取消。',
+  appExportedCopy: '已匯出副本 — {name}。',
   appSaved: '已儲存。',
   appSaveFailed: '無法儲存活頁簿。',
   appCfRuleUnsaveable: '這種設定格式化的條件規則無法儲存到 xlsx——請改用其他規則類型。',

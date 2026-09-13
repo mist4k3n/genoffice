@@ -550,6 +550,7 @@ export const ko = {
   appSheetOrderReadFailed: '시트 순서를 읽을 수 없습니다 — 다시 시도하십시오.',
   appSavingEdits: '편집 {count}개를 저장하는 중…',
   appSaveCanceled: '저장을 취소했습니다.',
+  appExportedCopy: '사본을 내보냈습니다 — {name}.',
   appSaved: '저장했습니다.',
   appSaveFailed: '통합 문서를 저장할 수 없습니다.',
   appCfRuleUnsaveable:
