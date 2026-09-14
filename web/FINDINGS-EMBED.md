@@ -164,12 +164,24 @@ synchronously, before the renderer's own continuation, and `setEditable` is
 synchronous — so the grid is editable by the time the apply runs, and locked
 again 400ms after the traffic stops.
 
-**The cost, stated plainly:** for 400ms after each response the grid would take
-a keystroke. Those windows open when the viewport loads, which is when someone
-is scrolling rather than typing, and anything landing in one is overwritten by
-the arriving data and refused by the server at save. Closing it outright needs
-the renderer to mark its own writes — a much larger upstream change than this
-is worth, and the server's refusal is the guarantee either way.
+The window is **not** an arbitrary number, and the first version of it was.
+Upstream's lazy loader re-reads a range every 400ms while the engine is still
+indexing it (four sites in `univer-sync.ts`), so one load of a large sheet is a
+*sequence* of responses that far apart, not a single response. A window of
+400ms — which is what this started as — expires inside that cycle: harmless,
+because the next read reopens it before its own apply, but the pane would lock
+and unlock every 400ms for as long as indexing took. It is now derived from
+upstream's interval plus the poll and a round trip, and
+`tests/isolation.test.ts` reads upstream's source and fails if that interval
+moves, because a copied constant goes stale silently.
+
+**The cost, stated plainly:** for that window after each response the grid would
+take a keystroke. Those windows open when the viewport loads, which is when
+someone is scrolling rather than typing, and anything landing in one is
+overwritten by the arriving data and refused by the server at save. Closing it
+outright needs the renderer to mark its own writes — a much larger upstream
+change than this is worth, and the server's refusal is the guarantee either
+way.
 
 ### And a sizing bug, visible only beside a frame
 

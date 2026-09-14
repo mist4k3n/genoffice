@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { test } from 'node:test'
 
@@ -138,4 +139,25 @@ test('a viewer sharing a unit with an editor hands the permission back', async (
   } finally {
     gate.stop()
   }
+})
+
+test("the settle window still clears upstream's re-read interval", () => {
+  // SETTLE_MS is derived from a number that lives in upstream's source: its
+  // lazy loader re-reads a range every 400ms while the engine is still
+  // indexing, so one load of a large sheet is a sequence of responses that far
+  // apart. A window narrower than that expires inside a load and the pane
+  // locks and unlocks for as long as indexing takes.
+  //
+  // Copied constants go stale silently, so read the real one.
+  const source = readFileSync(
+    new URL('../../apps/sheets/src/renderer/univer-sync.ts', import.meta.url),
+    'utf8',
+  )
+  const waits = [...source.matchAll(/setTimeout\(resolve, (\d+)\)/g)].map((m) => Number(m[1]))
+  assert.ok(waits.length > 0, 'upstream no longer backs off with setTimeout at all')
+  assert.ok(
+    SETTLE_MS > Math.max(...waits),
+    `SETTLE_MS (${SETTLE_MS}ms) must exceed upstream's longest re-read wait ` +
+      `(${Math.max(...waits)}ms) or the lock closes mid-load`,
+  )
 })

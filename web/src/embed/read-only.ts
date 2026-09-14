@@ -75,13 +75,30 @@ const RETRY_MS = 150
 /** Long enough for a large workbook to finish opening on a slow machine. */
 const GIVE_UP_MS = 30_000
 /**
+ * The widest gap upstream leaves between two reads inside one load.
+ *
+ * Its lazy loader re-reads a range on this interval while the engine is still
+ * indexing it -- four sites in `univer-sync.ts`, all `setTimeout(resolve, 400)`
+ * -- so a load of a large sheet is a sequence of responses 400ms apart, not one
+ * response. `tests/isolation.test.ts` reads upstream's source and fails if this
+ * number stops matching, because a stale copy of it here is silent: the lock
+ * would simply start closing in the middle of loads again.
+ */
+const UPSTREAM_REREAD_MS = 400
+
+/**
  * How long the lock stands aside after a response arrives.
  *
- * Long enough for the renderer to finish applying a viewport's worth of cells,
- * short enough that an idle viewer is locked. Bursts extend it: every response
- * pushes the deadline out, so a scroll that triggers ten reads is one window.
+ * Deliberately longer than {@link UPSTREAM_REREAD_MS}, plus room for the poll
+ * below and a round trip. A shorter window would expire *inside* an indexing
+ * retry cycle -- harmless, because the next read reopens it before its own
+ * apply, but it would make the pane lock and unlock every 400ms for as long as
+ * a large workbook takes to index, and a permission write is not free.
+ *
+ * Bursts extend it: every response pushes the deadline out, so a scroll that
+ * triggers ten reads is one window rather than ten.
  */
-export const SETTLE_MS = 400
+export const SETTLE_MS = UPSTREAM_REREAD_MS + RETRY_MS + 150
 
 /** Editable editors currently mounted, per Univer unit id. */
 const editableUnits = new Map<string, number>()
