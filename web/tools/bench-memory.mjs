@@ -15,6 +15,7 @@
  *
  *   npm run bench:memory                 # every workbook in the corpus, once
  *   npm run bench:memory -- --slope 8    # N copies of one workbook, for a slope
+ *   npm run bench:memory -- --slope 3 --reopen 3   # and is the retained half reusable
  *
  * Assumes `npm run serve -- --dir <corpus copy> --pool 1` is running.
  *
@@ -35,6 +36,15 @@ const arg = (name, fallback) => {
 }
 const SERVER = arg('server', 'http://127.0.0.1:5274')
 const REPEAT = Number(arg('repeat', '1'))
+
+/**
+ * Glibc tunables that change what an allocator hands back to the kernel.
+ *
+ * They are not set here -- they belong to whoever launches the engine -- but a
+ * run under one of them produces a different number than a run without, so the
+ * report has to say which it was or the two are not comparable.
+ */
+const ALLOCATOR_ENV = ['MALLOC_ARENA_MAX', 'MALLOC_TRIM_THRESHOLD_', 'MALLOC_MMAP_THRESHOLD_']
 
 async function invoke(documentId, channel, ...args) {
   const response = await fetch(`${SERVER}/invoke/${channel}`, {
@@ -92,16 +102,9 @@ async function slope(documentRoot, count) {
     return sample()
   }
 
-  const base = await settle()
-  console.log(`  slope over ${count} independent copies of ${source}`)
-  console.log(`  baseline engine ${base.engine.mb.toFixed(1)} MB\n`)
-  console.log(`  ${'#'.padStart(3)}  engine RSS   cumulative Δ   per workbook`)
-  console.log(`  ${'-'.repeat(3)}  ----------   ------------   ------------`)
-
-  const open = []
-  for (const [index, name] of copies.entries()) {
+  /** Open one copy and index its first sheet, the way a reader who scrolls does. */
+  async function openOne(name) {
     const file = await invoke(name, 'workbook:select')
-    open.push({ name, sessionId: file.sessionId })
     const sheet = file.sheets[0]
     for (let startRow = 0; startRow < sheet.rowCount; startRow += 2_000) {
       await invoke(name, 'workbook:read-range', {
@@ -115,6 +118,28 @@ async function slope(documentRoot, count) {
         },
       })
     }
+    return { name, sessionId: file.sessionId }
+  }
+
+  const closeAll = async (open) => {
+    for (const entry of open) {
+      await invoke(entry.name, 'workbook:close', entry.sessionId).catch(() => {})
+    }
+    return settle()
+  }
+
+  const base = await settle()
+  console.log(`  slope over ${count} independent copies of ${source}`)
+  for (const name of ALLOCATOR_ENV) {
+    if (process.env[name]) console.log(`  ${name}=${process.env[name]}`)
+  }
+  console.log(`  baseline engine ${base.engine.mb.toFixed(1)} MB\n`)
+  console.log(`  ${'#'.padStart(3)}  engine RSS   cumulative Δ   per workbook`)
+  console.log(`  ${'-'.repeat(3)}  ----------   ------------   ------------`)
+
+  const open = []
+  for (const [index, name] of copies.entries()) {
+    open.push(await openOne(name))
     const now = await settle()
     const delta = now.engine.mb - base.engine.mb
     console.log(
@@ -124,19 +149,50 @@ async function slope(documentRoot, count) {
   }
 
   const full = await settle()
+  const cost = full.engine.mb - base.engine.mb
   console.log(
-    `\n  per resident workbook: ${((full.engine.mb - base.engine.mb) / count).toFixed(1)} MB ` +
+    `\n  per resident workbook: ${(cost / count).toFixed(1)} MB ` +
       `(engine), server RSS ${full.server.mb.toFixed(1)} MB`,
   )
-  for (const entry of open) {
-    await invoke(entry.name, 'workbook:close', entry.sessionId).catch(() => {})
-  }
-  const after = await settle()
+
+  const after = await closeAll(open)
+  const reclaimed = ((full.engine.mb - after.engine.mb) / cost) * 100
   console.log(
     `  after closing all ${count}: engine ${after.engine.mb.toFixed(1)} MB ` +
       `(baseline ${base.engine.mb.toFixed(1)} MB) — reclaimed ` +
-      `${(((full.engine.mb - after.engine.mb) / (full.engine.mb - base.engine.mb)) * 100).toFixed(0)}%`,
+      `${reclaimed.toFixed(0)}%`,
   )
+
+  const passes = Number(arg('reopen', '0'))
+  if (passes <= 0) return
+
+  // What the retained half actually is.
+  //
+  // RSS that survives a close is either memory the allocator is holding on a
+  // free list -- reusable, so a long-lived process never pays for it twice --
+  // or memory the engine never released, which is a leak and compounds. The
+  // two look identical from outside and have opposite consequences for sizing
+  // a box, so open the same N again, repeatedly: a leak keeps climbing by the
+  // cost of one pass, a free list plateaus at the first pass's peak.
+  console.log(
+    `\n  reopening the same ${count}, ${passes}x — a leak reaches ` +
+      `${(base.engine.mb + cost * (passes + 1)).toFixed(0)} MB, a free list holds near ` +
+      `${full.engine.mb.toFixed(0)} MB\n`,
+  )
+  console.log(`  ${'pass'.padStart(4)}  resident peak   after close`)
+  console.log(`  ${'-'.repeat(4)}  -------------   -----------`)
+
+  let floor = after
+  for (let pass = 2; pass <= passes + 1; pass += 1) {
+    const again = []
+    for (const name of copies) again.push(await openOne(name))
+    const peak = await settle()
+    floor = await closeAll(again)
+    console.log(
+      `  ${String(pass).padStart(4)}  ${peak.engine.mb.toFixed(1).padStart(10)}MB  ` +
+        `${floor.engine.mb.toFixed(1).padStart(10)}MB`,
+    )
+  }
 }
 
 async function main() {

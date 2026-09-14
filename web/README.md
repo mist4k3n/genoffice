@@ -154,6 +154,19 @@ app.route('/sheets', createSheetsRouter({
 }).app)
 ```
 
+### Two environment variables worth setting
+
+```sh
+MALLOC_ARENA_MAX=1
+MALLOC_TRIM_THRESHOLD_=131072
+```
+
+The engine inherits the API process's environment. Without these, glibc's
+allocator drifts under repeated open/close: the same three heavy workbooks cost
+79 MB resident on the first cycle and 105 MB on the fourth. With them it holds
+flat at ~71 MB, and each workbook costs 11% less. Measured in
+`FINDINGS-PAPAN.md` §1.
+
 ### Permission is a lattice, resolved per request
 
 `permission` is `owner | admin | readwrite | readcopy | hidden | none`, not a

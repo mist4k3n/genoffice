@@ -107,15 +107,55 @@ in under it at 5.6 MB, heavy ones sit above it at ~25 MB. On gnexis's 7.6 GB
 box, engine memory alone would allow a few hundred heavy documents where
 Collabora allowed **~7**. The binding constraint has moved somewhere else.
 
-### One new finding, and it is a real one
+### The half that is not reclaimed is a free list, not a leak
 
 **The allocator does not give it back.** After closing all three heavy
-workbooks the engine sits at 41.3 MB against a 4.5 MB baseline — **50%
-reclaimed**, and 68–70% for the small ones, on both architectures. For a
-long-lived process this raises the floor over time rather than returning to it.
-Glibc arena retention is the likely cause and `MALLOC_ARENA_MAX` /
-`malloc_trim` the likely lever, but that is a hypothesis, not a measurement.
-Worth settling before sizing a box.
+workbooks the engine sits at ~41 MB against a 4.5 MB baseline — **50%
+reclaimed**, and 68–70% for the small ones, on both architectures.
+
+This section previously left that as a worry with a guess attached (glibc arena
+retention, `MALLOC_ARENA_MAX` the likely lever). The guess was half right, and
+it was pointing at the wrong problem.
+
+Retained RSS is either memory the allocator holds on a free list — reusable, so
+a long-lived process never pays for it twice — or memory the engine never
+released, which compounds. The two are indistinguishable from outside and have
+opposite consequences for sizing a box, so `bench-memory.mjs` now takes
+`--reopen N`: open the same workbooks again, N times over, and watch what the
+peak does. A leak climbs by the cost of one pass each time; a free list
+plateaus.
+
+Four passes of three 30.9 MB workbooks, where a leak would reach ~300 MB:
+
+| glibc tunables | per workbook | reclaimed | resident peak, pass 1 → 4 |
+| --- | --- | --- | --- |
+| *(none — the default)* | 25.0 MB | 49% | 79 → 83 → 86 → **105 MB** |
+| `MALLOC_ARENA_MAX=1` | 23.0 MB | 52% | 75 → 75 → 83 → 81 MB |
+| `MALLOC_TRIM_THRESHOLD_=131072` | 22.4 MB | 51% | 76 → 76 → 76 → 75 MB |
+| both | **22.2 MB** | 55% | 71 → 72 → 70 → **71 MB** |
+
+So the 50% is a free list. It is reused, the process plateaus, and no
+configuration reclaims it — which is the right answer, because handing pages
+back to the kernel only to fault them in again on the next open is a cost, not
+a saving.
+
+**What the tunables actually fix is drift.** Under the default allocator the
+peak grows 32% over four open/close cycles — 79 MB to 105 MB for the same three
+documents — and that is the shape that matters for a process that stays up for
+weeks. Both tunables together hold it flat at ~71 MB and shave 11% off the
+per-workbook cost as well. The run-to-run reproduction is close enough to be
+dull: a second default run gave 83 / 86 / 105 against the first's 83 / 86 / 105.
+
+It costs no code. The engine is spawned with an inherited environment, so
+setting these on whatever supervises the Node API is enough:
+
+```sh
+MALLOC_ARENA_MAX=1
+MALLOC_TRIM_THRESHOLD_=131072
+```
+
+`MALLOC_MMAP_THRESHOLD_=65536` was tried alongside them and changed nothing —
+the large allocations are already going to mmap.
 
 Caveats that remain: one engine process, containers on one laptop, and
 per-*connection* cost once Yjs rooms exist is still unmeasured.
