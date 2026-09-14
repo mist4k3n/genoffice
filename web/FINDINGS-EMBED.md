@@ -157,31 +157,42 @@ an editable editor, and `trackWorkbookUnit` deliberately declines to lock a unit
 another editor is editing. The pane rendered *because the lock was never taken*.
 The frame made the lock real.
 
-The lock now stands aside exactly while the renderer is applying what the
-server sent, which is knowable: every write the renderer makes follows a
-response it asked for. The host bridge announces each resolved call
-synchronously, before the renderer's own continuation, and `setEditable` is
-synchronous — so the grid is editable by the time the apply runs, and locked
-again 400ms after the traffic stops.
+The lock now stands aside while the renderer is applying what the server sent,
+which is knowable: every write the renderer makes follows a response it asked
+for. The host bridge brackets each call — before it leaves, and when it settles,
+synchronously, ahead of the renderer's own continuation — and `setEditable` is
+synchronous, so the grid is editable by the time the apply runs.
 
-The window is **not** an arbitrary number, and the first version of it was.
-Upstream's lazy loader re-reads a range every 400ms while the engine is still
-indexing it (four sites in `univer-sync.ts`), so one load of a large sheet is a
-*sequence* of responses that far apart, not a single response. A window of
-400ms — which is what this started as — expires inside that cycle: harmless,
-because the next read reopens it before its own apply, but the pane would lock
-and unlock every 400ms for as long as indexing took. It is now derived from
-upstream's interval plus the poll and a round trip, and
-`tests/isolation.test.ts` reads upstream's source and fails if that interval
-moves, because a copied constant goes stale silently.
+**The first version of this was a fixed window after each response, and that
+was the wrong shape.** A timer has to be longer than the whole load, and
+nothing bounds how long a load takes: a cold engine indexing a large workbook
+re-reads for as long as it needs to. Sizing a constant against that is
+guesswork, and guessing short means cells silently missing from someone's
+document — the same failure this whole section is about.
 
-**The cost, stated plainly:** for that window after each response the grid would
-take a keystroke. Those windows open when the viewport loads, which is when
-someone is scrolling rather than typing, and anything landing in one is
-overwritten by the arriving data and refused by the server at save. Closing it
-outright needs the renderer to mark its own writes — a much larger upstream
-change than this is worth, and the server's refusal is the guarantee either
-way.
+So the gate counts **requests in flight**. While the renderer has anything
+outstanding the lock is aside, however long that is. Duration stopped being a
+parameter. Verified under Slow 4G with 6× CPU throttling: `gamma-heavy-recalc`
+renders completely, rows 0 through 90, and refuses input once idle.
+
+Two bounded parameters remain:
+
+- **A tail**, covering the *last* apply — the one after the final response with
+  nothing outstanding behind it. It also has to clear upstream's 400ms indexing
+  re-read, because that sleep happens *between* requests with nothing in
+  flight; `tests/isolation.test.ts` reads upstream's source and fails if that
+  interval moves, since a copied constant goes stale silently.
+- **A gesture closes the tail.** A capture-phase listener on the embed wrapper
+  sees `keydown`, `paste`, `cut` and `drop` before Univer does, and locks
+  synchronously if nothing is in flight. The tail is for the renderer, not an
+  editing window.
+
+**The residual, stated plainly:** a gesture arriving *during* the tail locks the
+workbook while the renderer may still be applying, and cells in that final chunk
+can be dropped until the document is reopened. It needs someone to type into a
+read-only pane in the same moment its last chunk lands. The alternative —
+letting the keystroke through — is a read-only grid that takes input, which is
+the thing this is for.
 
 ### And a sizing bug, visible only beside a frame
 

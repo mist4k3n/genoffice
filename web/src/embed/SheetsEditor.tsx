@@ -133,7 +133,10 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
         },
         commands,
         settings,
-        onServerData: () => gateRef.current?.noteServerData(),
+        onServerTraffic: (phase) => {
+          if (phase === 'request') gateRef.current?.noteRequest()
+          else gateRef.current?.noteResponse()
+        },
         onExport: (exported) => deliverExport(exported, awaitingExport.current, handlers.current),
         onDraftRestored: () => handlers.current.onDraftRestored?.(),
       })
@@ -247,7 +250,16 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
       report: (message) => handlers.current.onError?.(new Error(message)),
     })
     gateRef.current = gate
+    const container = containerRef.current
+    // Capture phase, on the wrapper: `display: contents` removes its box but
+    // not the element, so every event inside the editor still passes through
+    // it -- and it does so before Univer's own listeners on the canvas below.
+    // This is what keeps the tail after a load from being an editing window.
+    const gesture = (): void => gate.noteUserGesture()
+    const events = ['keydown', 'paste', 'cut', 'drop'] as const
+    for (const name of events) container?.addEventListener(name, gesture, true)
     return () => {
+      for (const name of events) container?.removeEventListener(name, gesture, true)
       gateRef.current = null
       gate.stop()
     }

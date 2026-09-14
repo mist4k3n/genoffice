@@ -46,21 +46,41 @@
  * the server and applied none of them; `setValue` on a locked workbook writes
  * nothing and reports nothing.
  *
- * The fix is to open the lock exactly while the renderer is applying what the
- * server just sent, which is knowable: every write the renderer makes follows
- * a response it asked for. {@link ReadOnlyGate.noteServerData} is called from
- * the host bridge the moment a call resolves and **before** the renderer's own
- * continuation runs -- `setEditable` is synchronous, so the grid is editable
- * by the time the apply happens -- and the lock returns once the traffic
- * stops.
+ * The fix is to open the lock while the renderer is applying what the server
+ * sent, which is knowable: every write the renderer makes follows a response it
+ * asked for.
  *
- * **The cost, stated plainly:** for {@link SETTLE_MS} after each response the
- * grid would accept a keystroke. Those windows open when the viewport loads,
- * which is when the user is scrolling rather than typing, and anything that
- * lands in one is overwritten by the arriving data and refused by the server
- * at save. It is a flicker, not a write. Blocking it outright needs the
- * renderer to mark its own writes, which is a much larger upstream change than
- * this behaviour is worth.
+ * ## Why this is not a timer
+ *
+ * The first version of it was, and that was wrong. A fixed window after each
+ * response has to be longer than the whole load, and nothing bounds how long a
+ * load takes: a cold engine indexing a 30MB workbook re-reads for as long as it
+ * needs to. Sizing a constant against that is guesswork, and guessing short
+ * means cells silently missing from someone's document.
+ *
+ * So the gate counts **requests in flight** instead. While the renderer has
+ * anything outstanding the lock is aside, however long that is -- one request
+ * or four hundred, one second or a minute. Duration is no longer a parameter.
+ *
+ * Two things still are, and both are small and bounded:
+ *
+ *  - **{@link TAIL_MS}**, which covers the *last* apply -- the one after the
+ *    final response, with nothing outstanding behind it. It also has to clear
+ *    {@link UPSTREAM_REREAD_MS}, because upstream's indexing retry sleeps
+ *    between requests with nothing in flight, so a shorter tail would close the
+ *    lock inside a single load.
+ *  - **A user gesture closes it immediately.** {@link ReadOnlyGate.noteUserGesture}
+ *    is called from a capture-phase listener before Univer sees the event, so
+ *    the tail is not an editing window: the moment a person types or pastes
+ *    with nothing in flight, the workbook locks, synchronously, and the
+ *    keystroke lands on a locked grid.
+ *
+ * **The residual, stated plainly:** a gesture that arrives during the tail
+ * locks the workbook while the renderer may still be applying, and cells in
+ * that final chunk can be dropped until the document is reopened. It needs
+ * someone to type into a read-only pane in the same moment its last chunk is
+ * landing. The alternative -- letting the keystroke through -- is a read-only
+ * grid that takes input, which is the thing this file exists to prevent.
  */
 
 /** The slice of Univer's facade this needs, typed structurally like selection.ts. */
@@ -87,18 +107,16 @@ const GIVE_UP_MS = 30_000
 const UPSTREAM_REREAD_MS = 400
 
 /**
- * How long the lock stands aside after a response arrives.
+ * How long the lock stays aside after the last response, with nothing left in
+ * flight.
  *
- * Deliberately longer than {@link UPSTREAM_REREAD_MS}, plus room for the poll
- * below and a round trip. A shorter window would expire *inside* an indexing
- * retry cycle -- harmless, because the next read reopens it before its own
- * apply, but it would make the pane lock and unlock every 400ms for as long as
- * a large workbook takes to index, and a permission write is not free.
- *
- * Bursts extend it: every response pushes the deadline out, so a scroll that
- * triggers ten reads is one window rather than ten.
+ * This covers one apply, not one load -- the load is covered by the in-flight
+ * count. It must still clear {@link UPSTREAM_REREAD_MS}: upstream's indexing
+ * retry sleeps *between* requests, so during that sleep nothing is in flight
+ * and a shorter tail would close the lock in the middle of a load. Plus the
+ * poll interval and a round trip.
  */
-export const SETTLE_MS = UPSTREAM_REREAD_MS + RETRY_MS + 150
+export const TAIL_MS = UPSTREAM_REREAD_MS + RETRY_MS + 150
 
 /** Editable editors currently mounted, per Univer unit id. */
 const editableUnits = new Map<string, number>()
@@ -132,10 +150,22 @@ export type ReadOnlyReport = (message: string) => void
  */
 export interface ReadOnlyGate {
   /**
-   * The server answered, so the renderer is about to write. Called from the
-   * host bridge, synchronously, before the renderer's continuation.
+   * A call went out. Called from the host bridge; the lock stays aside until
+   * this one and every other outstanding call has come back.
    */
-  noteServerData(): void
+  noteRequest(): void
+  /**
+   * A call came back, so the renderer is about to write what it carried.
+   * Called synchronously, before the renderer's own continuation, because
+   * `setEditable` is synchronous and a poll would be too late.
+   */
+  noteResponse(): void
+  /**
+   * Someone pressed, pasted or dropped something into the editor. Called from
+   * a capture-phase listener, before Univer sees the event, so that the tail
+   * after a load is not an editing window.
+   */
+  noteUserGesture(): void
   /** Unmount. */
   stop(): void
 }
@@ -145,8 +175,13 @@ export function trackWorkbookUnit(
   options: { readOnly: boolean; report: ReadOnlyReport },
 ): ReadOnlyGate {
   let stopped = false
-  /** While `Date.now()` is below this, the renderer owns the workbook. */
-  let openUntil = 0
+  /** Calls the renderer has outstanding. Nonzero means a load is in progress. */
+  let inFlight = 0
+  /** When the last call came back, for {@link TAIL_MS}. */
+  let lastResponseAt = 0
+  /** True while the renderer may still be writing what the server sent. */
+  const loading = (): boolean =>
+    inFlight > 0 || Date.now() - lastResponseAt < TAIL_MS
   /** The unit this editor is counted against, while it is editable. */
   let counted: string | null = null
   /** Whether this editor currently holds the unit locked. */
@@ -169,7 +204,7 @@ export function trackWorkbookUnit(
       }
     } else if (workbook && unitId) {
       const shared = countEditable(unitId) > 0
-      if (!shared && !locked && Date.now() >= openUntil) {
+      if (!shared && !locked && !loading()) {
         workbook.setEditable?.(false)
         locked = true
       } else if (shared && locked) {
@@ -196,16 +231,38 @@ export function trackWorkbookUnit(
 
   tick()
 
+  /** Hand the workbook back to the renderer, now, not at the next poll. */
+  const openNow = (): void => {
+    if (!locked) return
+    getUniverApi()?.getActiveWorkbook?.()?.setEditable?.(true)
+    locked = false
+  }
+
   return {
-    noteServerData(): void {
+    noteRequest(): void {
       if (stopped || !options.readOnly) return
-      openUntil = Date.now() + SETTLE_MS
-      if (!locked) return
-      // Synchronously, because the renderer applies in the continuation of
-      // the call that just resolved. A poll would be too late and the data
-      // would be dropped.
-      getUniverApi()?.getActiveWorkbook?.()?.setEditable?.(true)
-      locked = false
+      inFlight += 1
+      openNow()
+    },
+    noteResponse(): void {
+      if (stopped || !options.readOnly) return
+      inFlight = Math.max(0, inFlight - 1)
+      lastResponseAt = Date.now()
+      // Before the renderer's continuation, which is where the apply happens.
+      openNow()
+    },
+    noteUserGesture(): void {
+      if (stopped || !options.readOnly || locked) return
+      // Mid-load the renderer keeps the workbook: dropping a chunk to refuse
+      // one keystroke trades a silent hole in the document for a keystroke the
+      // server will refuse anyway. Otherwise the person wins the race, which
+      // is what read-only means.
+      if (inFlight > 0) return
+      const workbook = getUniverApi()?.getActiveWorkbook?.()
+      const unitId = workbook?.getId?.()
+      if (!workbook || !unitId || countEditable(unitId) > 0) return
+      workbook.setEditable?.(false)
+      locked = true
     },
     stop(): void {
       stopped = true

@@ -133,15 +133,17 @@ export interface BuildOptions {
    */
   readonly settings?: HostSettingsBus | undefined
   /**
-   * A call resolved, so the renderer is about to write what came back.
+   * Calls going out and coming back.
    *
-   * Fired synchronously, before the renderer's own continuation. It exists for
+   * `request` fires before the call leaves; `response` fires when it settles,
+   * synchronously, before the renderer's own continuation. It exists for
    * `embed/read-only.ts`: Univer's permission gate cannot tell the renderer
    * apart from the user, so a read-only workbook refuses the loader too, and
-   * the only way to keep both is to stand the lock aside exactly while data is
-   * arriving.
+   * the only way to keep both is to stand the lock aside while the renderer
+   * has work outstanding -- which is what the pair reports, rather than a
+   * guess at how long a load takes.
    */
-  readonly onServerData?: (() => void) | undefined
+  readonly onServerTraffic?: ((phase: 'request' | 'response') => void) | undefined
 }
 
 /**
@@ -201,7 +203,7 @@ export function buildDesktopApi(
       case 'http': {
         const target = wire()
         const call = httpMethod(method, target, transport, interceptors)
-        api[method] = observed(method, target, announcing(call, options.onServerData), interceptors)
+        api[method] = observed(method, target, announcing(call, options.onServerTraffic), interceptors)
         break
       }
 
@@ -278,22 +280,28 @@ export function buildDesktopApi(
  * use for them. Everything else is rare enough that observing it is free.
  */
 /**
- * Say that a response arrived, in the awaited chain, so the announcement
- * happens before whatever the renderer does with it.
+ * Bracket each call, in the awaited chain, so the announcement happens before
+ * whatever the renderer does with the result.
  *
  * Every http method rather than a list of the reads that write: a save reopens
  * the workbook and resyncs it too, and a list is a thing to get wrong later.
  * The callback is a couple of comparisons.
+ *
+ * A rejection is a response as much as a result is, or one failed read would
+ * leave the counter permanently above zero and the lock permanently aside.
  */
 function announcing(
   call: (...args: unknown[]) => Promise<unknown>,
-  onServerData: (() => void) | undefined,
+  onServerTraffic: ((phase: 'request' | 'response') => void) | undefined,
 ): (...args: unknown[]) => Promise<unknown> {
-  if (!onServerData) return call
+  if (!onServerTraffic) return call
   return async (...args: unknown[]) => {
-    const result = await call(...args)
-    onServerData()
-    return result
+    onServerTraffic('request')
+    try {
+      return await call(...args)
+    } finally {
+      onServerTraffic('response')
+    }
   }
 }
 
