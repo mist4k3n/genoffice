@@ -205,6 +205,45 @@ export interface DraftAdapter {
   delete(identity: RequestIdentity): Promise<void>
 }
 
+/**
+ * Who is holding which open workbook.
+ *
+ * An open workbook lives inside one engine process, on one server instance, and
+ * that is not a cache -- it is where the file is. A request naming a session
+ * that this instance does not hold is not a stale request; it arrived at the
+ * wrong machine. With one instance that never happens and this port is not
+ * needed. With two behind a load balancer that does not pin by session, roughly
+ * half of every session's calls land wrong, and the server cannot tell that
+ * from a session that legitimately expired -- so it answers "reopen", and the
+ * client reopens a 30MB workbook, repeatedly, forever.
+ *
+ * The directory is what makes the two distinguishable. It answers one question
+ * -- which instance owns this session -- and the host decides what to do about
+ * it (see {@link SessionDirectory.forward}).
+ *
+ * Implementations should expire entries a little after {@link QuotaOptions.idleTimeoutMs};
+ * the server refreshes a claim on use, so a lapsed entry means the instance is
+ * gone. Papan's `office:bkr:*` broker keys in Redis are the same shape.
+ */
+export interface SessionDirectory {
+  /** Record, or refresh, this instance's ownership of a session. */
+  claim(sessionId: string, instanceId: string, ttlMs: number): Promise<void>
+  /** The instance that owns it, or null when nothing does. */
+  lookup(sessionId: string): Promise<string | null>
+  /** Called when the session closes, and when it is evicted. */
+  release(sessionId: string): Promise<void>
+  /**
+   * Hand a misdirected request to the instance that can answer it.
+   *
+   * Optional, and the difference between reporting the problem and solving it.
+   * Without it a misdirected call comes back as `session_elsewhere` (421) and
+   * the host is expected to fix the routing -- sticky sessions, a shard router,
+   * or one instance. With it the package proxies, and addressing stays where
+   * the addresses are known.
+   */
+  forward?(instanceId: string, request: Request): Promise<Response>
+}
+
 export interface QuotaOptions {
   /** Concurrent open sessions per tenant. */
   readonly maxSessionsPerTenant: number
@@ -284,6 +323,30 @@ export interface SheetsServerOptions {
    * 60s.
    */
   readonly exportTtlMs?: number | undefined
+  /**
+   * This process's identity, for {@link SessionDirectory}. Any stable string
+   * that distinguishes it from its siblings -- a PM2 instance id, a pod name.
+   * Defaults to a random id, which is fine: it only has to be unique, not
+   * meaningful, unless {@link SessionDirectory.forward} has to resolve it to an
+   * address.
+   */
+  readonly instanceId?: string | undefined
+  /** Where open sessions are recorded, when more than one instance serves them. */
+  readonly sessions?: SessionDirectory | undefined
+  /**
+   * Broadcast that a document moved, to every instance rather than this one.
+   *
+   * `SheetsRouter.documentChanged` reaches the sockets *this* instance holds,
+   * which is all a single-instance host has. Sockets for the same document are
+   * spread across instances by whatever balanced them, so our own save path --
+   * the two-tabs case, where the write went through this storage adapter and
+   * no host realtime layer saw it -- has to reach the others through the host.
+   *
+   * Supplied, the save path calls this instead of delivering locally, and the
+   * host is expected to publish and then call `documentChanged` on every
+   * instance, this one included. Absent, delivery stays local.
+   */
+  readonly announceChange?: ((documentId: string, version: VersionToken) => void) | undefined
 }
 
 export const DEFAULT_QUOTA: QuotaOptions = {

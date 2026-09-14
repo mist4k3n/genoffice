@@ -11,6 +11,7 @@ export type SheetsErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'session_gone'
+  | 'session_elsewhere'
   | 'password_required'
   | 'password_incorrect'
   | 'version_conflict'
@@ -28,6 +29,10 @@ const STATUS: Record<SheetsErrorCode, number> = {
   // Gone, not 404: the document exists, the *session* does not. The client's
   // correct response is to reopen, which is not what it does for a 404.
   session_gone: 410,
+  // 421 Misdirected Request, which is exactly what this is: the request is
+  // well formed and this server cannot produce a response for it, because the
+  // workbook it names is open on a different one.
+  session_elsewhere: 421,
   password_required: 428,
   password_incorrect: 403,
   version_conflict: 409,

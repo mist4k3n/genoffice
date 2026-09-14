@@ -112,9 +112,20 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
   //
   // Runs after the reopen so this session is already at the new version and is
   // therefore not among the stale ones.
-  const stale = context.registry.staleSessions(session.documentId, saved.version)
-  if (stale.length > 0) {
-    context.push.send(session.documentId, CONFLICT_CHANNEL, conflictFor(saved.version, stale))
+  //
+  // `push` reaches the sockets *this* instance holds. Two tabs balanced onto
+  // two instances is exactly the case that needs saying out loud, so a host
+  // running more than one hands us a way to reach them all and we use it
+  // instead -- it is expected to come back through `documentChanged` on every
+  // instance, this one included, which is why this does not also deliver
+  // locally.
+  if (context.announceChange) {
+    context.announceChange(session.documentId, saved.version)
+  } else {
+    const stale = context.registry.staleSessions(session.documentId, saved.version)
+    if (stale.length > 0) {
+      context.push.send(session.documentId, CONFLICT_CHANNEL, conflictFor(saved.version, stale))
+    }
   }
 
   return { canceled: false, file, touchedEntries: mutation.touchedEntries }

@@ -20,6 +20,7 @@ import {
   type StorageAdapter,
   type VersionToken,
   type WorkbookMetadata,
+  type SessionDirectory,
 } from './ports'
 
 /**
@@ -85,6 +86,10 @@ export interface SessionRegistryOptions {
   readonly scratchDir: string
   readonly locale: string
   readonly drafts?: DraftAdapter | undefined
+  /** Where open sessions are recorded, so a sibling instance can find them. */
+  readonly directory?: SessionDirectory | undefined
+  /** This process's identity in that directory. */
+  readonly instanceId?: string | undefined
 }
 
 /** The sidecar's open result: a workbook file minus the two fields we supply. */
@@ -112,10 +117,35 @@ export class SessionRegistry {
   get(sessionId: string): WorkbookSession {
     const session = this.sessions.get(sessionId)
     if (!session) {
-      throw new SheetsError('session_gone', 'Workbook session is no longer open.')
+      // The id rides along so the router can ask the directory whether this is
+      // a session that ended or one that lives on another instance. Nothing is
+      // disclosed: the caller sent this id.
+      throw new SheetsError('session_gone', 'Workbook session is no longer open.', { sessionId })
     }
     session.lastUsedAt = Date.now()
+    // Refreshing on use is what makes a lapsed claim mean "that instance is
+    // gone" rather than "that session is old".
+    void this.#claim(sessionId)
     return session
+  }
+
+  /**
+   * Record ownership. Failures are swallowed on purpose: a directory that is
+   * down must not take the editor down with it. The cost of a missing claim is
+   * a misdirected call answered as `session_gone`, which is what a host
+   * without a directory gets anyway.
+   */
+  #claim(sessionId: string): Promise<void> {
+    const { directory, instanceId } = this.options
+    if (!directory || !instanceId) return Promise.resolve()
+    // Outlives the reaper's own cutoff, so the entry disappears because the
+    // instance did, not because the session was idle.
+    const ttl = this.options.quota.idleTimeoutMs * 2
+    return directory.claim(sessionId, instanceId, ttl).catch(() => {})
+  }
+
+  #release(sessionId: string): Promise<void> {
+    return this.options.directory?.release(sessionId).catch(() => {}) ?? Promise.resolve()
   }
 
   /** Assert the caller owns the session. Never trust a client-supplied id. */
@@ -228,12 +258,14 @@ export class SessionRegistry {
 
   register(session: WorkbookSession): void {
     this.sessions.set(session.sessionId, session)
+    void this.#claim(session.sessionId)
   }
 
   async close(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) return
     this.sessions.delete(sessionId)
+    await this.#release(sessionId)
     await this.options.pool.close(sessionId)
     await session.releaseSnapshot()
   }
@@ -363,6 +395,7 @@ export class SessionRegistry {
         const session = this.sessions.get(sessionId)
         if (!session) return
         this.sessions.delete(sessionId)
+        await this.#release(sessionId)
         await session.releaseSnapshot()
       }),
     )

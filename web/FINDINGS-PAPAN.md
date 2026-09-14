@@ -146,10 +146,43 @@ surgery. That needs designing, not assuming.
 **No session affinity, and the pool needs it.** Two API instances, no sticky
 routing, and the codebase treats "any request can hit any instance" as an
 invariant satisfied with atomic Redis. An open workbook lives inside one engine
-process, so this is a correctness problem, not tuning. There is a
-specified-but-deferred **document-id shard router (#603)** for exactly this —
-find it before designing a second one. Interim options: `PAPAN_SINGLE_API=1`, or
-a Redis session→instance map.
+process, so this is a correctness problem, not tuning.
+
+*Addressed, as far as this side can.* The server could not previously tell a
+misrouted call from a dead session — both answered `session_gone` (410), whose
+correct client response is to reopen. On two instances that is roughly half of
+every session's calls reopening a workbook that is still open.
+`SessionDirectory` (`server/ports.ts`) is the port that makes them different:
+`claim` on open and on use, `release` on close and eviction, `lookup` on a
+miss. The shape is Papan's own `office:bkr:*` broker keys.
+
+A session another instance holds now answers **421 Misdirected Request**, code
+`session_elsewhere`, naming the owner. A directory that is down degrades to the
+old 410 rather than a 500, because reopening is correct either way — only
+expensive.
+
+Three ways to finish it, and the choice is Papan's, not this package's:
+
+1. **`PAPAN_SINGLE_API=1`.** Works today, no directory needed. gnexis already
+   measured api-1 at 809 MB across 29 restarts and called it pure cost.
+2. **Route by session.** The specified-but-deferred **document-id shard router
+   (#603)** is exactly this, and #617 §4 keeps it as engine-agnostic. Find it
+   before designing a second one.
+3. **`SessionDirectory.forward`.** Supply it and the package proxies the
+   misdirected call to the owning instance itself. Addressing stays where the
+   addresses are — the instances already reach each other on localhost:3001
+   and :3002.
+
+Verified end to end in `tests/affinity.test.ts`: two routers over one
+directory, 421 carrying the owner's id and 410 for a session nothing holds,
+and with a forwarder supplied the client never learns it was misrouted.
+
+**Sockets are the other half.** `documentChanged` reaches the sockets *this*
+instance holds. Two tabs balanced onto two instances is precisely the case our
+own save path exists to cover, so `announceChange` hands that broadcast to the
+host, which publishes — Redis pub/sub already carries Yjs awareness — and calls
+`documentChanged` on every instance. Absent, delivery stays local, which is all
+a single-instance host has.
 
 **Admission control, not just a pool size.** `office-brokers.ts` does
 RAM-weighted admission through a single Lua eval, because two instances can

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 
 import { Hono } from 'hono'
@@ -11,6 +12,7 @@ import {
   DEFAULT_PREFERENCES,
   DEFAULT_SIDECAR,
   type RequestIdentity,
+  type SessionDirectory,
   type SheetsServerOptions,
 } from './ports'
 import { PushHub, type PushSocket } from './push'
@@ -55,6 +57,11 @@ export interface SheetsRouter {
    * with how many were.
    */
   documentChanged(documentId: string, version?: string): Promise<number>
+  /**
+   * This process's identity in the {@link SessionDirectory}. Echoed back so a
+   * host that generated none can still address this instance.
+   */
+  readonly instanceId: string
   dispose(): Promise<void>
 }
 
@@ -100,6 +107,11 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     },
   )
 
+  // Any stable string; it only has to distinguish this process from its
+  // siblings. A host that resolves it to an address for forwarding will want
+  // to supply its own.
+  const instanceId = options.instanceId ?? randomUUID()
+
   const registry = new SessionRegistry({
     pool,
     storage: options.storage,
@@ -107,6 +119,8 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     scratchDir,
     locale,
     drafts: options.drafts,
+    directory: options.sessions,
+    instanceId,
   })
 
   pool.start()
@@ -173,13 +187,34 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
         scratchDir,
         exports,
         drafts: options.drafts,
+        announceChange: options.announceChange,
       })
       // An undefined result drops out of JSON.stringify entirely, and the
       // transport reads the missing key back as undefined. Right for the void
       // channels, which is most of them.
       return c.json({ result })
     } catch (error) {
-      const failure = toSheetsError(error)
+      let failure = toSheetsError(error)
+      // "I do not have this session" and "this session no longer exists" are
+      // the same answer on one instance and different answers on two. Asking
+      // the directory is the only way to tell them apart, and getting it wrong
+      // costs the client a full reopen of a workbook that is still open.
+      if (failure.code === 'session_gone' && options.sessions) {
+        const misdirected = await locateElsewhere(
+          options.sessions,
+          instanceId,
+          failure.detail?.['sessionId'],
+        )
+        if (misdirected) {
+          const forwarded = await forwardTo(options.sessions, misdirected, c.req.raw, args)
+          if (forwarded) return forwarded
+          failure = new SheetsError(
+            'session_elsewhere',
+            'This workbook is open on another server instance.',
+            { instanceId: misdirected },
+          )
+        }
+      }
       return c.json(
         {
           error: {
@@ -254,6 +289,7 @@ export function createSheetsRouter(options: SheetsServerOptions): SheetsRouter {
     app,
     attachSocket: (documentId, socket) => push.attach(documentId, socket),
     push: (documentId, channel, ...args) => push.send(documentId, channel, ...args),
+    instanceId,
     async documentChanged(documentId, version) {
       const current = version ?? (await options.storage.head(documentId)).version
       const stale = registry.staleSessions(documentId, current)
@@ -317,4 +353,54 @@ export function readableOrError(identity: RequestIdentity): SheetsError | null {
   return identity.permission === 'hidden'
     ? new SheetsError('not_found', 'No such document.')
     : new SheetsError('forbidden', 'You do not have access to this document.')
+}
+
+/**
+ * Is this a session another instance is holding, rather than one that ended?
+ *
+ * Returns the owner's id, or null -- which covers both "nothing owns it" and
+ * "we do", the second being a claim that outlived its session and which the
+ * caller should treat exactly like a session that ended.
+ */
+async function locateElsewhere(
+  directory: SessionDirectory,
+  instanceId: string,
+  sessionId: unknown,
+): Promise<string | null> {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null
+  // A directory that is down must not turn a 410 into a 500: the client's
+  // response to "reopen" is correct either way, just expensive.
+  const owner = await directory.lookup(sessionId).catch(() => null)
+  return owner && owner !== instanceId ? owner : null
+}
+
+/**
+ * Hand the call to the instance that can answer it, if the host said how.
+ *
+ * The body has already been read to parse `args`, so it is rebuilt rather than
+ * streamed -- these are JSON control messages, not the file, which travels
+ * over its own GET.
+ */
+async function forwardTo(
+  directory: SessionDirectory,
+  instanceId: string,
+  request: Request,
+  args: readonly unknown[],
+): Promise<Response | null> {
+  if (!directory.forward) return null
+  try {
+    return await directory.forward(
+      instanceId,
+      new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: JSON.stringify({ args }),
+      }),
+    )
+  } catch {
+    // Fall through to `session_elsewhere`, which at least tells the host what
+    // happened. A forwarder that is failing is a routing problem, and dressing
+    // it up as a dead session would hide it.
+    return null
+  }
 }

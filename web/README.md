@@ -35,6 +35,31 @@ ask Electron for now goes over HTTP; `web/src/host/coverage.ts` is the table of
 all 59 methods and is typed `Record<keyof DesktopApi, …>`, so an upstream
 contract change is a compile error naming the method.
 
+### More than one instance
+
+An open workbook lives inside one engine process on one instance — it is where
+the file is, not a cache of it. One instance needs nothing extra. Behind a
+balancer that does not pin by session, pass two more options:
+
+```ts
+createSheetsRouter({
+  storage,
+  identify,
+  instanceId: process.env.INSTANCE_ID,
+  sessions: redisSessionDirectory,          // claim / lookup / release
+  announceChange: (id, version) => bus.publish('sheets:changed', { id, version }),
+})
+```
+
+`sessions` makes "this session is on another instance" (**421**,
+`session_elsewhere`, naming the owner) a different answer from "this session
+ended" (410) — without it they are the same answer, and the client reopens a
+workbook that is still open. Add `forward` to the directory and the package
+proxies the call itself instead of reporting it.
+
+`announceChange` is the socket half: pushes reach the sockets *this* instance
+holds, so a host with several publishes and calls `documentChanged` on each.
+
 ## Embedding
 
 ```tsx

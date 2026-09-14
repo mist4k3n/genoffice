@@ -22,6 +22,13 @@ export interface ChannelContext {
   readonly exports: ExportStore
   /** Unsaved work between saves. Absent when the host supplies no draft store. */
   readonly drafts: DraftAdapter | undefined
+  /**
+   * Tell every instance that a document moved, not just this one.
+   *
+   * Absent on a single-instance host, where `push` already reaches every
+   * socket there is. See `SheetsServerOptions.announceChange`.
+   */
+  readonly announceChange: ((documentId: string, version: string) => void) | undefined
 }
 
 export type ChannelHandler = (context: ChannelContext) => Promise<unknown>
