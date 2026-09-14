@@ -232,6 +232,8 @@ decision someone writes down.
 | `npm run check:mirror` | The one copied upstream function still matches its original |
 | `npm run check:upstream` | `apps/sheets` still compiles and its own test suite still passes |
 | `npm run bench` / `bench:memory` | Scroll latency; resident memory per open workbook |
+| `npm run bench:linux` | The same memory benchmark in a Linux container — macOS `ps rss` cannot answer it |
+| `node tools/make-fixture.mjs --rows N` | Generate a heavy workbook; the corpus tops out at 0.4 MB |
 
 ## Where things are
 

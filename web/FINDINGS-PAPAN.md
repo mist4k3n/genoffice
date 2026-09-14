@@ -31,34 +31,94 @@ Collabora's ceiling is memory inside coolwsd: **~145MB settled, ~280MB peak per
 heavy `.xlsx`**, giving **~7 concurrent documents across all tenants** on
 gnexis's 7.6GB box. #617's target is ~100–200 documents at ~8–15MB each.
 
-Measured here (`npm run bench:memory -- --slope 24`), 24 independent copies of
-the 8,001-row corpus workbook, one engine process, each fully indexed:
+Measured on **Linux**, in a container, on both architectures
+(`web/tools/bench-container/`). The macOS numbers this section used to carry are
+retracted below.
+
+### Cost per resident *document*
+
+24 independent copies of the corpus workbook (0.4 MB, 56k cells), one engine
+process, each fully indexed:
 
 ```
     #  engine RSS   cumulative Δ   per workbook
-    1      29.5MB         22.8MB         22.8MB
-    8      26.3MB         19.6MB          2.4MB
-   16      21.8MB         15.1MB          0.9MB
-   24      25.3MB         18.5MB          0.8MB
+    1      26.6MB         22.1MB         22.1MB
+    8      62.1MB         57.6MB          7.2MB
+   16     101.5MB         96.9MB          6.1MB
+   24     139.9MB        135.3MB          5.6MB
 ```
 
-**The engine's RSS is flat.** Twenty-four heavy workbooks cost the same ~25MB as
-one. There is no per-document slope, because the Rust sidecar streams ranges out
-of the archive instead of materialising a document model — the thing LibreOffice
-fundamentally cannot do.
+**~5.6 MB per resident workbook**, linear, on a 4.5 MB baseline. amd64 gives
+5.8 MB — the architectures agree.
 
-Checked that this is streaming and not silent eviction: with twenty sessions
-open and every one fully indexed, the **first** session still returns
-byte-identical data.
+### Cost per resident *heavy* document
 
-So against #617's 8–15MB-per-connection target, the engine side is roughly two
-orders of magnitude under it. **The real per-document cost in this architecture
-is not RAM, it is the snapshot on disk** — see §2, which is now fixed.
+The number #617 actually cares about. A generated 30.9 MB workbook, 450k rows ×
+12 columns, **5.4 million cells** (`tools/make-fixture.mjs`), three copies, each
+fully indexed:
 
-Caveats, stated because they matter: one process, one machine, macOS, a 0.4MB
-workbook with 56k cells. The number to re-measure before quoting anywhere that
-counts is a 30MB financial workbook under Linux, and per-*connection* cost once
-Yjs rooms exist.
+```
+    #  engine RSS   cumulative Δ   per workbook
+    1      42.4MB         37.8MB         37.8MB
+    2      62.6MB         58.0MB         29.0MB
+    3      77.9MB         73.4MB         24.5MB
+```
+
+**~25 MB per resident heavy workbook** (amd64: 24.3 MB).
+
+### And it stops growing with the file
+
+| workbook | cells | on disk | per resident copy |
+| --- | --- | --- | --- |
+| corpus | 56k | 0.4 MB | 5.6 MB |
+| generated | 240k | 1.3 MB | 11.7 MB |
+| generated | 1.2M | 6.8 MB | 24.9 MB |
+| generated | 3.6M | 20.6 MB | 24.7 MB |
+| generated | 5.4M | 30.9 MB | 24.5 MB |
+
+Past roughly 7 MB of file the cost is flat: **4.5× the data for the same
+25 MB.** That is the streaming reader showing — the engine holds a bounded
+working set, not the document. It is the thing LibreOffice fundamentally cannot
+do, and it is why the comparison is not close: Collabora is **~145 MB settled,
+~280 MB peak** for one heavy `.xlsx`, against ~25 MB here that does not grow
+with the workbook.
+
+### Retraction: the macOS measurement was not a measurement
+
+This section previously reported the engine's RSS as **flat across 24 open
+documents** — 24 workbooks costing the same ~25 MB as one. That was wrong, and
+the way it was wrong is worth keeping.
+
+Re-run on macOS with the same code, engine RSS *falls* as workbooks are added:
+28.9 MB at 17 open, 6.8 MB at 18, 24.5 MB at 20, 7.9 MB at 24, and "reclaimed
+−3222%" after closing them. A resident set that shrinks when you add documents
+is not a result; `ps rss` on macOS reports a compressed, purgeable working set
+and cannot answer this question at all. The Linux series is monotonic, smooth,
+and reproduces on both architectures.
+
+The retracted claim was flat in the wrong variable. Cost **is** flat in document
+*size*, which is the interesting property and is measured above. It was never
+flat in document *count*.
+
+### What this means for the ceiling
+
+Against #617's target of 100–200 documents at 8–15 MB each: small documents come
+in under it at 5.6 MB, heavy ones sit above it at ~25 MB. On gnexis's 7.6 GB
+box, engine memory alone would allow a few hundred heavy documents where
+Collabora allowed **~7**. The binding constraint has moved somewhere else.
+
+### One new finding, and it is a real one
+
+**The allocator does not give it back.** After closing all three heavy
+workbooks the engine sits at 41.3 MB against a 4.5 MB baseline — **50%
+reclaimed**, and 68–70% for the small ones, on both architectures. For a
+long-lived process this raises the floor over time rather than returning to it.
+Glibc arena retention is the likely cause and `MALLOC_ARENA_MAX` /
+`malloc_trim` the likely lever, but that is a hypothesis, not a measurement.
+Worth settling before sizing a box.
+
+Caveats that remain: one engine process, containers on one laptop, and
+per-*connection* cost once Yjs rooms exist is still unmeasured.
 
 ## 2. Fixed already
 

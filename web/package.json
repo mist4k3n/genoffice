@@ -17,6 +17,7 @@
     "compat": "node tools/compat.mjs",
     "bench": "node tools/bench-range.mjs",
     "bench:memory": "node tools/bench-memory.mjs",
+    "bench:linux": "bash tools/bench-container/bench.sh",
     "test": "tsx --test tests/*.test.ts",
     "audit": "node tools/audit-corpus.mjs",
     "spike:encryption": "node tools/spike-encryption.mjs",
