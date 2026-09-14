@@ -109,14 +109,76 @@ neither was visible in review:
 - An editor that unmounted during start-up held the mount queue for its full
   timeout, turning every tab switch into a twenty-second wait.
 
-### The option not taken
+### The option taken for one case: a frame
 
-An **iframe per editor** also works — verified — because a frame has its own
-realm and therefore its own globals, and it needs no upstream change at all. It
-was rejected in favour of the in-page component: Papan embeds editors as React
-components, its SPA ships `frame-ancestors 'none'`, and each frame would carry
-another copy of the bundle. Worth remembering if the upstream change ever
-becomes unmaintainable.
+An **iframe per editor** also works, because a frame has its own realm and
+therefore its own element ids. It is not the default — Papan embeds editors as
+React components, its SPA ships `frame-ancestors 'none'`, and each frame costs
+another copy of the bundle — so it is a prop, `isolate`, on the same component
+with the same props, ref and events.
+
+Use it for the one case that cannot work any other way: **two grids visible at
+the same time**. Several editors with one visible at a time stay inline.
+
+`web/src/embed/frame-protocol.ts` is the wire, and it carries nothing beyond
+what `SheetsEditorProps` and `SheetsHandle` already define, so there is one
+host contract and not two. Three details worth keeping:
+
+- The frame is configured over postMessage, not by URL parameters. The document
+  id and the API base never enter a URL a referrer could carry away.
+- Every message is tagged and checked, in both directions, and each side checks
+  the sender window. The two vocabularies are disjoint, so a frame cannot drive
+  its embedder by echoing a command back.
+- `hello` is the only message addressed to `*`, and the only one that can be —
+  the frame does not know its embedder's origin until the embedder speaks. It
+  carries nothing but the fact that a frame is there, which the embedder knows
+  because it created it. Everything after that is addressed to one origin.
+
+Verified in the harness: the primary editor and the conflict banner's compare
+view, on the same document, both rendering, the compare view showing the
+*stored* bytes (the other session's save) and not the primary's unsaved edits,
+and the primary still taking input.
+
+### The frame exposed a read-only bug that had shipped
+
+The compare view rendered **an empty grid**: correct row count, correct sheet
+tab, no cells. Not a frame problem — an inline editor with `readOnly` and no
+editable peer did the same, and had been doing it since read-only landed.
+
+Univer's permission gate is a command interceptor keyed by command id, and the
+renderer fills the grid through exactly the commands it intercepts —
+`SetRangeValuesCommand` and friends, the same ones the in-cell editor uses. So
+a locked workbook refuses the *loader*. Silently: `setValue` on a locked
+workbook writes nothing and throws nothing. Measured — the session fetched its
+26 cells from the server and applied none of them.
+
+It had never been seen because every compare view until now shared a realm with
+an editable editor, and `trackWorkbookUnit` deliberately declines to lock a unit
+another editor is editing. The pane rendered *because the lock was never taken*.
+The frame made the lock real.
+
+The lock now stands aside exactly while the renderer is applying what the
+server sent, which is knowable: every write the renderer makes follows a
+response it asked for. The host bridge announces each resolved call
+synchronously, before the renderer's own continuation, and `setEditable` is
+synchronous — so the grid is editable by the time the apply runs, and locked
+again 400ms after the traffic stops.
+
+**The cost, stated plainly:** for 400ms after each response the grid would take
+a keystroke. Those windows open when the viewport loads, which is when someone
+is scrolling rather than typing, and anything landing in one is overwritten by
+the arriving data and refused by the server at save. Closing it outright needs
+the renderer to mark its own writes — a much larger upstream change than this
+is worth, and the server's refusal is the guarantee either way.
+
+### And a sizing bug, visible only beside a frame
+
+Upstream's shell is `height: 100vh`, which is right for a window and wrong for
+a component: the editor overflowed its 703px harness pane by 197px and painted
+over the log strip below it. An isolated editor is bounded by its frame and so
+was sized correctly by accident, which is what made the difference visible.
+`web/src/embed/embed.css` scopes `height: 100%` to the embed wrapper; the
+desktop renderer and the standalone page keep the viewport height they want.
 
 ## Save As, and the imperative handle
 

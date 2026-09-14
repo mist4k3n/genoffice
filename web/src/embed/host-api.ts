@@ -204,6 +204,28 @@ export interface SheetsEditorProps extends SheetsHostEvents {
    * and unable to write.
    */
   readonly readOnly?: boolean | undefined
+  /**
+   * Run this editor in its own frame.
+   *
+   * Needed only when two editors must be **visible at the same time** -- a
+   * compare view, a split. Univer names its internal editor hosts with fixed
+   * element ids, so two visible grids collide in one realm and a frame is the
+   * only second realm available. Several editors with one visible at a time
+   * work inline and should stay inline: a frame costs another copy of the
+   * bundle and another React tree.
+   *
+   * Everything else about the component is unchanged -- same props, same ref,
+   * same events -- so this is a one-word switch rather than a second API.
+   */
+  readonly isolate?: boolean | undefined
+  /**
+   * Where the frame's page is served, when `isolate` is set.
+   *
+   * Relative by default, so it resolves against whatever serves the bundle. A
+   * host serving it from another origin must also send its session cookie with
+   * `SameSite=None`: the frame makes its own API calls.
+   */
+  readonly frameSrc?: string | undefined
   /** Imperative commands. React 19 passes a ref as a plain prop. */
   readonly ref?: React.Ref<SheetsHandle> | undefined
 }

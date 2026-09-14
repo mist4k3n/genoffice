@@ -20,13 +20,15 @@ const repoRoot = resolve(here, '..')
  */
 export default defineConfig({
   root: resolve(here, 'src'),
-  // Two entries: the standalone app, and the host harness that mounts the
-  // editor as a component the way an embedding application would.
+  // Three entries: the standalone app, the host harness that mounts the editor
+  // as a component the way an embedding application would, and the page an
+  // isolated editor runs inside (see src/embed/IsolatedSheets.tsx).
   build: {
     rollupOptions: {
       input: {
         index: resolve(here, 'src/index.html'),
         harness: resolve(here, 'src/harness.html'),
+        'sheets-frame': resolve(here, 'src/sheets-frame.html'),
       },
     },
   },

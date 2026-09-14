@@ -56,6 +56,14 @@ matters: a host that hides a tab with `display: none` rather than unmounting it
 must say so, because a canvas in a hidden subtree measures zero and nothing
 resizes it back.
 
+Two editors that must be **visible at the same time** need `isolate`, which
+runs that editor in its own frame. Univer names its internal editor hosts with
+fixed element ids, so two visible grids collide in one realm and a frame is the
+only second realm available. Props, ref and events are identical either way;
+`frameSrc` says where the frame's page is served (default `sheets-frame.html`,
+relative to the bundle). Several editors with one visible at a time stay inline
+— a frame costs another copy of the bundle.
+
 `theme` and `locale` are scoped to each editor's container, so two editors can
 differ and neither touches the host's `<html>`. Both take the host's own
 values: `theme` accepts `light` / `dark` / `dim` / `system` (`dim` has no
@@ -103,7 +111,7 @@ The three resolutions a banner offers map to three calls:
 | Keep mine | dismiss the banner; nothing to call |
 | Overwrite | `handle.save({ overwrite: true })` |
 | Discard mine | `handle.reload()` |
-| Show saved version | mount a second `<SheetsEditor readOnly />` on the same document |
+| Show saved version | mount a second `<SheetsEditor readOnly isolate />` on the same document |
 
 `overwrite` does not skip the version check — it moves it to a compare-and-set
 against what storage holds now, so a document that moves *again* mid-save still

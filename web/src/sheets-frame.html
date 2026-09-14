@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The same development policy as index.html and harness.html: this page
+         talks to the API and opens the push socket exactly as they do. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:;
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' data: blob:;
+        font-src 'self' data:;
+        worker-src 'self' blob:;
+        connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*;
+      "
+    />
+    <!-- No document id and no API base in this URL: the frame is configured
+         over postMessage, so nothing identifying leaks into a referrer. -->
+    <meta name="referrer" content="no-referrer" />
+    <title>Sheets</title>
+    <style>
+      html,
+      body,
+      #sheets-frame-root {
+        height: 100%;
+        margin: 0;
+      }
+      #sheets-frame-root {
+        display: flex;
+        min-height: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="sheets-frame-root"></div>
+    <script type="module" src="/sheets-frame.tsx"></script>
+  </body>
+</html>

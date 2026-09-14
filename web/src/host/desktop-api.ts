@@ -132,6 +132,16 @@ export interface BuildOptions {
    * they are wire-only, which is what a standalone page wants.
    */
   readonly settings?: HostSettingsBus | undefined
+  /**
+   * A call resolved, so the renderer is about to write what came back.
+   *
+   * Fired synchronously, before the renderer's own continuation. It exists for
+   * `embed/read-only.ts`: Univer's permission gate cannot tell the renderer
+   * apart from the user, so a read-only workbook refuses the loader too, and
+   * the only way to keep both is to stand the lock aside exactly while data is
+   * arriving.
+   */
+  readonly onServerData?: (() => void) | undefined
 }
 
 /**
@@ -190,7 +200,8 @@ export function buildDesktopApi(
     switch (entry.status) {
       case 'http': {
         const target = wire()
-        api[method] = observed(method, target, httpMethod(method, target, transport, interceptors), interceptors)
+        const call = httpMethod(method, target, transport, interceptors)
+        api[method] = observed(method, target, announcing(call, options.onServerData), interceptors)
         break
       }
 
@@ -266,6 +277,26 @@ export function buildDesktopApi(
  * Range reads are excluded: they fire on every scroll step, and a host has no
  * use for them. Everything else is rare enough that observing it is free.
  */
+/**
+ * Say that a response arrived, in the awaited chain, so the announcement
+ * happens before whatever the renderer does with it.
+ *
+ * Every http method rather than a list of the reads that write: a save reopens
+ * the workbook and resyncs it too, and a list is a thing to get wrong later.
+ * The callback is a couple of comparisons.
+ */
+function announcing(
+  call: (...args: unknown[]) => Promise<unknown>,
+  onServerData: (() => void) | undefined,
+): (...args: unknown[]) => Promise<unknown> {
+  if (!onServerData) return call
+  return async (...args: unknown[]) => {
+    const result = await call(...args)
+    onServerData()
+    return result
+  }
+}
+
 function observed(
   method: string,
   channel: string,

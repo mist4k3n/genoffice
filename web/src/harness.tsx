@@ -242,6 +242,10 @@ function Harness(): React.JSX.Element {
                 // now rather than what this tab has pending.
                 <div style={{ flex: 1, display: 'flex', minWidth: 0, borderLeft: '2px solid #f0b37e' }}>
                   <SheetsEditor
+                    // Two grids on screen at once, which is the one case that
+                    // needs a second realm: Univer's internal editor hosts
+                    // carry fixed element ids and collide otherwise.
+                    isolate
                     documentId={tab.documentId}
                     apiBase={API}
                     theme={theme}
@@ -249,7 +253,7 @@ function Harness(): React.JSX.Element {
                     visible={visible}
                     readOnly
                     onLoaded={(file) =>
-                      note(`${tab.documentId}: saved version mounted, readOnly=${file.readOnly}`)
+                      note(`${tab.documentId}: saved version mounted (isolated), readOnly=${file.readOnly}`)
                     }
                     onError={(error) => note(`${tab.documentId} (saved): ERROR ${error.message}`)}
                   />

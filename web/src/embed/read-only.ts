@@ -32,6 +32,35 @@
  * read-only, and loses the scribbles; a locked editor loses the user's real
  * work with nothing to indicate anything is wrong. When the lock cannot be
  * taken the host is told, rather than left to discover it.
+ *
+ * ## The lock has to stand aside for the renderer
+ *
+ * Univer's permission gate cannot tell the user apart from the application.
+ * It is a command interceptor keyed by command id, and the renderer fills the
+ * grid through exactly the commands it intercepts -- `SetRangeValuesCommand`
+ * and friends, the same ones the in-cell editor uses. So a locked workbook
+ * refuses the *loader*, silently: no throw, no console message, just a
+ * document that renders as an empty grid with the right row count.
+ *
+ * That is measured, not deduced. A read-only session fetched its 26 cells from
+ * the server and applied none of them; `setValue` on a locked workbook writes
+ * nothing and reports nothing.
+ *
+ * The fix is to open the lock exactly while the renderer is applying what the
+ * server just sent, which is knowable: every write the renderer makes follows
+ * a response it asked for. {@link ReadOnlyGate.noteServerData} is called from
+ * the host bridge the moment a call resolves and **before** the renderer's own
+ * continuation runs -- `setEditable` is synchronous, so the grid is editable
+ * by the time the apply happens -- and the lock returns once the traffic
+ * stops.
+ *
+ * **The cost, stated plainly:** for {@link SETTLE_MS} after each response the
+ * grid would accept a keystroke. Those windows open when the viewport loads,
+ * which is when the user is scrolling rather than typing, and anything that
+ * lands in one is overwritten by the arriving data and refused by the server
+ * at save. It is a flicker, not a write. Blocking it outright needs the
+ * renderer to mark its own writes, which is a much larger upstream change than
+ * this behaviour is worth.
  */
 
 /** The slice of Univer's facade this needs, typed structurally like selection.ts. */
@@ -45,6 +74,14 @@ export interface UniverPermissionLike {
 const RETRY_MS = 150
 /** Long enough for a large workbook to finish opening on a slow machine. */
 const GIVE_UP_MS = 30_000
+/**
+ * How long the lock stands aside after a response arrives.
+ *
+ * Long enough for the renderer to finish applying a viewport's worth of cells,
+ * short enough that an idle viewer is locked. Bursts extend it: every response
+ * pushes the deadline out, so a scroll that triggers ten reads is one window.
+ */
+export const SETTLE_MS = 400
 
 /** Editable editors currently mounted, per Univer unit id. */
 const editableUnits = new Map<string, number>()
@@ -76,11 +113,23 @@ export type ReadOnlyReport = (message: string) => void
  * and an event name that quietly stops firing after a Univer upgrade is the
  * failure mode this file exists to prevent.
  */
+export interface ReadOnlyGate {
+  /**
+   * The server answered, so the renderer is about to write. Called from the
+   * host bridge, synchronously, before the renderer's continuation.
+   */
+  noteServerData(): void
+  /** Unmount. */
+  stop(): void
+}
+
 export function trackWorkbookUnit(
   getUniverApi: () => UniverPermissionLike | null | undefined,
   options: { readOnly: boolean; report: ReadOnlyReport },
-): () => void {
+): ReadOnlyGate {
   let stopped = false
+  /** While `Date.now()` is below this, the renderer owns the workbook. */
+  let openUntil = 0
   /** The unit this editor is counted against, while it is editable. */
   let counted: string | null = null
   /** Whether this editor currently holds the unit locked. */
@@ -103,7 +152,7 @@ export function trackWorkbookUnit(
       }
     } else if (workbook && unitId) {
       const shared = countEditable(unitId) > 0
-      if (!shared && !locked) {
+      if (!shared && !locked && Date.now() >= openUntil) {
         workbook.setEditable?.(false)
         locked = true
       } else if (shared && locked) {
@@ -130,10 +179,22 @@ export function trackWorkbookUnit(
 
   tick()
 
-  return () => {
-    stopped = true
-    if (timer) clearTimeout(timer)
-    if (counted) removeEditable(counted)
-    counted = null
+  return {
+    noteServerData(): void {
+      if (stopped || !options.readOnly) return
+      openUntil = Date.now() + SETTLE_MS
+      if (!locked) return
+      // Synchronously, because the renderer applies in the continuation of
+      // the call that just resolved. A poll would be too late and the data
+      // would be dropped.
+      getUniverApi()?.getActiveWorkbook?.()?.setEditable?.(true)
+      locked = false
+    },
+    stop(): void {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      if (counted) removeEditable(counted)
+      counted = null
+    },
   }
 }

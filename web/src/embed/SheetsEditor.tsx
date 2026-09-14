@@ -7,17 +7,19 @@ import { htmlLang, normalizeLang } from '../../../packages/i18n/src/index'
 import type { SheetsEditorProps, SheetsExport, SheetsHandle, SheetsSelection } from './host-api'
 import { HostTransportError } from '../host/transport'
 import { observeSelection, type UniverApiLike } from './selection'
-import { trackWorkbookUnit, type UniverPermissionLike } from './read-only'
+import { trackWorkbookUnit, type ReadOnlyGate, type UniverPermissionLike } from './read-only'
 import { installGlobalsOnce } from './globals'
 import { buildDesktopApi, type ExportedWorkbook } from '../host/desktop-api'
 import { createHttpTransport, type HostTransport } from '../host/transport'
 import { createHostCommandBus } from '../host/commands'
+import { IsolatedSheets } from './IsolatedSheets'
 import { createHostSettingsBus } from '../host/settings'
 import { resolveTheme, systemPrefersDark, watchSystemTheme } from './theme'
 import { CONFLICT_CHANNEL, type DocumentConflict, type HostCallOptions } from '../../protocol'
 import type { DesktopApi, MenuAction } from '../../../apps/sheets/src/shared/desktop-api'
 import { enqueueMount, whenGridReady } from './singletons'
 import { installUnsavedGuard } from '../host/unsaved-guard'
+import './embed.css'
 
 /**
  * The spreadsheet as a mountable React component.
@@ -35,6 +37,17 @@ import { installUnsavedGuard } from '../host/unsaved-guard'
  * that two editors on one page address two different things.
  */
 export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
+  // A dispatcher with no hooks of its own, so flipping `isolate` remounts --
+  // which is the only correct answer, since the two run in different realms.
+  return props.isolate ? <IsolatedSheets {...props} /> : <InlineSheets {...props} />
+}
+
+/**
+ * The editor in the host's own realm. `SheetsEditor` is the entry point; this
+ * is exported for the frame page, which is already isolated and must not
+ * recurse into another frame.
+ */
+export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
   const {
     documentId,
     apiBase,
@@ -93,6 +106,9 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
   // Callers of save()/exportBytes() waiting on the renderer to come back.
   const awaitingSave = useRef(createWaiters<void>())
   const awaitingExport = useRef(createWaiters<SheetsExport>())
+  // Held here rather than inside the effect below, because the bridge is built
+  // before the tracker starts and has to be able to reach it afterwards.
+  const gateRef = useRef<ReadOnlyGate | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -117,6 +133,7 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
         },
         commands,
         settings,
+        onServerData: () => gateRef.current?.noteServerData(),
         onExport: (exported) => deliverExport(exported, awaitingExport.current, handlers.current),
         onDraftRestored: () => handlers.current.onDraftRestored?.(),
       })
@@ -225,10 +242,15 @@ export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
    */
   useEffect(() => {
     if (!ready) return
-    return trackWorkbookUnit(() => univerApiRef.current as UniverPermissionLike | null, {
+    const gate = trackWorkbookUnit(() => univerApiRef.current as UniverPermissionLike | null, {
       readOnly,
       report: (message) => handlers.current.onError?.(new Error(message)),
     })
+    gateRef.current = gate
+    return () => {
+      gateRef.current = null
+      gate.stop()
+    }
   }, [ready, readOnly])
 
   /**

@@ -1,0 +1,19 @@
+/*
+ * Sizing an embedded editor.
+ *
+ * Upstream's shell is `height: 100vh`, which is right for a window and wrong
+ * for a component: a host that gives the editor a 700px pane gets a 900px
+ * shell that overflows it, painting over whatever the host put below. Measured
+ * in the harness -- the editor covered the log strip, and the difference only
+ * became visible beside an isolated editor, which is bounded by its frame and
+ * therefore sized correctly by accident.
+ *
+ * Scoped to the embed wrapper so the desktop renderer and the standalone page
+ * keep the viewport height they want. Two class selectors beat upstream's one.
+ *
+ * The wrapper is `display: contents`, so `100%` resolves against the host's own
+ * box -- which is the point: the host decides how big the editor is.
+ */
+.genoffice-sheets-embed > .app-shell {
+  height: 100%;
+}
