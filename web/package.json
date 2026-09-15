@@ -31,6 +31,7 @@
     "check:lib": "node tools/check-lib.mjs",
     "check:base": "node tools/check-base.mjs",
     "check:frame": "node tools/check-frame.mjs",
+    "check:weight": "node tools/check-weight.mjs",
     "spike": "vite --config vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "api:list": "node tools/list-desktop-api.mjs",

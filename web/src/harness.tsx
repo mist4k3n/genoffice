@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 
-import { SheetsEditor } from './embed/SheetsEditor'
+import { SheetsEditor } from './embed/editor'
 import type {
   SheetsConflictEvent,
   SheetsExport,

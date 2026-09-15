@@ -12,7 +12,6 @@ import { installGlobalsOnce } from './globals'
 import { buildDesktopApi, type ExportedWorkbook } from '../host/desktop-api'
 import { createHttpTransport, type HostTransport } from '../host/transport'
 import { createHostCommandBus } from '../host/commands'
-import { IsolatedSheets } from './IsolatedSheets'
 import { createHostSettingsBus } from '../host/settings'
 import { resolveTheme, systemPrefersDark, watchSystemTheme } from './theme'
 import { CONFLICT_CHANNEL, type DocumentConflict, type HostCallOptions } from '../../protocol'
@@ -22,30 +21,18 @@ import { installUnsavedGuard } from '../host/unsaved-guard'
 import './embed.css'
 
 /**
- * The spreadsheet as a mountable React component.
+ * The editor in the host's own realm: upstream's renderer, mounted as a
+ * component rather than bootstrapped as a page.
  *
- * Upstream's `main.tsx` is a side-effect bootstrap: it demands `#root`, makes
+ * Upstream's `main.tsx` is a side-effect bootstrap -- it demands `#root`, makes
  * its own React root, and stamps `lang` and `data-theme` onto `<html>`. None of
- * that is appropriate inside a host application, so this replaces it —
- * additively, in `web/`, importing the same exported `App`.
+ * that is appropriate inside a host application, so this replaces it,
+ * additively, importing the same exported `App`.
  *
- * ## Several editors on one page
- *
- * Each editor gets its own host bridge, passed to `App` as a prop rather than
- * read from `window.desktopApi`, and its own grid container id. Both are
- * upstream changes, recorded in `web/UPSTREAM-CHANGES.md`, and both exist so
- * that two editors on one page address two different things.
- */
-export function SheetsEditor(props: SheetsEditorProps): React.JSX.Element {
-  // A dispatcher with no hooks of its own, so flipping `isolate` remounts --
-  // which is the only correct answer, since the two run in different realms.
-  return props.isolate ? <IsolatedSheets {...props} /> : <InlineSheets {...props} />
-}
-
-/**
- * The editor in the host's own realm. `SheetsEditor` is the entry point; this
- * is exported for the frame page, which is already isolated and must not
- * recurse into another frame.
+ * This module is the heavy one. `editor.tsx` reaches it through a dynamic
+ * import so that importing the package does not mean downloading a
+ * spreadsheet; the frame page imports it directly, because it is already
+ * isolated and must not recurse into another frame.
  */
 export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
   const {
@@ -199,7 +186,8 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
    */
   const dispatch = useCallback(
     async (action: MenuAction, options?: HostCallOptions): Promise<void> => {
-      if (!commands.connected) await waitFor(() => commands.connected, 'The editor is still opening.')
+      if (!commands.connected)
+        await waitFor(() => commands.connected, 'The editor is still opening.')
       if (options) commands.dispatchWith(action, options)
       else commands.dispatch(action)
     },
@@ -365,8 +353,7 @@ function reportToHost(
     }
     case 'saveWorkbookEdits': {
       const saved = event.result as
-        | { canceled?: boolean; file?: unknown; touchedEntries?: string[] }
-        | undefined
+        { canceled?: boolean; file?: unknown; touchedEntries?: string[] } | undefined
       if (saved && saved.canceled !== true && saved.file) {
         handlers.onSaved?.({
           file: saved.file as Parameters<NonNullable<SheetsEditorProps['onSaved']>>[0]['file'],
@@ -470,9 +457,7 @@ function trackLocally(
   // unable to recognise a conflict addressed to it.
   if (!event.error) {
     const result = event.result as
-      | { sessionId?: unknown; file?: { sessionId?: unknown } }
-      | null
-      | undefined
+      { sessionId?: unknown; file?: { sessionId?: unknown } } | null | undefined
     const opened = result?.sessionId ?? result?.file?.sessionId
     if (typeof opened === 'string') sessionId.current = opened
   }

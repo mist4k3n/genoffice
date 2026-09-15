@@ -86,6 +86,13 @@ import { SheetsEditor } from '@mist4k3n/sheets-web'
 import '@mist4k3n/sheets-web/style.css'
 ```
 
+The editor arrives when an editor mounts, not when the package is imported:
+`SheetsEditor` is a wrapper around a dynamic import, so adding this to an app
+shell costs about 13 kB rather than 3 MB gzipped. Lazy-routing it as well
+changes nothing and is welcome. The stylesheet is the exception — it is a
+static 176 kB, and a host that counts those imports it from the route that
+mounts the editor rather than from its shell.
+
 The stylesheet is a separate import because a bundler that does it for you is a
 bundler deciding when the host's own CSS loses a specificity tie. Nothing else
 is importable: the `exports` map seals `src/`, which is where the relative paths
@@ -308,6 +315,7 @@ decision someone writes down.
 | `npm run check:lib`                    | A host can import the built package and typecheck against it, and cannot reach past its exports map                                                         |
 | `npm run check:base`                   | The built pages load every asset they reference when served from a prefix rather than the site root                                                         |
 | `npm run check:frame`                  | A compare view renders two grids, in a real browser, from either frame page                                                                                 |
+| `npm run check:weight`                 | Importing the package costs a host a wrapper, not an editor: the first paint of two host builds, compared                                                   |
 | `npm run check:drift`                  | Undeclared changes outside `web/`, and upstream movement in watched files                                                                                   |
 | `npm run check:channels`               | Channel names still match the preload. The compiler cannot see these                                                                                        |
 | `npm run check:host-global`            | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed                                                                          |

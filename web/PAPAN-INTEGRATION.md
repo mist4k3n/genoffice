@@ -148,20 +148,44 @@ does it again with `frameSrc` pointed at the packaged page, the way a host
 would. It also asserts the isolated editor reports itself read-only, because a
 compare view showing a writable second copy is not a compare view.
 
-### A4. Bundle weight
+### A4. Bundle weight — **done**
 
-The library build's entry is 12.4 MB, 3.07 MB gzipped, and that is the number
-that matters: it is one chunk and it is the editor itself. Univer's locales are
-already split per language and stay lazy, and the stylesheet is 176 KB with the
-four Carlito faces emitted beside it rather than base64'd into it — library
-mode inlines every asset by default, which made that stylesheet 11 MB until
-`vite.lib.config.ts` turned it off.
+The editor is 12.9 MB, 3.2 MB gzipped, and that is the editor itself: Univer's
+locales are already split per language, and what remains is the renderer. The
+number is fine behind a lazy route and not fine in an app shell every Papan
+page loads.
 
-3 MB gzipped is fine behind a lazy route and not fine in an app shell every
-Papan page loads. Nothing here removes the need for that route.
+So the package does the lazy route itself. `src/embed/editor.tsx` is the entry
+point and holds nothing heavier than the iframe path; the inline editor is
+behind a dynamic import, fetched when an editor first mounts. A host that
+lazy-routes the import as well gets the same result and does not have to --
+the split is inside the package, so forgetting it is not a 3 MB mistake.
+
+|                                    |                         |
+| ---------------------------------- | ----------------------- |
+| The package's entry                | **3.8 kB**              |
+| What a host's first paint grows by | **12.9 kB**             |
+| The editor, on mount               | 12.9 MB, 3.2 MB gzipped |
+
+`isolate` stays eager, because it is the light half -- an iframe and a
+postMessage protocol. The weight in that case is the frame page's own (A3).
+
+Two honest notes. The stylesheet is 176 kB and is the host's own
+`import '@mist4k3n/sheets-web/style.css'`: a host that cares about those
+kilobytes imports it from the route that mounts the editor rather than from its
+shell. And deferring the editor grew it by about 0.5 MB (4%), because a
+dynamically imported chunk shares less with its siblings than a static entry
+does -- paid off the first-paint path, which is the trade this item is about.
 
 **Done when:** the editor's chunks are loaded on demand, and Papan's initial
-payload is unchanged by this integration.
+payload is unchanged by this integration. `npm run check:weight` is that test,
+and it measures the second half rather than asserting it: it builds two host
+applications with Vite, identical except that one imports `<SheetsEditor>` and
+renders it, and compares what each page fetches before anything is interacted
+with -- the entry chunk plus everything the HTML preloads. The difference is
+this integration's cost. It also fails if the largest chunk is too small to be
+the editor, since a tree-shaken editor would measure beautifully and mean
+nothing.
 
 ---
 
@@ -372,8 +396,8 @@ the real one. The numbers quoted here come from a container on a laptop.
 
 ## Shortest path to a document opening in Papan
 
-1. ~~**A1** library build, **A2** `base`~~ — both done (**A3** too, for the
-   compare view).
+1. ~~**A1** library build, **A2** `base`~~ — done, and so are **A3** (the
+   compare view's frame page) and **A4** (weight). **A** is closed.
 2. **B1** storage with `localPath()`, **B2** `identify()`.
 3. **B6** the engine binary in the image, **B7** the two environment variables.
 4. **B3** socket attach.

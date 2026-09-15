@@ -20,7 +20,7 @@
  * fixed element ids.
  */
 
-export { SheetsEditor } from './SheetsEditor'
+export { SheetsEditor } from './editor'
 
 export type {
   SheetsConflictEvent,
