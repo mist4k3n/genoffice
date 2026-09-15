@@ -17,8 +17,10 @@ cd /app/web
 # 24 open at once. Raising it is the point of the measurement, not a workaround:
 # the question is what N resident workbooks cost, and the quota is the thing the
 # answer is supposed to inform.
+# SERVER_ARGS lets a caller add flags the measurement needs -- --direct-read,
+# for one, which is how Papan's content-addressed storage will run.
 /app/node_modules/.bin/tsx server/dev-server.ts \
-  --dir /tmp/corpus --pool 1 --max-sessions "${MAX_SESSIONS:-64}" >/tmp/serve.log 2>&1 &
+  --dir /tmp/corpus --pool 1 --max-sessions "${MAX_SESSIONS:-64}" ${SERVER_ARGS:-} >/tmp/serve.log 2>&1 &
 
 node -e '
 const wait = async () => {
@@ -38,4 +40,4 @@ echo "  node    $(node -v)"
 echo "  memory  $(awk "/MemTotal/ {printf \"%.1f GB\", \$2/1048576}" /proc/meminfo)"
 echo
 
-node tools/bench-memory.mjs "$@"
+node "${BENCH:-tools/bench-memory.mjs}" "$@"

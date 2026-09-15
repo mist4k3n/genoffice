@@ -239,7 +239,7 @@ app.get(
 // The corpus harness discovers the served directory here rather than being
 // told twice. Pointing it at a different folder than the server serves
 // silently compares two unrelated sets of bytes.
-app.get('/dev-info', (c) => c.json({ documentRoot: root, draftRoot }))
+app.get('/dev-info', (c) => c.json({ documentRoot: root, draftRoot, directRead }))
 
 /**
  * Stand-in for the host's realtime layer.

@@ -260,6 +260,7 @@ decision someone writes down.
 | `npm run check:upstream` | `apps/sheets` still compiles and its own test suite still passes |
 | `npm run bench` / `bench:memory` | Scroll latency; resident memory per open workbook |
 | `npm run bench:linux` | The same memory benchmark in a Linux container — macOS `ps rss` cannot answer it |
+| `npm run bench:linux -- --viewers N` | What the Nth reader of **one** document costs |
 | `node tools/make-fixture.mjs --rows N` | Generate a heavy workbook; the corpus tops out at 0.4 MB |
 
 ## Where things are
@@ -272,6 +273,7 @@ decision someone writes down.
 | `FINDINGS-0x.md` | What each phase actually established, including what failed |
 | `FINDINGS-EMBED.md` | Embedding: the singletons, and how far each could be fixed |
 | `FINDINGS-PAPAN.md` | What the Papan briefing changed |
+| `FINDINGS-COLLAB.md` | The collaboration spike: what two people on one document cost |
 | `server/` | The Hono router, session registry, engine pool |
 | `src/host/` | The browser-side bridge: transport, coverage table, prefetch |
 | `src/embed/` | The mountable component and its host API |

@@ -25,7 +25,7 @@ docker buildx build --platform "$platform" -f "$here/Dockerfile" -t "$tag" --loa
 # ships; building the argument list as a string-free list avoids the special
 # case entirely.
 tunables=""
-for name in MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ MALLOC_MMAP_THRESHOLD_; do
+for name in MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ MALLOC_MMAP_THRESHOLD_ SERVER_ARGS BENCH; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then tunables="$tunables -e $name=$value"; fi
 done

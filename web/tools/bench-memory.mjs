@@ -195,7 +195,66 @@ async function slope(documentRoot, count) {
   }
 }
 
+/**
+ * What the second reader of one document costs.
+ *
+ * The slope above opens N *different* workbooks. Collaboration asks the other
+ * question: N people on the SAME workbook. Sessions are keyed by session id,
+ * not by document, so today each viewer gets its own snapshot and its own
+ * parse -- and if that is what it costs, the ceiling is in viewers, not in
+ * documents, which is a different claim than the one this fork has been
+ * making.
+ */
+async function viewers(count) {
+  const source = arg('file', 'gamma-heavy-recalc.xlsx')
+  const settle = async () => {
+    await new Promise((r) => setTimeout(r, 1200))
+    return sample()
+  }
+
+  const base = await settle()
+  console.log(`  ${count} concurrent sessions on ONE document: ${source}`)
+  console.log(`  baseline engine ${base.engine.mb.toFixed(1)} MB\n`)
+  console.log(`  ${'#'.padStart(3)}  engine RSS   cumulative Δ   per viewer`)
+  console.log(`  ${'-'.repeat(3)}  ----------   ------------   ----------`)
+
+  const open = []
+  for (let index = 0; index < count; index += 1) {
+    const file = await invoke(source, 'workbook:select')
+    open.push({ sessionId: file.sessionId })
+    const sheet = file.sheets[0]
+    for (let startRow = 0; startRow < sheet.rowCount; startRow += 2_000) {
+      await invoke(source, 'workbook:read-range', {
+        sessionId: file.sessionId,
+        sheetId: sheet.id,
+        range: {
+          startRow,
+          endRow: Math.min(startRow + 1_999, sheet.rowCount - 1),
+          startColumn: 0,
+          endColumn: Math.max(0, Math.min(sheet.columnCount, 40) - 1),
+        },
+      })
+    }
+    const now = await settle()
+    const delta = now.engine.mb - base.engine.mb
+    console.log(
+      `  ${String(index + 1).padStart(3)}  ${now.engine.mb.toFixed(1).padStart(8)}MB  ` +
+        `${delta.toFixed(1).padStart(11)}MB  ${(delta / (index + 1)).toFixed(1).padStart(10)}MB`,
+    )
+  }
+
+  const full = await settle()
+  const distinct = new Set(open.map((entry) => entry.sessionId)).size
+  console.log(
+    `\n  ${distinct} distinct session(s) for one document, ` +
+      `${((full.engine.mb - base.engine.mb) / count).toFixed(1)} MB per viewer`,
+  )
+  for (const entry of open) await invoke(source, 'workbook:close', entry.sessionId).catch(() => {})
+}
+
 async function main() {
+  const viewerCount = Number(arg('viewers', '0'))
+  if (viewerCount > 0) return viewers(viewerCount)
   const slopeCount = Number(arg('slope', '0'))
   if (slopeCount > 0) {
     const { documentRoot } = await (await fetch(`${SERVER}/dev-info`)).json()
