@@ -38,8 +38,10 @@ const pkg = JSON.parse(
 
 const failures = []
 
-/** Step 1: the build produced what the exports map promises. */
-const promised = [pkg.exports['.'].import, pkg.exports['.'].types, pkg.exports['./style.css']]
+/** Step 1: the build produced what the exports map promises -- all of it. */
+const promised = Object.entries(pkg.exports)
+  .filter(([subpath]) => subpath !== './package.json')
+  .flatMap(([, target]) => (typeof target === 'string' ? [target] : Object.values(target)))
 for (const rel of promised) {
   const file = resolve(webRoot, rel)
   if (!existsSync(file))

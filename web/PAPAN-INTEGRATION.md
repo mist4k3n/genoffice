@@ -106,14 +106,47 @@ stylesheets, the `url()`s inside them, and the two font URLs in the JavaScript
 > answers them with `index.html` and Chrome logs `invalid sfntVersion`. Both
 > builds resolve them correctly.
 
-### A3. Serve `sheets-frame.html`
+### A3. Serve `sheets-frame.html` — **done on our side, one thing to do on Papan's**
 
-Only needed for `isolate` — two editors visible at once, which is what the
-conflict banner's compare view is. It has to be reachable at whatever
-`frameSrc` says, and it makes its own API calls, so if it is served from
-another origin Papan's session cookie needs `SameSite=None`.
+Only needed for `isolate` -- two editors visible at once, which is what the
+conflict banner's compare view is. Univer's internal editor hosts carry fixed
+element ids, so the second grid needs a second realm, and the realm is an
+iframe running this page.
 
-**Done when:** a compare view renders two grids.
+The page now ships **inside the package**, built by `npm run build`:
+
+```
+dist/frame/sheets-frame.html   the page
+dist/frame/assets/…            its own bundle, and its own copy of React
+```
+
+It ships with the component rather than being left to the host to build for
+one reason: the two speak a versioned protocol to each other over
+`postMessage`. Shipped together, a host cannot deploy a frame page from one
+version beside a component from another and find out through a compare view
+that silently never loads. It is a second copy of the editor, which is
+inherent -- a second realm cannot share the first one's module instances -- and
+is why `isolate` stays opt-in.
+
+**What Papan does:** serve `dist/frame/` somewhere, and pass that URL as
+`frameSrc`. The default is `sheets-frame.html` relative to the _host page_,
+which is almost never where a packaged file ends up, so pass it explicitly.
+
+```tsx
+<SheetsEditor isolate frameSrc="/static/sheets/frame/sheets-frame.html" … />
+```
+
+Served from another origin, two things follow, and both are Papan's: the
+session cookie needs `SameSite=None` (the frame makes its own API calls), and
+the CSP note in **E** applies to the frame's origin.
+
+**Done when:** a compare view renders two grids. `npm run check:frame` is that
+test, and it is a real browser: it builds the pages and the packaged frame,
+starts the dev API over a copy of the corpus, opens the harness with the
+compare view mounted, and waits for a painted canvas in _both_ realms -- then
+does it again with `frameSrc` pointed at the packaged page, the way a host
+would. It also asserts the isolated editor reports itself read-only, because a
+compare view showing a writable second copy is not a compare view.
 
 ### A4. Bundle weight
 
@@ -339,7 +372,8 @@ the real one. The numbers quoted here come from a container on a laptop.
 
 ## Shortest path to a document opening in Papan
 
-1. ~~**A1** library build, **A2** `base`~~ — both done.
+1. ~~**A1** library build, **A2** `base`~~ — both done (**A3** too, for the
+   compare view).
 2. **B1** storage with `localPath()`, **B2** `identify()`.
 3. **B6** the engine binary in the image, **B7** the two environment variables.
 4. **B3** socket attach.

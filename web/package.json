@@ -13,7 +13,8 @@
       "import": "./dist/sheets-web.js"
     },
     "./style.css": "./dist/sheets-web.css",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./sheets-frame.html": "./dist/frame/sheets-frame.html"
   },
   "files": [
     "dist"
@@ -22,12 +23,14 @@
     "**/*.css"
   ],
   "scripts": {
-    "build": "npm run build:lib && npm run build:types",
+    "build": "npm run build:lib && npm run build:frame && npm run build:types",
     "build:lib": "vite build --config vite.lib.config.ts",
+    "build:frame": "vite build --config vite.frame.config.ts",
     "build:types": "node tools/build-types.mjs",
     "build:app": "vite build --config vite.config.ts",
     "check:lib": "node tools/check-lib.mjs",
     "check:base": "node tools/check-base.mjs",
+    "check:frame": "node tools/check-frame.mjs",
     "spike": "vite --config vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "api:list": "node tools/list-desktop-api.mjs",

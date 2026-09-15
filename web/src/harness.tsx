@@ -45,6 +45,16 @@ function Harness(): React.JSX.Element {
   const readOnlyTabs = new Set(readOnlyParam.split(',').filter(Boolean))
   const isReadOnly = (index: number): boolean =>
     readOnlyTabs.has('all') || readOnlyTabs.has(String(index))
+  // `?compare=all`, or a list of tab indices. The compare view is normally
+  // reached through the conflict banner, which needs a conflict; this mounts
+  // it on demand, because two grids visible at once is the one case `isolate`
+  // exists for and it should be reachable without staging a conflict first.
+  const compareParam = params.get('compare') ?? ''
+  const compareTabs = new Set(compareParam.split(',').filter(Boolean))
+  // `?frame=…` points the isolated editor at a frame page served from
+  // somewhere else, which is what a host does: the packaged page ships in the
+  // package and Papan serves it from wherever it serves the bundle.
+  const frameSrc = params.get('frame') ?? undefined
 
   const [tabs] = useState<Tab[]>(docs.map((documentId, i) => ({ id: `tab-${i}`, documentId })))
   // One handle per tab, the way a host keeps a ref per open editor.
@@ -57,7 +67,14 @@ function Harness(): React.JSX.Element {
   // Papan's ConflictBanner state, reproduced: which tabs are conflicted, and
   // which of them is showing the stored version beside its own edits.
   const [conflicts, setConflicts] = useState<Record<string, SheetsConflictEvent>>({})
-  const [comparing, setComparing] = useState<Record<string, boolean>>({})
+  const [comparing, setComparing] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(
+      docs.map((_, index) => [
+        `tab-${index}`,
+        compareTabs.has('all') || compareTabs.has(String(index)),
+      ]),
+    ),
+  )
 
   const note = (line: string) =>
     setLog((previous) => [`${new Date().toLocaleTimeString()}  ${line}`, ...previous].slice(0, 40))
@@ -87,7 +104,9 @@ function Harness(): React.JSX.Element {
     const handle = tabId ? handles.current.get(tabId) : null
     if (!handle) return note(`no editor to ${name}`)
     try {
-      note(`${name}${options?.overwrite ? ' (overwrite)' : ''} requested (${handle.pendingEdits()} pending)…`)
+      note(
+        `${name}${options?.overwrite ? ' (overwrite)' : ''} requested (${handle.pendingEdits()} pending)…`,
+      )
       if (name === 'save') await handle.save(options)
       else await handle.reload()
       note(`${name} done`)
@@ -115,18 +134,25 @@ function Harness(): React.JSX.Element {
     return (
       <div
         style={{
-          display: 'flex', gap: 8, alignItems: 'center', padding: '6px 10px',
-          background: '#fff4e5', borderBottom: '1px solid #f0b37e', fontSize: 12,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+          padding: '6px 10px',
+          background: '#fff4e5',
+          borderBottom: '1px solid #f0b37e',
+          fontSize: 12,
         }}
       >
         <strong>This document changed elsewhere.</strong>
         <span style={{ opacity: 0.75 }}>
-          now at {conflict.currentVersion.slice(0, 12)} · {conflict.pendingEdits} unsaved edit(s) ·
-          {' '}{conflict.source}
+          now at {conflict.currentVersion.slice(0, 12)} · {conflict.pendingEdits} unsaved edit(s) ·{' '}
+          {conflict.source}
         </span>
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           <button onClick={() => clearConflict(tabId)}>Keep mine</button>
-          <button onClick={() => void command(tabId, 'save', { overwrite: true })}>Overwrite</button>
+          <button onClick={() => void command(tabId, 'save', { overwrite: true })}>
+            Overwrite
+          </button>
           <button onClick={() => void command(tabId, 'reload')}>Discard mine</button>
           <button onClick={() => setComparing((c) => ({ ...c, [tabId]: !c[tabId] }))}>
             {comparing[tabId] ? 'Hide saved version' : 'Show saved version'}
@@ -150,8 +176,18 @@ function Harness(): React.JSX.Element {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', font: '13px system-ui' }}>
-      <div style={{ display: 'flex', gap: 8, padding: 8, borderBottom: '1px solid #ccc', alignItems: 'center' }}>
+    <div
+      style={{ display: 'flex', flexDirection: 'column', height: '100vh', font: '13px system-ui' }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          gap: 8,
+          padding: 8,
+          borderBottom: '1px solid #ccc',
+          alignItems: 'center',
+        }}
+      >
         {tabs.map((tab, index) => (
           <button
             key={tab.id}
@@ -202,63 +238,77 @@ function Harness(): React.JSX.Element {
             >
               <ConflictBanner tabId={tab.id} />
               <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
-              <div style={{ flex: 1, display: 'flex', minWidth: 0 }}>
-              <SheetsEditor
-                ref={(handle) => void handles.current.set(tab.id, handle)}
-                documentId={tab.documentId}
-                apiBase={API}
-                theme={theme}
-                locale={locale}
-                visible={visible}
-                readOnly={isReadOnly(index)}
-                onLoaded={(file) =>
-                  note(
-                    `${tab.documentId}: loaded, ${file.sheets.length} sheet(s)` +
-                      `${file.readOnly ? ' (read-only)' : ''}`,
-                  )
-                }
-                onDirtyChange={(n) => note(`${tab.documentId}: ${n} pending edit(s)`)}
-                onSaved={(e) =>
-                  note(`${tab.documentId}: SAVED, rewrote [${e.touchedEntries.join(', ') || 'nothing'}]`)
-                }
-                onConflict={(e) => {
-                  note(`${tab.documentId}: CONFLICT (${e.source}) at ${e.currentVersion}`)
-                  setConflicts((current) => ({ ...current, [tab.id]: e }))
-                }}
-                onSelectionChange={(s: SheetsSelection | null) =>
-                  note(`${tab.documentId}: selection ${s ? `${s.sheetName}!${s.range}` : 'none'}`)
-                }
-                onSaveAsRequest={(exported) => receive(exported, 'ribbon Save As')}
-                onDraftRestored={() =>
-                  note(`${tab.documentId}: restored unsaved work — DIRTY before any edit`)
-                }
-                onError={(error) => note(`${tab.documentId}: ERROR ${error.message}`)}
-              />
-              </div>
-              {comparing[tab.id] ? (
-                // "Show saved version": a second editor on the same document,
-                // opened read-only, so the stored bytes sit beside the dirty
-                // ones. It is a fresh session, so it reads what storage holds
-                // now rather than what this tab has pending.
-                <div style={{ flex: 1, display: 'flex', minWidth: 0, borderLeft: '2px solid #f0b37e' }}>
+                <div style={{ flex: 1, display: 'flex', minWidth: 0 }}>
                   <SheetsEditor
-                    // Two grids on screen at once, which is the one case that
-                    // needs a second realm: Univer's internal editor hosts
-                    // carry fixed element ids and collide otherwise.
-                    isolate
+                    ref={(handle) => void handles.current.set(tab.id, handle)}
                     documentId={tab.documentId}
                     apiBase={API}
                     theme={theme}
                     locale={locale}
                     visible={visible}
-                    readOnly
+                    readOnly={isReadOnly(index)}
                     onLoaded={(file) =>
-                      note(`${tab.documentId}: saved version mounted (isolated), readOnly=${file.readOnly}`)
+                      note(
+                        `${tab.documentId}: loaded, ${file.sheets.length} sheet(s)` +
+                          `${file.readOnly ? ' (read-only)' : ''}`,
+                      )
                     }
-                    onError={(error) => note(`${tab.documentId} (saved): ERROR ${error.message}`)}
+                    onDirtyChange={(n) => note(`${tab.documentId}: ${n} pending edit(s)`)}
+                    onSaved={(e) =>
+                      note(
+                        `${tab.documentId}: SAVED, rewrote [${e.touchedEntries.join(', ') || 'nothing'}]`,
+                      )
+                    }
+                    onConflict={(e) => {
+                      note(`${tab.documentId}: CONFLICT (${e.source}) at ${e.currentVersion}`)
+                      setConflicts((current) => ({ ...current, [tab.id]: e }))
+                    }}
+                    onSelectionChange={(s: SheetsSelection | null) =>
+                      note(
+                        `${tab.documentId}: selection ${s ? `${s.sheetName}!${s.range}` : 'none'}`,
+                      )
+                    }
+                    onSaveAsRequest={(exported) => receive(exported, 'ribbon Save As')}
+                    onDraftRestored={() =>
+                      note(`${tab.documentId}: restored unsaved work — DIRTY before any edit`)
+                    }
+                    onError={(error) => note(`${tab.documentId}: ERROR ${error.message}`)}
                   />
                 </div>
-              ) : null}
+                {comparing[tab.id] ? (
+                  // "Show saved version": a second editor on the same document,
+                  // opened read-only, so the stored bytes sit beside the dirty
+                  // ones. It is a fresh session, so it reads what storage holds
+                  // now rather than what this tab has pending.
+                  <div
+                    style={{
+                      flex: 1,
+                      display: 'flex',
+                      minWidth: 0,
+                      borderLeft: '2px solid #f0b37e',
+                    }}
+                  >
+                    <SheetsEditor
+                      // Two grids on screen at once, which is the one case that
+                      // needs a second realm: Univer's internal editor hosts
+                      // carry fixed element ids and collide otherwise.
+                      isolate
+                      {...(frameSrc === undefined ? {} : { frameSrc })}
+                      documentId={tab.documentId}
+                      apiBase={API}
+                      theme={theme}
+                      locale={locale}
+                      visible={visible}
+                      readOnly
+                      onLoaded={(file) =>
+                        note(
+                          `${tab.documentId}: saved version mounted (isolated), readOnly=${file.readOnly}`,
+                        )
+                      }
+                      onError={(error) => note(`${tab.documentId} (saved): ERROR ${error.message}`)}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
           )
@@ -267,7 +317,15 @@ function Harness(): React.JSX.Element {
 
       <pre
         id="harness-log"
-        style={{ margin: 0, height: 120, overflow: 'auto', background: '#111', color: '#9f9', padding: 8, fontSize: 11 }}
+        style={{
+          margin: 0,
+          height: 120,
+          overflow: 'auto',
+          background: '#111',
+          color: '#9f9',
+          padding: 8,
+          fontSize: 11,
+        }}
       >
         {log.join('\n')}
       </pre>

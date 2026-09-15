@@ -124,10 +124,23 @@ resizes it back.
 Two editors that must be **visible at the same time** need `isolate`, which
 runs that editor in its own frame. Univer names its internal editor hosts with
 fixed element ids, so two visible grids collide in one realm and a frame is the
-only second realm available. Props, ref and events are identical either way;
-`frameSrc` says where the frame's page is served (default `sheets-frame.html`,
-relative to the bundle). Several editors with one visible at a time stay inline
-— a frame costs another copy of the bundle.
+only second realm available. Props, ref and events are identical either way.
+Several editors with one visible at a time stay inline — a frame costs another
+copy of the bundle.
+
+The frame's page ships in the package, at `dist/frame/sheets-frame.html`, with
+its own bundle and its own copy of React. Serve that directory and point
+`frameSrc` at it:
+
+```tsx
+<SheetsEditor isolate frameSrc="/static/sheets/frame/sheets-frame.html" … />
+```
+
+The default is `sheets-frame.html` relative to the host page, which is rarely
+where a packaged file lands, so pass it. The page and the component speak a
+versioned `postMessage` protocol, which is why they ship together rather than
+being built separately; served from another origin, the session cookie needs
+`SameSite=None`, since the frame makes its own API calls.
 
 ### The assistant is off
 
@@ -294,6 +307,7 @@ decision someone writes down.
 | `npm run compat`                       | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip. **Saves over what it reads** — serve a copy, never `web/fixtures` |
 | `npm run check:lib`                    | A host can import the built package and typecheck against it, and cannot reach past its exports map                                                         |
 | `npm run check:base`                   | The built pages load every asset they reference when served from a prefix rather than the site root                                                         |
+| `npm run check:frame`                  | A compare view renders two grids, in a real browser, from either frame page                                                                                 |
 | `npm run check:drift`                  | Undeclared changes outside `web/`, and upstream movement in watched files                                                                                   |
 | `npm run check:channels`               | Channel names still match the preload. The compiler cannot see these                                                                                        |
 | `npm run check:host-global`            | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed                                                                          |
