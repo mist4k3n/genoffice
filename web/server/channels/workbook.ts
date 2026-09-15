@@ -24,72 +24,44 @@ import type { ChannelHandler, ChannelTable } from '../router-types'
  */
 
 /**
- * The sidecar's open result, minus the two fields the caller supplies. Matches
- * sheets-main.ts's `sidecarOpenResultSchema`, which is not exported.
- */
-const sidecarOpenResultSchema = workbookFileSchema.omit({ sha256: true, readOnly: true })
-
-/**
  * `selectWorkbook` on the desktop shows a file dialog. On the web there is no
  * dialog and no choice to make: the document is whichever one this connection
  * is authorised for. The channel keeps its name so the renderer is unchanged.
  */
 const selectWorkbook: ChannelHandler = async (context) => {
-  const { identity, registry, pool, locale } = context
-  const snapshot = await registry.prepareSnapshot(identity)
+  const { identity, registry } = context
+  // The registry decides whether this is a new workbook in the engine or
+  // another viewer of one already open; the answer is invisible from here.
+  const { session, opened, name, displayPath, fromDraft } = await registry.open(identity)
 
-  try {
-    const { sessionId, opened } = await pool.open(
-      snapshot.snapshotPath,
-      locale,
-      undefined,
-      (result) => sidecarOpenResultSchema.parse(result).sessionId,
-      (result) => sidecarOpenResultSchema.parse(result),
-    )
-
-    registry.register({
-      sessionId,
-      documentId: identity.documentId,
-      tenantId: identity.tenantId,
-      userId: identity.userId,
-      snapshotPath: snapshot.snapshotPath,
-      byteLength: snapshot.byteLength,
-      releaseSnapshot: snapshot.cleanup,
-      sha256: snapshot.sha256,
-      openedFromVersion: snapshot.version,
-      sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
-      permission: identity.permission,
-      lastUsedAt: Date.now(),
-      pendingEdits: 0,
-    })
-
-    const file = workbookFileSchema.parse({
-      ...opened,
-      name: snapshot.name,
-      // A path-shaped handle, never the server's snapshot path. See
-      // workbook-handle.ts for why it cannot be opaque.
-      path: workbookDisplayPath(snapshot.name, snapshot.displayPath),
-      sha256: snapshot.sha256,
-      fileBytes: snapshot.byteLength,
-      // Read-only is an authorisation outcome here, not a filesystem one.
-      readOnly: !canWrite(identity.permission),
-    })
-    // Added after the parse, and only when true, so an ordinary open is
-    // byte-identical to what it was. The host bridge strips it again before
-    // the renderer sees the result -- see protocol.ts.
-    return snapshot.fromDraft ? { ...file, [DRAFT_RESTORED_KEY]: true } : file
-  } catch (error) {
-    // The snapshot outlives a failed open only as garbage.
-    await snapshot.cleanup()
-    throw error
-  }
+  const file = workbookFileSchema.parse({
+    ...opened,
+    // The client's own handle, not the sidecar's -- several clients share one
+    // sidecar session, and a save swaps it underneath them.
+    sessionId: session.sessionId,
+    name,
+    // A path-shaped handle, never the server's snapshot path. See
+    // workbook-handle.ts for why it cannot be opaque.
+    path: workbookDisplayPath(name, displayPath),
+    sha256: session.sha256,
+    fileBytes: session.byteLength,
+    // Read-only is an authorisation outcome here, not a filesystem one.
+    readOnly: !canWrite(identity.permission),
+  })
+  // Added after the parse, and only when true, so an ordinary open is
+  // byte-identical to what it was. The host bridge strips it again before
+  // the renderer sees the result -- see protocol.ts.
+  return fromDraft ? { ...file, [DRAFT_RESTORED_KEY]: true } : file
 }
 
 const readWorkbookRange: ChannelHandler = async (context) => {
   const request = workbookRangeRequestSchema.parse(context.args[0])
-  context.registry.require(request.sessionId, context.identity)
-  const result = await context.pool.withSession(request.sessionId, (client) =>
-    client.readRange(request),
+  const session = context.registry.require(request.sessionId, context.identity)
+  // The id the client holds is ours; the sidecar knows only its own, and a
+  // save swaps which one that is. Substituting it here is what makes a shared
+  // session invisible from the browser.
+  const result = await context.pool.withSession(session.engineSessionId, (client) =>
+    client.readRange({ ...request, sessionId: session.engineSessionId }),
   )
   return workbookRangeResultSchema.parse(result)
 }

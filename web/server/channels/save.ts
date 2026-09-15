@@ -103,7 +103,7 @@ const saveWorkbookEdits: ChannelHandler = async (context) => {
   // for a fresh session over the saved file so later reads match what was
   // written; the same is true here, and skipping it would serve stale cells
   // for the rest of the session.
-  const file = await context.registry.reopenAfterSave(session, saved, context.pool, context.locale)
+  const file = await context.registry.reopenAfterSave(session, saved)
 
   // Two tabs on one document is the conflict case the host cannot see: its
   // realtime layer learns about writes through *its* storage, and this write
@@ -154,7 +154,7 @@ async function assemble(
   const targetPath = join(workDir, name)
   const discard = () => void rm(workDir, { recursive: true, force: true }).catch(() => {})
   try {
-    const mutation = await context.pool.withSession(request.sessionId, async (client) => {
+    const mutation = await context.pool.withSession(session.engineSessionId, async (client) => {
       await mkdir(workDir, { recursive: true })
       return writeWorkbookTo(client, session, request, targetPath)
     })

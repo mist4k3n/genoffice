@@ -38,7 +38,7 @@ once. Five people in one budget is five parses of that budget. For a
 collaborative editor that is the wrong unit, and it is the first thing to fix —
 before any of the syncing, because it also decides *where* the syncing happens.
 
-## 2. First pillar: one engine session per document, many clients
+## 2. First pillar: one engine session per document, many clients — **done**
 
 The change is contained and it is entirely ours — `web/server/`, no upstream
 drift:
@@ -60,6 +60,57 @@ lock, and it is worth re-checking whenever a channel is added.
 
 The payoff is not only memory: a shared session is the thing an op log needs to
 be sequenced *against*.
+
+### What it measures now
+
+Same benchmark, same workbook, after the change:
+
+```
+    #  engine RSS   cumulative Δ   per viewer        (was, per viewer)
+    1      41.2MB         36.7MB        36.7MB             38.4 MB
+    2      41.0MB         36.4MB        18.2MB             29.3 MB
+    4      40.5MB         36.0MB         9.0MB             22.4 MB
+   12      41.2MB         36.6MB         3.1MB                   —
+```
+
+**The second viewer costs nothing, and so does the twelfth.** Twelve people in
+one 30.9 MB workbook hold 36.6 MB between them — the same 36.6 MB one person
+holds. The per-viewer column is only the total divided by the count; the
+honest statement is that the cost is now per *document*, which is what the
+ceiling in `FINDINGS-PAPAN.md` §1 has always claimed to describe.
+
+### How it is put together
+
+A client's handle and the engine's session are now two different things. The
+handle is ours (`randomUUID`), stable for the life of the client, and carries
+identity, permission and liveness. The engine session holds the snapshot, the
+sidecar's own id and the sheet names, and is shared.
+
+- **The share key is `tenant\0document\0version`.** Two clients share only
+  when they are looking at identical bytes. A client that opens after a save
+  gets its own engine rather than joining one that still holds the pre-save
+  workbook.
+- **A draft-backed open is never shared**, under a unique key. A draft is one
+  user's unsaved work, and serving it to someone else would hand them edits
+  that are not theirs.
+- **The sidecar never learns the client's id.** Its own id is substituted into
+  every request that carries one — `read_range`, `read_formula_cells`,
+  `read_media`. This was the one thing that broke when the two ids diverged,
+  and the compat gate caught all fourteen workbooks at once.
+- **A save swaps the engine under a stable handle.** `reopenAfterSave` moves
+  the saving client to an engine at the new version and drops the old one only
+  if nobody else is on it. Other viewers keep the bytes they are reading and
+  hear about the move through the conflict push, which is what they did before.
+- **The quota counts workbooks, not viewers.** It bounds a resource, and ten
+  people in one budget hold one workbook. Refusing the tenth would refuse
+  something that costs nothing to grant.
+- **`/health` reports both**: `sessions` is viewers, `workbooks` is what they
+  are holding.
+
+`tests/shared-sessions.test.ts` runs a real router over a real fixture: two
+handles on one workbook, closing one leaving the other reading, a moved version
+refusing to share, one user's handle refused to another, and a draft splitting
+the two. The compat gate still passes 14 of 14.
 
 ## 3. Second pillar: sequence the journal, do not add a CRDT
 
@@ -156,14 +207,13 @@ matters: an Excel-produced workbook rather than a synthesised one.
   the memory benchmarks, which is V8 plus bookkeeping and was never attributed.
   A room per document with sockets, presence and an op buffer is a new cost and
   belongs on the same axis as §1.
-- **Whether a shared session actually collapses the per-viewer cost**, rather
-  than moving it. §1 says what the duplicate costs; it does not prove the
-  dedupe recovers it. The same `--viewers` run, after the change, is the check.
+- **What happens to a shared session when its clients disagree.** They cannot
+  today — nothing mutates it — but the op log will change that, and the sharing
+  rule (identical bytes, or a separate engine) is what will have to hold.
 
 ## Suggested order
 
-1. Shared engine session per document, and re-run `--viewers 4`. Server-side,
-   no upstream drift, and it is the prerequisite for everything else.
+1. ~~Shared engine session per document~~ — done, §2.
 2. Presence on the existing socket — selections and cursors. Small, useful
    alone, and it proves the room without touching the journal.
 3. An Excel-produced heavy fixture, then settle §4.

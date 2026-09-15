@@ -76,6 +76,12 @@ holds, so a host with several publishes and calls `documentChanged` on each.
 />
 ```
 
+Several viewers of the same document share one workbook in the engine: the
+second person to open it costs nothing, and so does the twelfth. Each still
+gets its own session handle, its own permission and its own liveness —
+`/health` reports `sessions` (viewers) and `workbooks` (what they hold)
+separately.
+
 Several editors may be mounted at once, each on its own document. `visible`
 matters: a host that hides a tab with `display: none` rather than unmounting it
 must say so, because a canvas in a hidden subtree measures zero and nothing

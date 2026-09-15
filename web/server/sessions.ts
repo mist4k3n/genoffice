@@ -34,12 +34,53 @@ import {
  * it comes from the StorageAdapter, which is the only real difference.
  */
 
+/**
+ * One open workbook inside the engine, and the clients looking at it.
+ *
+ * The expensive thing is this, not the handle a browser holds: opening it
+ * writes a snapshot and parses the file, and a 30.9 MB workbook costs ~22 MB
+ * resident for as long as it stays open. Measured before this existed, a
+ * second reader of the same document cost exactly what a second document
+ * cost -- see FINDINGS-COLLAB.md §1 -- because sessions were keyed by session
+ * id and every open made another one.
+ *
+ * Sharing is safe because nothing mutates an open session: every call into it
+ * reads `snapshotPath`, and the save writes into a per-request scratch
+ * directory. It is *correct* because the key includes the storage version, so
+ * two clients share only when they are looking at identical bytes.
+ */
+interface EngineSession {
+  /** `tenant\0document\0version`, or a unique key for an unshareable open. */
+  readonly key: string
+  readonly tenantId: string
+  readonly documentId: string
+  /** The sidecar's own id. Changes when a save reopens the workbook. */
+  readonly engineSessionId: string
+  readonly snapshotPath: string
+  readonly byteLength: number
+  readonly sha256: string
+  readonly openedFromVersion: VersionToken
+  readonly sheetNames: ReadonlyMap<string, string>
+  /** The sidecar's open result, replayed verbatim to every later client. */
+  readonly opened: OpenedWorkbook
+  readonly name: string
+  readonly displayPath: string | undefined
+  readonly fromDraft: boolean
+  readonly releaseSnapshot: () => Promise<void>
+  /** Client session ids. The engine closes when the last one leaves. */
+  readonly clients: Set<string>
+}
+
+type OpenedWorkbook = ReturnType<typeof openResultSchema.parse>
+
 export interface WorkbookSession {
   readonly sessionId: string
   readonly documentId: string
   readonly tenantId: string
   readonly userId: string
-  /** Path of the private copy the sidecar has open. */
+  /** The sidecar session this client reads through. Shared, and not the client's id. */
+  readonly engineSessionId: string
+  /** Path of the copy the sidecar has open. */
   readonly snapshotPath: string
   readonly byteLength: number
   readonly sha256: string
@@ -58,11 +99,50 @@ export interface WorkbookSession {
   lastUsedAt: number
   /** Unsaved edits the renderer has journaled but not yet saved. */
   pendingEdits: number
-  /**
-   * Frees whatever the snapshot owns. A no-op when the engine was pointed at
-   * storage's own immutable blob -- deleting that would destroy the document.
-   */
-  releaseSnapshot: () => Promise<void>
+}
+
+/**
+ * A browser's handle on an engine session.
+ *
+ * Identity, permission and liveness are the client's; bytes and sheet names
+ * are the engine's, read through getters so a save that swaps the engine
+ * underneath reaches every client without anyone re-fetching a session id.
+ */
+class ClientSession implements WorkbookSession {
+  lastUsedAt = Date.now()
+  pendingEdits = 0
+
+  constructor(
+    readonly sessionId: string,
+    readonly userId: string,
+    readonly permission: FilePermission,
+    public engine: EngineSession,
+  ) {}
+
+  get documentId(): string {
+    return this.engine.documentId
+  }
+  get tenantId(): string {
+    return this.engine.tenantId
+  }
+  get engineSessionId(): string {
+    return this.engine.engineSessionId
+  }
+  get snapshotPath(): string {
+    return this.engine.snapshotPath
+  }
+  get byteLength(): number {
+    return this.engine.byteLength
+  }
+  get sha256(): string {
+    return this.engine.sha256
+  }
+  get openedFromVersion(): VersionToken {
+    return this.engine.openedFromVersion
+  }
+  get sheetNames(): ReadonlyMap<string, string> {
+    return this.engine.sheetNames
+  }
 }
 
 /** What an open needs: bytes on disk the sidecar can hold, and their provenance. */
@@ -96,7 +176,11 @@ export interface SessionRegistryOptions {
 const openResultSchema = workbookFileSchema.omit({ sha256: true, readOnly: true })
 
 export class SessionRegistry {
-  private readonly sessions = new Map<string, WorkbookSession>()
+  private readonly sessions = new Map<string, ClientSession>()
+  /** Engine sessions by share key. Many clients, one entry. */
+  private readonly engines = new Map<string, EngineSession>()
+  /** Opens in flight, so two simultaneous first-openers do not both parse. */
+  private readonly opening = new Map<string, Promise<EngineSession>>()
   private reaper: NodeJS.Timeout | null = null
 
   constructor(private readonly options: SessionRegistryOptions) {}
@@ -164,25 +248,32 @@ export class SessionRegistry {
    * caller to open. The caller registers the resulting session.
    */
   async prepareSnapshot(identity: RequestIdentity): Promise<Snapshot> {
-    this.enforceQuota(identity)
-
     // Unsaved work outranks the stored document, and does so silently. That is
     // Papan's own rule -- its WOPI GetFile serves a non-stale draft ahead of
     // storage -- and it is the difference between "your edits came back" and a
     // restore prompt asking a question the user cannot evaluate.
     const draft = await this.#freshDraft(identity)
-    if (draft) {
-      const stored = await this.options.storage.head(identity.documentId)
-      return {
-        ...(await this.#snapshotFromBytes(draft.bytes, {
-          version: stored.version,
-          name: stored.name,
-          displayPath: stored.displayPath,
-        })),
-        fromDraft: true,
-      }
-    }
+    return draft
+      ? this.#snapshotFromDraft(identity, draft)
+      : this.#snapshotFromStorage(identity)
+  }
 
+  async #snapshotFromDraft(
+    identity: RequestIdentity,
+    draft: { bytes: Uint8Array; baseVersion: VersionToken },
+  ): Promise<Snapshot> {
+    const stored = await this.options.storage.head(identity.documentId)
+    return {
+      ...(await this.#snapshotFromBytes(draft.bytes, {
+        version: stored.version,
+        name: stored.name,
+        displayPath: stored.displayPath,
+      })),
+      fromDraft: true,
+    }
+  }
+
+  async #snapshotFromStorage(identity: RequestIdentity): Promise<Snapshot> {
     // Content-addressed storage is already a snapshot: a blob named by the
     // hash of its contents cannot change under an open session. Where the
     // adapter offers that, skip the copy entirely -- it is the difference
@@ -256,9 +347,115 @@ export class SessionRegistry {
     }
   }
 
-  register(session: WorkbookSession): void {
-    this.sessions.set(session.sessionId, session)
-    void this.#claim(session.sessionId)
+  /**
+   * Open this document for this caller, sharing the engine session where the
+   * bytes are identical.
+   *
+   * The share key carries the storage version, so a client that opens after a
+   * save gets its own engine rather than the pre-save one. A draft-backed open
+   * is never shared: a draft is one user's unsaved work, and serving it to
+   * someone else would hand them edits that are not theirs.
+   */
+  async open(identity: RequestIdentity): Promise<{
+    session: WorkbookSession
+    opened: OpenedWorkbook
+    name: string
+    displayPath: string | undefined
+    fromDraft: boolean
+    shared: boolean
+  }> {
+    const draft = await this.#freshDraft(identity)
+    if (!draft) {
+      const stored = await this.options.storage.head(identity.documentId)
+      const key = shareKey(identity, stored.version)
+      const existing = this.engines.get(key) ?? (await this.opening.get(key))
+      if (existing) return { ...this.#attach(existing, identity), shared: true }
+
+      const pending = this.#openEngine(identity, key, null)
+      this.opening.set(key, pending)
+      try {
+        return { ...this.#attach(await pending, identity), shared: false }
+      } finally {
+        this.opening.delete(key)
+      }
+    }
+
+    // Unique key: findable for cleanup, never matched by another open.
+    const engine = await this.#openEngine(identity, `draft:${randomUUID()}`, draft)
+    return { ...this.#attach(engine, identity), shared: false }
+  }
+
+  /** Give this caller a handle on an engine session, and count them in. */
+  #attach(
+    engine: EngineSession,
+    identity: RequestIdentity,
+  ): { session: WorkbookSession; opened: OpenedWorkbook; name: string; displayPath: string | undefined; fromDraft: boolean } {
+    const sessionId = randomUUID()
+    const session = new ClientSession(sessionId, identity.userId, identity.permission, engine)
+    engine.clients.add(sessionId)
+    this.sessions.set(sessionId, session)
+    void this.#claim(sessionId)
+    return {
+      session,
+      opened: engine.opened,
+      name: engine.name,
+      displayPath: engine.displayPath,
+      fromDraft: engine.fromDraft,
+    }
+  }
+
+  /** Take the snapshot and hand it to the sidecar. One per share key. */
+  async #openEngine(
+    identity: RequestIdentity,
+    key: string,
+    draft: { bytes: Uint8Array; baseVersion: VersionToken } | null,
+  ): Promise<EngineSession> {
+    // Only a new engine consumes quota: a second viewer of an open workbook
+    // costs nothing that the quota exists to bound.
+    this.enforceQuota(identity)
+    const snapshot = draft ? await this.#snapshotFromDraft(identity, draft) : await this.#snapshotFromStorage(identity)
+    try {
+      const { sessionId, opened } = await this.options.pool.open(
+        snapshot.snapshotPath,
+        this.options.locale,
+        undefined,
+        (result) => openResultSchema.parse(result).sessionId,
+        (result) => openResultSchema.parse(result),
+      )
+      const engine: EngineSession = {
+        key,
+        tenantId: identity.tenantId,
+        documentId: identity.documentId,
+        engineSessionId: sessionId,
+        snapshotPath: snapshot.snapshotPath,
+        byteLength: snapshot.byteLength,
+        sha256: snapshot.sha256,
+        openedFromVersion: snapshot.version,
+        sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
+        opened,
+        name: snapshot.name,
+        displayPath: snapshot.displayPath,
+        fromDraft: snapshot.fromDraft === true,
+        releaseSnapshot: snapshot.cleanup,
+        clients: new Set(),
+      }
+      this.engines.set(key, engine)
+      return engine
+    } catch (error) {
+      // The snapshot outlives a failed open only as garbage.
+      await snapshot.cleanup()
+      throw error
+    }
+  }
+
+  /** Drop the engine when its last client leaves. */
+  async #detach(session: ClientSession): Promise<void> {
+    const engine = session.engine
+    engine.clients.delete(session.sessionId)
+    if (engine.clients.size > 0) return
+    if (this.engines.get(engine.key) === engine) this.engines.delete(engine.key)
+    await this.options.pool.close(engine.engineSessionId)
+    await engine.releaseSnapshot()
   }
 
   async close(sessionId: string): Promise<void> {
@@ -266,8 +463,7 @@ export class SessionRegistry {
     if (!session) return
     this.sessions.delete(sessionId)
     await this.#release(sessionId)
-    await this.options.pool.close(sessionId)
-    await session.releaseSnapshot()
+    await this.#detach(session)
   }
 
   /**
@@ -281,71 +477,67 @@ export class SessionRegistry {
    * token the save produced, so the next save's conflict check compares
    * against what this save wrote rather than what the session first opened.
    */
-  async reopenAfterSave(
-    previous: WorkbookSession,
-    saved: WorkbookMetadata,
-    pool: SidecarPool,
-    locale: string,
-  ): Promise<unknown> {
-    await this.close(previous.sessionId)
-
-    const snapshot = await this.prepareSnapshot({
-      userId: previous.userId,
-      tenantId: previous.tenantId,
-      documentId: previous.documentId,
-      permission: previous.permission,
-    })
-    try {
-      const { sessionId, opened } = await pool.open(
-        snapshot.snapshotPath,
-        locale,
-        undefined,
-        (result) => openResultSchema.parse(result).sessionId,
-        (result) => openResultSchema.parse(result),
-      )
-      this.register({
-        sessionId,
-        documentId: previous.documentId,
-        tenantId: previous.tenantId,
-        userId: previous.userId,
-        snapshotPath: snapshot.snapshotPath,
-        byteLength: snapshot.byteLength,
-        releaseSnapshot: snapshot.cleanup,
-        sha256: snapshot.sha256,
-        openedFromVersion: saved.version,
-        sheetNames: new Map(opened.sheets.map((sheet) => [sheet.id, sheet.name])),
-        permission: previous.permission,
-        lastUsedAt: Date.now(),
-        pendingEdits: 0,
-      })
-      return workbookFileSchema.parse({
-        ...opened,
-        name: saved.name,
-        path: workbookDisplayPath(saved.name, saved.displayPath),
-        sha256: snapshot.sha256,
-        fileBytes: snapshot.byteLength,
-        readOnly: !canWrite(previous.permission),
-      })
-    } catch (error) {
-      await snapshot.cleanup()
-      throw error
+  async reopenAfterSave(previous: WorkbookSession, saved: WorkbookMetadata): Promise<unknown> {
+    const client = this.sessions.get(previous.sessionId)
+    if (!client) {
+      throw new SheetsError('session_gone', 'Workbook session is no longer open.')
     }
+    const identity: RequestIdentity = {
+      userId: client.userId,
+      tenantId: client.tenantId,
+      documentId: client.documentId,
+      permission: client.permission,
+    }
+
+    // The saved bytes are a different share key, so this either joins whoever
+    // already opened that version or becomes the engine everyone else joins.
+    const key = shareKey(identity, saved.version)
+    const engine = this.engines.get(key) ?? (await this.#openEngine(identity, key, null))
+
+    // The client id does not change. Other clients still on the pre-save
+    // engine keep it -- they are looking at bytes that still exist, and the
+    // save's own push tells them the document moved.
+    const stale = client.engine
+    client.engine = engine
+    engine.clients.add(client.sessionId)
+    stale.clients.delete(client.sessionId)
+    if (stale.clients.size === 0) {
+      if (this.engines.get(stale.key) === stale) this.engines.delete(stale.key)
+      await this.options.pool.close(stale.engineSessionId)
+      await stale.releaseSnapshot()
+    }
+
+    return workbookFileSchema.parse({
+      ...engine.opened,
+      sessionId: client.sessionId,
+      name: saved.name,
+      path: workbookDisplayPath(saved.name, saved.displayPath),
+      sha256: engine.sha256,
+      fileBytes: engine.byteLength,
+      readOnly: !canWrite(client.permission),
+    })
   }
 
   /**
    * Which document each of these sessions belonged to, so a loss notice
    * reaches the right sockets. Called before `forget`, which discards them.
    */
-  documentsFor(sessionIds: readonly string[]): Map<string, string[]> {
+  documentsFor(engineSessionIds: readonly string[]): Map<string, string[]> {
     const byDocument = new Map<string, string[]>()
-    for (const sessionId of sessionIds) {
-      const session = this.sessions.get(sessionId)
-      if (!session) continue
-      const list = byDocument.get(session.documentId)
-      if (list) list.push(sessionId)
-      else byDocument.set(session.documentId, [sessionId])
+    for (const engine of this.#enginesBySidecarId(engineSessionIds)) {
+      const list = byDocument.get(engine.documentId) ?? []
+      // The client is told about *its own* id: the sidecar's means nothing to
+      // it, and one lost engine can take several viewers with it.
+      list.push(...engine.clients)
+      byDocument.set(engine.documentId, list)
     }
     return byDocument
+  }
+
+  /** The engines behind a set of sidecar session ids. */
+  #enginesBySidecarId(engineSessionIds: readonly string[]): EngineSession[] {
+    const wanted = new Set(engineSessionIds)
+    return [...this.engines.values()].filter((engine) => wanted.has(engine.engineSessionId))
   }
 
   /**
@@ -388,27 +580,41 @@ export class SessionRegistry {
     await Promise.allSettled(ids.map((id) => this.close(id)))
   }
 
-  /** Drop sessions whose sidecar process died. Their snapshots still need removing. */
-  async forget(sessionIds: readonly string[]): Promise<void> {
+  /**
+   * Drop sessions whose sidecar process died. Their snapshots still need
+   * removing, and the pool is not asked to close what no longer exists.
+   *
+   * The ids are the sidecar's, so one of them can take several clients with it.
+   */
+  async forget(engineSessionIds: readonly string[]): Promise<void> {
     await Promise.allSettled(
-      sessionIds.map(async (sessionId) => {
-        const session = this.sessions.get(sessionId)
-        if (!session) return
-        this.sessions.delete(sessionId)
-        await this.#release(sessionId)
-        await session.releaseSnapshot()
+      this.#enginesBySidecarId(engineSessionIds).map(async (engine) => {
+        for (const sessionId of engine.clients) {
+          this.sessions.delete(sessionId)
+          await this.#release(sessionId)
+        }
+        engine.clients.clear()
+        if (this.engines.get(engine.key) === engine) this.engines.delete(engine.key)
+        await engine.releaseSnapshot()
       }),
     )
   }
 
+  /**
+   * Counted over engine sessions, not over clients.
+   *
+   * The quota bounds a resource, and the resource is the parsed workbook. Ten
+   * people in one budget hold one workbook's worth of memory, and refusing the
+   * tenth would be refusing something that costs nothing to grant.
+   */
   private enforceQuota(identity: RequestIdentity): void {
     const { maxSessionsPerTenant, maxResidentBytesPerTenant } = this.options.quota
     let count = 0
     let bytes = 0
-    for (const session of this.sessions.values()) {
-      if (session.tenantId !== identity.tenantId) continue
+    for (const engine of this.engines.values()) {
+      if (engine.tenantId !== identity.tenantId) continue
       count += 1
-      bytes += session.byteLength
+      bytes += engine.byteLength
     }
     if (count >= maxSessionsPerTenant) {
       throw new SheetsError('quota_exceeded', 'Too many workbooks open. Close one and retry.', {
@@ -432,10 +638,11 @@ export class SessionRegistry {
     await Promise.allSettled(stale.map((session) => this.close(session.sessionId)))
   }
 
-  stats(): { sessions: number; residentBytes: number } {
+  stats(): { sessions: number; workbooks: number; residentBytes: number } {
     let residentBytes = 0
-    for (const session of this.sessions.values()) residentBytes += session.byteLength
-    return { sessions: this.sessions.size, residentBytes }
+    for (const engine of this.engines.values()) residentBytes += engine.byteLength
+    // `sessions` is viewers, `workbooks` is what they are actually holding.
+    return { sessions: this.sessions.size, workbooks: this.engines.size, residentBytes }
   }
 
   async dispose(): Promise<void> {
@@ -487,4 +694,15 @@ export function resolveQuota(partial: Partial<QuotaOptions> | undefined): QuotaO
 function sanitizeName(name: string): string {
   const base = name.replace(/[/\\]/g, '_').replace(/^\.+/, '')
   return base.length > 0 ? base.slice(-200) : 'workbook.xlsx'
+}
+
+/**
+ * What makes two opens the same open.
+ *
+ * The version is in the key on purpose: a client that opens after a save must
+ * not join a session still holding the pre-save bytes. The tenant is in it
+ * because a document id is only unique within one.
+ */
+function shareKey(identity: RequestIdentity, version: VersionToken): string {
+  return `${identity.tenantId}\u0000${identity.documentId}\u0000${version}`
 }

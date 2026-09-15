@@ -27,9 +27,9 @@ import type { ChannelHandler, ChannelTable } from '../router-types'
 
 const readWorkbookFormulas: ChannelHandler = async (context) => {
   const request = workbookFormulaCellsRequestSchema.parse(context.args[0])
-  context.registry.require(request.sessionId, context.identity)
-  const result = await context.pool.withSession(request.sessionId, (client) =>
-    client.readFormulaCells(request),
+  const session = context.registry.require(request.sessionId, context.identity)
+  const result = await context.pool.withSession(session.engineSessionId, (client) =>
+    client.readFormulaCells({ ...request, sessionId: session.engineSessionId }),
   )
   return workbookFormulaCellsResultSchema.parse(result)
 }
@@ -41,9 +41,9 @@ const readWorkbookFormulas: ChannelHandler = async (context) => {
  */
 const readWorkbookMedia: ChannelHandler = async (context) => {
   const request = workbookMediaRequestSchema.parse(context.args[0])
-  context.registry.require(request.sessionId, context.identity)
-  const result = await context.pool.withSession(request.sessionId, (client) =>
-    client.readMedia(request),
+  const session = context.registry.require(request.sessionId, context.identity)
+  const result = await context.pool.withSession(session.engineSessionId, (client) =>
+    client.readMedia({ ...request, sessionId: session.engineSessionId }),
   )
   return workbookMediaResultSchema.parse(result)
 }
@@ -63,7 +63,7 @@ const readPivotDefinition: ChannelHandler = async (context) => {
   assertPackagePath(request.path)
   assertPackagePath(request.cachePath)
 
-  const [pivotXml, cacheXml] = await context.pool.withSession(request.sessionId, (client) =>
+  const [pivotXml, cacheXml] = await context.pool.withSession(session.engineSessionId, (client) =>
     Promise.all([
       readArchiveEntryText(client, session.snapshotPath, request.path),
       readArchiveEntryText(client, session.snapshotPath, request.cachePath),
@@ -114,7 +114,7 @@ const recalcWorkbook: ChannelHandler = async (context) => {
   }
 
   const result = sidecarRecalcResultSchema.parse(
-    await context.pool.withSession(request.sessionId, (client) =>
+    await context.pool.withSession(session.engineSessionId, (client) =>
       client.recalcCells({
         path: session.snapshotPath,
         edits: request.edits.map((edit) => ({
