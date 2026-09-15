@@ -279,6 +279,7 @@ decision someone writes down.
 | `FINDINGS-0x.md` | What each phase actually established, including what failed |
 | `FINDINGS-EMBED.md` | Embedding: the singletons, and how far each could be fixed |
 | `FINDINGS-PAPAN.md` | What the Papan briefing changed |
+| `PAPAN-INTEGRATION.md` | **What has to be true before Papan can open a document**, and who owns each piece |
 | `FINDINGS-COLLAB.md` | The collaboration spike: what two people on one document cost |
 | `server/` | The Hono router, session registry, engine pool |
 | `src/host/` | The browser-side bridge: transport, coverage table, prefetch |
