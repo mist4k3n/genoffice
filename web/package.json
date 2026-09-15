@@ -27,6 +27,7 @@
     "build:types": "node tools/build-types.mjs",
     "build:app": "vite build --config vite.config.ts",
     "check:lib": "node tools/check-lib.mjs",
+    "check:base": "node tools/check-base.mjs",
     "spike": "vite --config vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "api:list": "node tools/list-desktop-api.mjs",

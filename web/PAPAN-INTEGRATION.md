@@ -63,37 +63,48 @@ repository, compiles the component, its ref and every event payload under
 > rolldown, the same build completes in 40 seconds. The page build went from
 > minutes to seconds with it.
 
-### A2. `base` path — **blocking for the pages, answered for the package**
+### A2. `base` path — **done**
 
-The page build emits absolute asset URLs (`/assets/…`). Verified by building:
-the fonts, chunks and CSS all resolve that way. Served anywhere but the site
-root, every asset 404s. That is still true and is what A3's frame page needs.
+The page build used to emit absolute asset URLs (`/assets/…`), so served
+anywhere but the site root every asset 404d. It now builds with a relative
+`base`: each page resolves its scripts, chunks, stylesheets and font faces
+against the directory it was itself served from, and the same build works at
+the site root, at `/sheets/`, or behind a prefix nobody told us about.
 
-The library build does not have the problem: `base: './'`, and the stylesheet
-references the faces as `./fonts/Carlito-Regular.ttf`, so the package resolves
-wherever Papan serves it from.
+A host that needs an absolute prefix -- assets on a different origin from the
+pages -- sets it at build time and gets exactly that:
 
-The faces sit under `fonts/` for a second reason, and it is one the page build
-still has. Upstream's canvas font fallback builds two font URLs in JavaScript
+```sh
+SHEETS_WEB_BASE=https://cdn.papan.example/sheets/ npm run build:app
+```
+
+The faces also moved to `assets/fonts/`, unhashed, for the reason recorded
+under A1: upstream's canvas font fallback builds two font URLs in JavaScript
 rather than CSS -- `new URL('./fonts/Carlito-Regular.ttf', import.meta.url)` in
-`cell-font-fallback.ts` -- which Vite cannot resolve at build time and leaves
-for the browser. They feed the width-corrected aliases for **Dosis** and
-**Aptos Narrow**, and Aptos Narrow is what Excel 365 gives a new workbook, so a
-404 there is wrong cell widths on documents Papan will certainly have. The
-library build answers it by emitting the faces where that URL points. The page
-build does not: its chunks live in `assets/`, and `assets/fonts/` is empty.
-Whoever closes A2 should check that path too.
+`cell-font-fallback.ts` -- resolved at runtime against the chunk that asked.
+Chunks live in `assets/`, so that is where those files have to be. They feed
+the width-corrected aliases for **Dosis** and **Aptos Narrow**, and Aptos
+Narrow is what Excel 365 gives a new workbook, so a 404 there is wrong cell
+widths on documents Papan will certainly have.
+
+**One thing a relative base asks of the host.** It resolves against the
+_document's_ URL, so a page served at `/sheets/frame` (no extension, no
+trailing slash) looks for `/sheets/assets/…`, while `/sheets/frame/` looks for
+`/sheets/frame/assets/…`. Serving the built files as files is the simple
+answer; a rewrite that hides the path needs `SHEETS_WEB_BASE`.
 
 **Done when:** `base` matches where Papan serves the pages, and a built page
-loads its CSS and its Carlito faces from that prefix.
+loads its CSS and its Carlito faces from that prefix. `npm run check:base` is
+that test: it builds both ways, serves `src/dist` from `/apps/sheets/v3/`, and
+follows every reference each page makes -- scripts, preloaded chunks,
+stylesheets, the `url()`s inside them, and the two font URLs in the JavaScript
+-- failing on anything that 404s.
 
-> A related dev-only wrinkle, recorded so nobody chases it: in `vite dev` the
+> A dev-only wrinkle, recorded so nobody chases it: in `vite dev` the
 > `@genoffice/ui/fonts/*.ttf` URLs inside upstream's CSS resolve relative to
 > `styles.css` instead of through the package's exports map, so the dev server
-> answers them with `index.html` and Chrome logs `invalid sfntVersion`. The
-> production build resolves them correctly. Canvas metrics depend on Carlito
-> (it is metric-compatible with Calibri), so this would matter if it were real;
-> it is not.
+> answers them with `index.html` and Chrome logs `invalid sfntVersion`. Both
+> builds resolve them correctly.
 
 ### A3. Serve `sheets-frame.html`
 
@@ -328,7 +339,7 @@ the real one. The numbers quoted here come from a container on a laptop.
 
 ## Shortest path to a document opening in Papan
 
-1. ~~**A1** library build~~ — done; **A2** `base` for the pages.
+1. ~~**A1** library build, **A2** `base`~~ — both done.
 2. **B1** storage with `localPath()`, **B2** `identify()`.
 3. **B6** the engine binary in the image, **B7** the two environment variables.
 4. **B3** socket attach.

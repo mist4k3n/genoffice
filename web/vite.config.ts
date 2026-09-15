@@ -20,6 +20,18 @@ const repoRoot = resolve(here, '..')
  */
 export default defineConfig({
   root: resolve(here, 'src'),
+  /**
+   * Where the pages are served from.
+   *
+   * Relative by default, because the answer is a deployment's and not this
+   * repository's: `./` makes every asset URL resolve against the directory the
+   * page itself was served from, so the same build works at the site root, at
+   * `/sheets/`, or behind a CDN prefix nobody told us about
+   * (PAPAN-INTEGRATION.md, A2). A host that needs an absolute prefix -- assets
+   * on a different origin from the pages, say -- sets `SHEETS_WEB_BASE` at
+   * build time and gets exactly that.
+   */
+  base: process.env.SHEETS_WEB_BASE || './',
   // Three entries: the standalone app, the host harness that mounts the editor
   // as a component the way an embedding application would, and the page an
   // isolated editor runs inside (see src/embed/IsolatedSheets.tsx).
@@ -29,6 +41,24 @@ export default defineConfig({
         index: resolve(here, 'src/index.html'),
         harness: resolve(here, 'src/harness.html'),
         'sheets-frame': resolve(here, 'src/sheets-frame.html'),
+      },
+      output: {
+        /**
+         * The font faces go in `assets/fonts/`, unhashed, because upstream's
+         * canvas font fallback builds two of these URLs itself -- `new
+         * URL('./fonts/Carlito-Regular.ttf', import.meta.url)` in
+         * `cell-font-fallback.ts`, resolved at runtime against the chunk that
+         * asked. Chunks live in `assets/`, so this is where that URL points.
+         * They feed the width-corrected aliases for Dosis and Aptos Narrow,
+         * and Aptos Narrow is what Excel 365 gives a new workbook.
+         *
+         * A literal path cannot carry a content hash. These four files are
+         * immutable, and the stylesheet that also references them is hashed.
+         */
+        assetFileNames: (asset) =>
+          asset.names.some((name) => name.endsWith('.ttf'))
+            ? 'assets/fonts/[name][extname]'
+            : 'assets/[name]-[hash][extname]',
       },
     },
   },

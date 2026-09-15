@@ -76,7 +76,10 @@ in a quarter of an hour. React is external — the host owns
 its own copy, and a second one is the hooks error `dedupe` exists to prevent.
 Everything else is bundled, so embedding this does not mean installing the
 renderer's dependency tree. `npm run build:app` is the other build: the three
-HTML pages, which is what `npm run dev` serves.
+HTML pages, which is what `npm run dev` serves. Those build with a relative
+`base`, so they work wherever they are served from; a deployment that needs an
+absolute prefix — assets on another origin, say — sets `SHEETS_WEB_BASE` at
+build time.
 
 ```tsx
 import { SheetsEditor } from '@mist4k3n/sheets-web'
@@ -290,6 +293,7 @@ decision someone writes down.
 | `npm test`                             | Prefetch correctness, export-slot lifetime, the save/Save As split                                                                                          |
 | `npm run compat`                       | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip. **Saves over what it reads** — serve a copy, never `web/fixtures` |
 | `npm run check:lib`                    | A host can import the built package and typecheck against it, and cannot reach past its exports map                                                         |
+| `npm run check:base`                   | The built pages load every asset they reference when served from a prefix rather than the site root                                                         |
 | `npm run check:drift`                  | Undeclared changes outside `web/`, and upstream movement in watched files                                                                                   |
 | `npm run check:channels`               | Channel names still match the preload. The compiler cannot see these                                                                                        |
 | `npm run check:host-global`            | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed                                                                          |
