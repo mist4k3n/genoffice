@@ -1,0 +1,23 @@
+{
+  // Declaration emit for the library build. `tsconfig.json` is the checking
+  // config and stays `noEmit`; this one exists only so `tools/build-types.mjs`
+  // has something to point tsc at.
+  //
+  // `include` is the public entry alone. tsc still pulls the whole graph in --
+  // the renderer, the workspace packages -- and emits a .d.ts for every file
+  // in it, which is why the output goes to a staging directory and is rolled
+  // up into a single declaration rather than published as it stands.
+  //
+  // env.d.ts is listed for the same reason tsconfig.json lists it: it is what
+  // declares window.desktopApi, and without it upstream's own sources do not
+  // compile.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": false,
+    "outDir": "dist/.types"
+  },
+  "include": ["src/embed/index.ts", "../apps/sheets/src/renderer/env.d.ts"]
+}

@@ -4,7 +4,29 @@
   "private": true,
   "type": "module",
   "description": "Browser delivery of GenOffice Sheets. Additive-only fork delta; see PLAN.md.",
+  "main": "./dist/sheets-web.js",
+  "module": "./dist/sheets-web.js",
+  "types": "./dist/sheets-web.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/sheets-web.d.ts",
+      "import": "./dist/sheets-web.js"
+    },
+    "./style.css": "./dist/sheets-web.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
   "scripts": {
+    "build": "npm run build:lib && npm run build:types",
+    "build:lib": "vite build --config vite.lib.config.ts",
+    "build:types": "node tools/build-types.mjs",
+    "build:app": "vite build --config vite.config.ts",
+    "check:lib": "node tools/check-lib.mjs",
     "spike": "vite --config vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "api:list": "node tools/list-desktop-api.mjs",
@@ -28,21 +50,28 @@
     "harness": "VITE_SHEETS_API=http://127.0.0.1:5274 vite --config vite.config.ts",
     "dev": "VITE_SHEETS_API=http://127.0.0.1:5274 vite --config vite.config.ts"
   },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
   "devDependencies": {
     "@hono/node-server": "^1.19.17",
     "@hono/node-ws": "^1.3.1",
     "@types/node": "^22.20.2",
     "@types/ws": "^8.18.1",
-    "@vitejs/plugin-react": "^5.0.4",
+    "@vitejs/plugin-react": "^6.1.1",
+    "rollup": "^4.63.3",
+    "rollup-plugin-dts": "^6.5.1",
     "tsx": "^4.23.13",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1",
+    "vite": "^8.3.0",
     "ws": "^8.21.3"
   },
   "allowScripts": {
     "esbuild@0.28.2": true
   },
   "dependencies": {
-    "hono": "^4.13.7"
+    "hono": "^4.13.7",
+    "zod": "^4.3.6"
   }
 }

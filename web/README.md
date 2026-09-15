@@ -46,7 +46,7 @@ createSheetsRouter({
   storage,
   identify,
   instanceId: process.env.INSTANCE_ID,
-  sessions: redisSessionDirectory,          // claim / lookup / release
+  sessions: redisSessionDirectory, // claim / lookup / release
   announceChange: (id, version) => bus.publish('sheets:changed', { id, version }),
 })
 ```
@@ -57,10 +57,41 @@ ended" (410) — without it they are the same answer, and the client reopens a
 workbook that is still open. Add `forward` to the directory and the package
 proxies the call itself instead of reporting it.
 
-`announceChange` is the socket half: pushes reach the sockets *this* instance
+`announceChange` is the socket half: pushes reach the sockets _this_ instance
 holds, so a host with several publishes and calls `documentChanged` on each.
 
 ## Embedding
+
+### The package
+
+```sh
+npm run build      # dist/sheets-web.js, dist/sheets-web.css, dist/sheets-web.d.ts
+npm run check:lib  # compiles a throwaway consumer against the built package
+```
+
+`npm run build` is the library build (`vite.lib.config.ts`) plus a rolled-up
+declaration, and it is what a host installs. It runs on Vite 8, whose bundler
+is rolldown: the same build under Vite 7 never finished rollup's render phase
+in a quarter of an hour. React is external — the host owns
+its own copy, and a second one is the hooks error `dedupe` exists to prevent.
+Everything else is bundled, so embedding this does not mean installing the
+renderer's dependency tree. `npm run build:app` is the other build: the three
+HTML pages, which is what `npm run dev` serves.
+
+```tsx
+import { SheetsEditor } from '@mist4k3n/sheets-web'
+import '@mist4k3n/sheets-web/style.css'
+```
+
+The stylesheet is a separate import because a bundler that does it for you is a
+bundler deciding when the host's own CSS loses a specificity tie. Nothing else
+is importable: the `exports` map seals `src/`, which is where the relative paths
+into `apps/sheets` live, and `npm run check:lib` fails if a deep import starts
+resolving.
+
+The package is `private`, because publishing it is a registry decision this
+repository should not make silently. `npm pack` produces the tarball; a private
+registry needs `private` dropped and a `publishConfig` added.
 
 ```tsx
 <SheetsEditor
@@ -151,15 +182,15 @@ await sheets.documentChanged(fileId)
 
 The three resolutions a banner offers map to three calls:
 
-| Button | Call |
-| --- | --- |
-| Keep mine | dismiss the banner; nothing to call |
-| Overwrite | `handle.save({ overwrite: true })` |
-| Discard mine | `handle.reload()` |
+| Button             | Call                                                                    |
+| ------------------ | ----------------------------------------------------------------------- |
+| Keep mine          | dismiss the banner; nothing to call                                     |
+| Overwrite          | `handle.save({ overwrite: true })`                                      |
+| Discard mine       | `handle.reload()`                                                       |
 | Show saved version | mount a second `<SheetsEditor readOnly isolate />` on the same document |
 
 `overwrite` does not skip the version check — it moves it to a compare-and-set
-against what storage holds now, so a document that moves *again* mid-save still
+against what storage holds now, so a document that moves _again_ mid-save still
 conflicts. `readOnly` is a downgrade the server intersects with the rights
 `identify()` granted; it can never raise them.
 
@@ -192,12 +223,12 @@ flat at ~71 MB, and each workbook costs 11% less. Measured in
 `permission` is `owner | admin | readwrite | readcopy | hidden | none`, not a
 boolean, because three distinctions matter:
 
-| | |
-| --- | --- |
-| `owner` `admin` `readwrite` | read, copy, write |
-| `readcopy` | read and copy — Save As works, saving does not |
-| `hidden` | answered as `404`: the caller must not learn the document exists |
-| `none` | answered as `403` |
+|                             |                                                                  |
+| --------------------------- | ---------------------------------------------------------------- |
+| `owner` `admin` `readwrite` | read, copy, write                                                |
+| `readcopy`                  | read and copy — Save As works, saving does not                   |
+| `hidden`                    | answered as `404`: the caller must not learn the document exists |
+| `none`                      | answered as `403`                                                |
 
 `identify()` runs on every request and **every mutation is checked against that
 result**, never against what the session recorded at open. A grant you revoke
@@ -253,35 +284,37 @@ decision someone writes down.
 
 ## Checks
 
-| Command | What it protects |
-| --- | --- |
-| `npm run typecheck` | The whole renderer under the browser config. An un-threaded host call is a type error |
-| `npm test` | Prefetch correctness, export-slot lifetime, the save/Save As split |
-| `npm run compat` | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip. **Saves over what it reads** — serve a copy, never `web/fixtures` |
-| `npm run check:drift` | Undeclared changes outside `web/`, and upstream movement in watched files |
-| `npm run check:channels` | Channel names still match the preload. The compiler cannot see these |
-| `npm run check:host-global` | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed |
-| `npm run check:server` | No browser globals server-side; coverage and handlers agree both ways |
-| `npm run check:mirror` | The one copied upstream function still matches its original |
-| `npm run check:upstream` | `apps/sheets` still compiles and its own test suite still passes |
-| `npm run bench` / `bench:memory` | Scroll latency; resident memory per open workbook |
-| `npm run bench:linux` | The same memory benchmark in a Linux container — macOS `ps rss` cannot answer it |
-| `npm run bench:linux -- --viewers N` | What the Nth reader of **one** document costs |
-| `node tools/make-fixture.mjs --rows N` | Generate a heavy workbook; the corpus tops out at 0.4 MB |
+| Command                                | What it protects                                                                                                                                            |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run typecheck`                    | The whole renderer under the browser config. An un-threaded host call is a type error                                                                       |
+| `npm test`                             | Prefetch correctness, export-slot lifetime, the save/Save As split                                                                                          |
+| `npm run compat`                       | Every corpus workbook: HTTP service vs a directly-spawned engine, plus a save round trip. **Saves over what it reads** — serve a copy, never `web/fixtures` |
+| `npm run check:lib`                    | A host can import the built package and typecheck against it, and cannot reach past its exports map                                                         |
+| `npm run check:drift`                  | Undeclared changes outside `web/`, and upstream movement in watched files                                                                                   |
+| `npm run check:channels`               | Channel names still match the preload. The compiler cannot see these                                                                                        |
+| `npm run check:host-global`            | A stray `window.desktopApi` read, which silently reintroduces cross-document bleed                                                                          |
+| `npm run check:server`                 | No browser globals server-side; coverage and handlers agree both ways                                                                                       |
+| `npm run check:mirror`                 | The one copied upstream function still matches its original                                                                                                 |
+| `npm run check:upstream`               | `apps/sheets` still compiles and its own test suite still passes                                                                                            |
+| `npm run bench` / `bench:memory`       | Scroll latency; resident memory per open workbook                                                                                                           |
+| `npm run bench:linux`                  | The same memory benchmark in a Linux container — macOS `ps rss` cannot answer it                                                                            |
+| `npm run bench:linux -- --viewers N`   | What the Nth reader of **one** document costs                                                                                                               |
+| `node tools/make-fixture.mjs --rows N` | Generate a heavy workbook; the corpus tops out at 0.4 MB                                                                                                    |
 
 ## Where things are
 
-| | |
-| --- | --- |
-| `PLAN.md` | The phase plan, and the reasoning behind the architecture |
-| `UPSTREAM-CHANGES.md` | **Every change outside `web/`, and why** |
-| `DRIFT.md` | Watched upstream files; what breaks when each moves |
-| `FINDINGS-0x.md` | What each phase actually established, including what failed |
-| `FINDINGS-EMBED.md` | Embedding: the singletons, and how far each could be fixed |
-| `FINDINGS-PAPAN.md` | What the Papan briefing changed |
-| `PAPAN-INTEGRATION.md` | **What has to be true before Papan can open a document**, and who owns each piece |
-| `FINDINGS-COLLAB.md` | The collaboration spike: what two people on one document cost |
-| `server/` | The Hono router, session registry, engine pool |
-| `src/host/` | The browser-side bridge: transport, coverage table, prefetch |
-| `src/embed/` | The mountable component and its host API |
-| `protocol.ts` | The short list of wire shapes that are ours, not upstream's |
+|                        |                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------- |
+| `PLAN.md`              | The phase plan, and the reasoning behind the architecture                                   |
+| `UPSTREAM-CHANGES.md`  | **Every change outside `web/`, and why**                                                    |
+| `DRIFT.md`             | Watched upstream files; what breaks when each moves                                         |
+| `FINDINGS-0x.md`       | What each phase actually established, including what failed                                 |
+| `FINDINGS-EMBED.md`    | Embedding: the singletons, and how far each could be fixed                                  |
+| `FINDINGS-PAPAN.md`    | What the Papan briefing changed                                                             |
+| `PAPAN-INTEGRATION.md` | **What has to be true before Papan can open a document**, and who owns each piece           |
+| `FINDINGS-COLLAB.md`   | The collaboration spike: what two people on one document cost                               |
+| `server/`              | The Hono router, session registry, engine pool                                              |
+| `src/host/`            | The browser-side bridge: transport, coverage table, prefetch                                |
+| `src/embed/`           | The mountable component and its host API; `index.ts` is the package's entire public surface |
+| `vite.lib.config.ts`   | The library build. `vite.config.ts` is the page build, and they share nothing               |
+| `protocol.ts`          | The short list of wire shapes that are ours, not upstream's                                 |

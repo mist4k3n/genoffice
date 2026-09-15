@@ -16,34 +16,75 @@ Items are marked **[us]** (this repository) or **[papan]** (the platform), and
 
 ## A. Delivery — [us]
 
-### A1. There is no library build — **blocking**
+### A1. The library build — **done**
 
-`web/` builds three HTML pages (`index`, `harness`, `sheets-frame`). Its
-`package.json` has no `main`, no `exports`, no `types`. Papan imports
-`<SheetsEditor>` as a React component, and there is currently nothing to
-import.
+`npm run build` produces the package Papan imports:
 
-Two options, and it is a real choice:
+```
+dist/sheets-web.js     the editor, one ES module plus lazy chunks
+dist/sheets-web.css    one stylesheet, with the Carlito faces beside it
+dist/sheets-web.d.ts   one declaration, upstream's types inlined
+```
 
-| | |
-| --- | --- |
-| **Library build** | `vite build --lib` plus `.d.ts` emit, published to a private registry. Papan depends on a version. Upgrades are deliberate |
-| **Source dependency** | Papan consumes `web/src/embed` through a workspace or submodule. No publish step, but Papan's bundler then compiles upstream's renderer and inherits its build constraints |
+```tsx
+import { SheetsEditor } from '@mist4k3n/sheets-web'
+import '@mist4k3n/sheets-web/style.css'
+```
 
-The library build is the better default — the renderer's module graph reaches
-into `apps/sheets/src/renderer` and `packages/*/src`, and making Papan's
-bundler responsible for that couples the two repositories' build configuration.
+The choice was the library build rather than the source dependency, for the
+reason the choice was framed around: the renderer's module graph reaches into
+`apps/sheets/src/renderer` and the workspace packages, and making Papan's
+bundler responsible for that couples the two repositories' build
+configuration. `src/embed/index.ts` is the whole public surface and the
+`exports` map seals everything else, so that graph is this repository's
+business and stays that way.
+
+Three consequences worth knowing before it is installed:
+
+- **React is a peer dependency**, not a bundled one. The host owns its own
+  copy; a second React is the hooks error `dedupe` exists to prevent, arriving
+  from the other direction. Everything else is bundled.
+- **`zod` is a real dependency.** `WorkbookFile` — what `onLoaded` and
+  `onSaved` carry — is `z.infer` of upstream's schema, so the declaration
+  refers to zod's types. Copying the shape by hand would drift silently.
+- **The package is still `private`.** `npm pack` gives a tarball today;
+  publishing to a private registry is a decision about a registry, and this
+  repository should not make it silently.
 
 **Done when:** Papan can `import { SheetsEditor } from '@…/sheets-web'` and
-typecheck against it.
+typecheck against it. `npm run check:lib` is that test, run against the built
+package: it symlinks the package into a throwaway consumer outside this
+repository, compiles the component, its ref and every event payload under
+`strict`, and fails if a deep import into `src/` starts resolving.
 
-### A2. `base` path — **blocking**
+> The build is Vite 8, and that is not incidental. Under Vite 7 the library
+> build transformed 3,688 modules in about a minute and then sat in rollup's
+> render phase for fifteen without finishing; under Vite 8, whose bundler is
+> rolldown, the same build completes in 40 seconds. The page build went from
+> minutes to seconds with it.
 
-The production build emits absolute asset URLs (`/assets/…`). Verified by
-building: the fonts, chunks and CSS all resolve that way. Served anywhere but
-the site root, every asset 404s.
+### A2. `base` path — **blocking for the pages, answered for the package**
 
-**Done when:** `base` matches where Papan serves the bundle, and a built page
+The page build emits absolute asset URLs (`/assets/…`). Verified by building:
+the fonts, chunks and CSS all resolve that way. Served anywhere but the site
+root, every asset 404s. That is still true and is what A3's frame page needs.
+
+The library build does not have the problem: `base: './'`, and the stylesheet
+references the faces as `./fonts/Carlito-Regular.ttf`, so the package resolves
+wherever Papan serves it from.
+
+The faces sit under `fonts/` for a second reason, and it is one the page build
+still has. Upstream's canvas font fallback builds two font URLs in JavaScript
+rather than CSS -- `new URL('./fonts/Carlito-Regular.ttf', import.meta.url)` in
+`cell-font-fallback.ts` -- which Vite cannot resolve at build time and leaves
+for the browser. They feed the width-corrected aliases for **Dosis** and
+**Aptos Narrow**, and Aptos Narrow is what Excel 365 gives a new workbook, so a
+404 there is wrong cell widths on documents Papan will certainly have. The
+library build answers it by emitting the faces where that URL points. The page
+build does not: its chunks live in `assets/`, and `assets/fonts/` is empty.
+Whoever closes A2 should check that path too.
+
+**Done when:** `base` matches where Papan serves the pages, and a built page
 loads its CSS and its Carlito faces from that prefix.
 
 > A related dev-only wrinkle, recorded so nobody chases it: in `vite dev` the
@@ -65,10 +106,15 @@ another origin Papan's session cookie needs `SameSite=None`.
 
 ### A4. Bundle weight
 
-22 MB of build output, dominated by one 10.6 MB chunk (≈3 MB gzipped). That is
-fine behind a lazy route and not fine in an app shell every Papan page loads.
-Univer's locale bundles are already split per language; the remaining chunk is
-the editor itself.
+The library build's entry is 12.4 MB, 3.07 MB gzipped, and that is the number
+that matters: it is one chunk and it is the editor itself. Univer's locales are
+already split per language and stay lazy, and the stylesheet is 176 KB with the
+four Carlito faces emitted beside it rather than base64'd into it — library
+mode inlines every asset by default, which made that stylesheet 11 MB until
+`vite.lib.config.ts` turned it off.
+
+3 MB gzipped is fine behind a lazy route and not fine in an app shell every
+Papan page loads. Nothing here removes the need for that route.
 
 **Done when:** the editor's chunks are loaded on demand, and Papan's initial
 payload is unchanged by this integration.
@@ -103,14 +149,14 @@ Runs on every request; throw to reject (the router answers 401). Returns
 
 `permission` is a lattice, not a boolean, and the three distinctions matter:
 
-| | |
-| --- | --- |
-| `owner` `admin` `readwrite` | read, copy, write |
-| `readcopy` | read and copy — Save As works, saving does not |
-| `hidden` | answered `404`: the caller must not learn the document exists |
-| `none` | answered `403` |
+|                             |                                                               |
+| --------------------------- | ------------------------------------------------------------- |
+| `owner` `admin` `readwrite` | read, copy, write                                             |
+| `readcopy`                  | read and copy — Save As works, saving does not                |
+| `hidden`                    | answered `404`: the caller must not learn the document exists |
+| `none`                      | answered `403`                                                |
 
-Every mutation is checked against the *request's* result, never against what
+Every mutation is checked against the _request's_ result, never against what
 the session recorded at open, so a revoked grant fails on the next call.
 
 **Done when:** a viewer cannot save, a `hidden` document 404s, and revoking a
@@ -130,8 +176,8 @@ by default), visible in `/health`.
 ### B4. `documentChanged()`
 
 Call it wherever Papan learns a document moved — realtime, webhook, another
-writer. It is what makes the conflict banner appear *while there is still a
-choice*, rather than at the moment a save fails.
+writer. It is what makes the conflict banner appear _while there is still a
+choice_, rather than at the moment a save fails.
 
 With more than one API instance, also pass `announceChange`: pushes reach only
 the sockets the calling instance holds, so the host publishes and then calls
@@ -154,8 +200,7 @@ machine. Three valid answers:
 Without one of these, a misrouted call is indistinguishable from an expired
 one, and the client reopens a 30 MB workbook that is still open elsewhere.
 
-**Done when:** a call to the wrong instance answers 421 or is forwarded, never
-410.
+**Done when:** a call to the wrong instance answers 421 or is forwarded, never 410.
 
 ### B6. Ship the engine binary — **blocking**
 
@@ -203,15 +248,15 @@ AI and are switched off by default (Papan has its own assistant — see
 `UPSTREAM-CHANGES.md`, Change 8); two are desktop screen capture and will never
 apply. The remaining eighteen, by what they cost Papan:
 
-| Group | Methods | Why it matters |
-| --- | --- | --- |
-| Export | `exportPdf`, `exportCsv` | "Download as PDF/CSV" answers 501 today |
-| Create | `createDocument` | "New spreadsheet" |
-| Recovery | `writeWorkbookRecovery`, `replyRecoveryPrompt`, `reportCloseSaveResult` | Pairs with B9; without them the prompt has nowhere to go |
-| Host dialogs | `autoRenameWorkbook`, `confirmCsvSave` | Small; map to Papan flows the way Save As did |
-| Merge | `selectWorkbooksForMerge`, `openWorkbooksForMerge` | A whole feature. Drop it or build it |
-| Media | `readLocalImage`, `addPastedImage`, `fetchImage`, `webSearch`, `imageSearch`, `generateImage` | Only if Papan wants image insert |
-| Attachments | `pickAttachments`, `addAttachmentPaths`, `readAttachment`, `readAttachmentImage` | Composer attachments; AI-adjacent |
+| Group        | Methods                                                                                       | Why it matters                                           |
+| ------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Export       | `exportPdf`, `exportCsv`                                                                      | "Download as PDF/CSV" answers 501 today                  |
+| Create       | `createDocument`                                                                              | "New spreadsheet"                                        |
+| Recovery     | `writeWorkbookRecovery`, `replyRecoveryPrompt`, `reportCloseSaveResult`                       | Pairs with B9; without them the prompt has nowhere to go |
+| Host dialogs | `autoRenameWorkbook`, `confirmCsvSave`                                                        | Small; map to Papan flows the way Save As did            |
+| Merge        | `selectWorkbooksForMerge`, `openWorkbooksForMerge`                                            | A whole feature. Drop it or build it                     |
+| Media        | `readLocalImage`, `addPastedImage`, `fetchImage`, `webSearch`, `imageSearch`, `generateImage` | Only if Papan wants image insert                         |
+| Attachments  | `pickAttachments`, `addAttachmentPaths`, `readAttachment`, `readAttachmentImage`              | Composer attachments; AI-adjacent                        |
 
 `selectWorkbook` appears in the `todo` list for a different reason — it is
 served, but as "the document this connection is authorised for" rather than as
@@ -248,7 +293,7 @@ reloads. Latent today (two sessions, two snapshots); **not latent once
 
 ### D3. Per-connection memory
 
-The memory work measures per *document* and now per *viewer*. The Node side is
+The memory work measures per _document_ and now per _viewer_. The Node side is
 unattributed — server RSS ran 190–290 MB across the benchmarks. A room per
 document with sockets, presence and an op buffer is a new cost on the same
 axis.
@@ -275,7 +320,7 @@ the real one. The numbers quoted here come from a container on a laptop.
   confirming against the live policy.
 - **Cookies.** A frame served from another origin needs `SameSite=None`, since
   it makes its own API calls.
-- **Metrics.** `/health` already reports sidecar pool, sessions *and*
+- **Metrics.** `/health` already reports sidecar pool, sessions _and_
   workbooks, push and export stats. Wire it to Papan's monitoring rather than
   inventing counters.
 
@@ -283,7 +328,7 @@ the real one. The numbers quoted here come from a container on a laptop.
 
 ## Shortest path to a document opening in Papan
 
-1. **A1** library build, **A2** `base`.
+1. ~~**A1** library build~~ — done; **A2** `base` for the pages.
 2. **B1** storage with `localPath()`, **B2** `identify()`.
 3. **B6** the engine binary in the image, **B7** the two environment variables.
 4. **B3** socket attach.
