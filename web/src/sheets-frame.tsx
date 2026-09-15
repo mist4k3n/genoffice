@@ -95,6 +95,7 @@ function Frame(): React.JSX.Element | null {
       locale={config.locale}
       visible={config.visible}
       readOnly={config.readOnly}
+      ai={config.ai}
       onLoaded={(file) => emit({ name: 'loaded', file })}
       onDirtyChange={(pendingEdits) => emit({ name: 'dirty', pendingEdits })}
       onSaved={(event) => emit({ name: 'saved', event })}

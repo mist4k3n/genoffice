@@ -434,9 +434,13 @@ export interface AppProps {
   /// Several editors in one browser page must each be given their own, or
   /// they all address the same document. See host-api.ts.
   readonly api?: DesktopApi
+  /// Whether this app owns the AI surface. A host with its own assistant sets
+  /// this false so the user is not offered two chat panels; every AI entry
+  /// point goes with it. Defaults to true, which is the desktop app.
+  readonly ai?: boolean
 }
 
-export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
+export function App({ api, onRuntime, ai = true }: AppProps = {}): React.JSX.Element {
   // Read this, never the `window` global, so a page may hold more than one
   // editor. The fallback keeps the desktop app's behaviour identical.
   const hostApi = api ?? window.desktopApi
@@ -804,6 +808,9 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
   /** gsk login state for the cloud-tools gate (refreshed on mount and window focus) */
   const gskLoggedInRef = useRef(false)
   useEffect(() => {
+    // Nothing reads this when the host owns the assistant, and asking costs a
+    // round trip on every window focus.
+    if (!ai) return
     let alive = true
     const refresh = () => {
       void hostApi
@@ -4184,6 +4191,7 @@ export function App({ api, onRuntime }: AppProps = {}): React.JSX.Element {
         onStop={handleStopAgent}
         onNewChat={handleNewChat}
         onUndo={handleUndo}
+        aiEnabled={ai}
         aiScopeRange={aiScopeChip.range}
         aiScopeColumns={aiScopeChip.columns ?? null}
         aiScopeLocked={aiScopeChip.locked}

@@ -30,6 +30,7 @@ export interface FrameConfig {
   readonly theme: HostTheme
   readonly locale: string
   readonly readOnly: boolean
+  readonly ai: boolean
   readonly visible: boolean
 }
 

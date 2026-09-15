@@ -200,6 +200,16 @@ interface ExcelShellProps {
   readonly onUndo: (steps?: number) => void
   /// A1 notation of the multi-cell selection the AI composer offers as this
   /// run's scope, or null when the resting single-cell selection carries none.
+  /**
+   * Whether this app owns the AI surface.
+   *
+   * A host that embeds Sheets beside its own assistant turns this off, so the
+   * user sees one chat panel rather than two. It hides every entry point --
+   * the panel, the ribbon group, the selection prompt, Translate -- rather
+   * than only the panel, because an entry point that opens nothing is worse
+   * than no entry point.
+   */
+  readonly aiEnabled?: boolean
   readonly aiScopeRange: string | null
   /// Header names when that scope covers whole columns: they label the chip in
   /// place of the range, because a column is a name to the user, not a letter.
@@ -365,6 +375,7 @@ export function ExcelShell({
   aiScopeRange,
   aiScopeColumns,
   aiScopeLocked,
+  aiEnabled = true,
   aiSelectionAskAnchor,
   onAiSelectionAskDismiss,
   onAiScopeDismiss,
@@ -392,7 +403,7 @@ export function ExcelShell({
   const collapse = useRibbonCollapse('ai-sheets-ribbon-collapsed')
   // Persisted so a closed AI panel stays closed on next launch (docs/slides parity)
   const [isCopilotOpen, setIsCopilotOpen] = useState(
-    () => localStorage.getItem('ai-sheets-show-ai') !== '0',
+    () => aiEnabled && localStorage.getItem('ai-sheets-show-ai') !== '0',
   )
   useEffect(() => {
     localStorage.setItem('ai-sheets-show-ai', isCopilotOpen ? '1' : '0')
@@ -517,7 +528,7 @@ export function ExcelShell({
   const saveAsTitle = `${t('appSaveAs')} (${platformShortcuts('⇧⌘S')})`
 
   return (
-    <main className={`app-shell ${isCopilotOpen ? '' : 'copilot-collapsed'}`}>
+    <main className={`app-shell ${isCopilotOpen ? '' : 'copilot-collapsed'} ${aiEnabled ? '' : 'ai-off'}`}>
       <header className={`excel-header ${collapse.rootClass}`} ref={collapse.rootRef}>
         <nav
           className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
@@ -637,8 +648,8 @@ export function ExcelShell({
             else if (command === 'goto-open') setShowGoTo(true)
             else if (command === 'header-footer-open') setShowHeaderFooter(true)
             else if (command === 'allow-edit-ranges-open') setShowAllowEditRanges(true)
-            else if (command === 'ai-open-panel') setIsCopilotOpen(true)
-            else if (command === 'ai-toggle-panel') setIsCopilotOpen((v) => !v)
+            else if (command === 'ai-open-panel') setIsCopilotOpen(aiEnabled)
+            else if (command === 'ai-toggle-panel') setIsCopilotOpen((v) => aiEnabled && !v)
             else if (command === 'chart-element-title') setChartTextTarget('title')
             else if (command === 'chart-element-axis-cat') setChartTextTarget('axis-category')
             else if (command === 'chart-element-axis-val') setChartTextTarget('axis-value')
@@ -648,6 +659,7 @@ export function ExcelShell({
             setIsCopilotOpen(true)
             onSend(nextPrompt)
           }}
+          aiEnabled={aiEnabled}
           aiOpen={isCopilotOpen}
           onAiToggle={() => setIsCopilotOpen((open) => !open)}
         />
@@ -659,6 +671,7 @@ export function ExcelShell({
 
       {/* AI panel docks on the left, full height under the ribbon (unified with docs) */}
       <div className="sheet-body">
+        {aiEnabled && (
         <AiChatPanel
           isOpen={isCopilotOpen}
           hasContent={sheetHasContent}
@@ -686,6 +699,7 @@ export function ExcelShell({
           onExpand={() => setIsCopilotOpen(true)}
           onCollapse={() => setIsCopilotOpen(false)}
         />
+        )}
         <div className="sheet-main">
           {/* Excel's formula-bar row, Name Box only for now (fx bar TBD). */}
           <div className="name-box-bar">
@@ -702,7 +716,7 @@ export function ExcelShell({
           <section className="workbook-area">
             <div id={gridContainerId} className="spreadsheet" data-univer-grid="" />
           </section>
-          {aiSelectionAskAnchor && aiScopeRange && !aiBusy && (
+          {aiEnabled && aiSelectionAskAnchor && aiScopeRange && !aiBusy && (
             <AiSelectionAsk
               anchor={aiSelectionAskAnchor}
               range={aiScopeRange}
@@ -1263,6 +1277,7 @@ function Ribbon({
   selectedChart,
   onCommand,
   onAiRun,
+  aiEnabled,
   aiOpen,
   onAiToggle,
   onListNames,
@@ -1287,6 +1302,8 @@ function Ribbon({
   readonly calcManual: boolean
   /** Open the AI panel and immediately send the given prompt */
   readonly onAiRun: (prompt: string) => void
+  /** False when the host owns the assistant: every AI entry point disappears. */
+  readonly aiEnabled: boolean
   /** AI side panel visibility (docs/slides parity: the entry button toggles it) */
   readonly aiOpen: boolean
   readonly onAiToggle: () => void
@@ -2427,6 +2444,9 @@ function Ribbon({
             onClick={() => onCommand('workbook-statistics')}
           />
         </RibbonGroup>
+        {/* Translate is an AI prompt wearing a ribbon button, so it goes with
+            the rest of the assistant. */}
+        {aiEnabled && (
         <RibbonGroup label={t('appGroupLanguage')}>
           <div className="ribbon-tool large" data-tip={t('appTranslateTitle')}>
             <span className="tool-icon-row">
@@ -2447,6 +2467,7 @@ function Ribbon({
             />
           </div>
         </RibbonGroup>
+        )}
         <RibbonGroup label={t('appGroupComments')}>
           <RibbonButton
             large
@@ -2543,6 +2564,7 @@ function Ribbon({
     : [...fontSizes, echoSize].sort((a, b) => a - b)
   return (
     <div className="ribbon" data-ribbon-body="">
+      {aiEnabled && (
       <RibbonGroup label={t('appGroupAiAssistant')}>
         <button
           className={`ribbon-tool as-button large ai-entry ${aiOpen ? 'active' : ''}`}
@@ -2614,6 +2636,7 @@ function Ribbon({
           </span>
         </button>
       </RibbonGroup>
+      )}
       <RibbonGroup label={t('appGroupClipboard')}>
         <button
           className="ribbon-tool as-button large"

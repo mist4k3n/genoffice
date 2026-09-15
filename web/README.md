@@ -89,6 +89,20 @@ only second realm available. Props, ref and events are identical either way;
 relative to the bundle). Several editors with one visible at a time stay inline
 — a frame costs another copy of the bundle.
 
+### The assistant is off
+
+The app's own AI panel does not render unless you ask for it with `ai`. Two
+reasons, and either one is enough: a host that embeds Sheets beside its own
+assistant wants one chat panel rather than two, and the channels the panel
+needs (`aiStream`, `aiChat`, `setAiSettings`, the attachment readers) are not
+among the ones this router serves — it would open onto 501s.
+
+Off removes every entry point, not just the panel: the ribbon's AI group, the
+prompt that follows a drag-selection, and Translate, which is an AI prompt
+behind a ribbon button. What stays is the context a host assistant needs —
+`onSelectionChange` reports what the user has selected, so your own panel can
+quote it.
+
 `theme` and `locale` are scoped to each editor's container, so two editors can
 differ and neither touches the host's `<html>`. Both take the host's own
 values: `theme` accepts `light` / `dark` / `dim` / `system` (`dim` has no

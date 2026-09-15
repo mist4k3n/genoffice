@@ -32,6 +32,7 @@ export function IsolatedSheets(props: SheetsEditorProps): React.JSX.Element {
     locale = 'en',
     visible = true,
     readOnly = false,
+    ai = false,
     frameSrc = DEFAULT_FRAME_SRC,
   } = props
 
@@ -57,7 +58,7 @@ export function IsolatedSheets(props: SheetsEditorProps): React.JSX.Element {
   }
 
   useEffect(() => {
-    configRef.current = { documentId, apiBase, theme, locale, readOnly, visible }
+    configRef.current = { documentId, apiBase, theme, locale, readOnly, ai, visible }
     const onMessage = (event: MessageEvent): void => {
       // Three checks, and all three matter: the right window, the right
       // origin, and our own tag. A page hears postMessage from extensions,
@@ -94,7 +95,7 @@ export function IsolatedSheets(props: SheetsEditorProps): React.JSX.Element {
     // `theme`, `locale` and `visible` ride the update effect below rather than
     // reopening the document; the rest identify it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentId, apiBase, readOnly, origin])
+  }, [documentId, apiBase, readOnly, ai, origin])
 
   useEffect(() => {
     const config = configRef.current

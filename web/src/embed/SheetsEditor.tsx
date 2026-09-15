@@ -55,6 +55,7 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
     locale = 'en',
     visible = true,
     readOnly = false,
+    ai = false,
   } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const [ready, setReady] = useState(false)
@@ -305,6 +306,7 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
           <LocaleProvider initial={lang} stampDocumentLang={false}>
             <App
               api={apiRef.current}
+              ai={ai}
               onRuntime={(runtime) => {
                 univerApiRef.current =
                   (runtime?.univerAPI as unknown as UniverApiLike | undefined) ?? null

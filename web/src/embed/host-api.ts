@@ -205,6 +205,21 @@ export interface SheetsEditorProps extends SheetsHostEvents {
    */
   readonly readOnly?: boolean | undefined
   /**
+   * Show the editor's own AI assistant.
+   *
+   * **Off by default**, which is the opposite of the desktop app, for two
+   * reasons. The channels it needs -- `aiStream`, `aiChat`, `setAiSettings`,
+   * the attachment and image readers -- are not among the ones this router
+   * serves, so the panel would open onto a wall of 501s. And a host that
+   * embeds Sheets beside its own assistant wants one chat panel, not two.
+   *
+   * Turning it off removes every entry point, not just the panel: the ribbon's
+   * AI group, the prompt that follows a drag-selection, and Translate, which
+   * is an AI prompt behind a ribbon button. What stays is the context a host
+   * assistant needs -- `onSelectionChange` reports what the user has selected.
+   */
+  readonly ai?: boolean | undefined
+  /**
    * Run this editor in its own frame.
    *
    * Needed only when two editors must be **visible at the same time** -- a

@@ -329,3 +329,50 @@ Both hunks are additive and sit next to the `csvSaveAsPath` they mirror; a
 conflict means upstream restructured the canceled branch, in which case keep
 `copyName` beside whatever `csvSaveAsPath` became. The dictionary inserts
 conflict only if upstream adds a key at the same line.
+
+---
+
+## Change 8 — the app's AI surface can be switched off
+
+**Files:** `apps/sheets/src/renderer/App.tsx`,
+`apps/sheets/src/renderer/ExcelShell.tsx`.
+
+### Why
+
+Papan has its own assistant. Embedded, the app's AI panel would put a second
+chat panel on the page beside Papan's, which is confusing in the best case and
+contradictory in the worst — two assistants that cannot see each other's turns,
+editing the same workbook.
+
+It would also not work. The channels the panel needs — `aiStream`,
+`aiStreamCancel`, `onAiStream`, `aiChat`, `setAiSettings`, `aiGskLogin`, and
+the attachment and image readers behind the composer — are all still `todo` in
+`web/src/host/coverage.ts`. The panel would open onto 501s.
+
+### What changed
+
+`AppProps` gains `ai?: boolean`, defaulting to `true`, which is the desktop
+app. It is threaded to `ExcelShell` as `aiEnabled` and gates every AI entry
+point, not just the panel:
+
+- the `AiChatPanel` mount,
+- the Home ribbon's **AI Assistant** group (the assistant button, *Check*,
+  *Analyze*),
+- the Review ribbon's **Language** group — Translate is an AI prompt behind a
+  ribbon button, so it goes with the rest,
+- the prompt that appears after a drag-selection (`AiSelectionAsk`),
+- the `ai-open-panel` / `ai-toggle-panel` commands, so a keyboard route or a
+  host command cannot open a panel that is not there,
+- the `ai-sheets-show-ai` seed, so the persisted "open" state does not reserve
+  the panel's column,
+- the `aiGskStatus()` probe, which otherwise runs on mount and on every window
+  focus for a value nothing reads.
+
+An entry point that opens nothing is worse than no entry point, which is why
+this hides all of them rather than only the panel.
+
+### Rebasing
+
+Every hunk is a `{aiEnabled && …}` wrapper or a defaulted prop; none changes
+behaviour when the flag is true. A conflict means upstream moved one of those
+surfaces, in which case wrap it where it landed.

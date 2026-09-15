@@ -1628,6 +1628,14 @@ button.check-item:hover {
   grid-template-columns: 34px minmax(0, 1fr);
 }
 
+/* With the assistant off there is no panel and no collapsed rail, so the grid
+ * takes the whole row -- otherwise the sheet lands in the AI column and is
+ * sized by --copilot-width. */
+.app-shell.ai-off .sheet-body,
+.app-shell.ai-off.copilot-collapsed .sheet-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .spreadsheet {
   min-width: 0;
   min-height: 0;
