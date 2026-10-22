@@ -311,20 +311,27 @@ that is not saved.
 
 ## C. Unserved channels — [us], scope decision
 
-`src/host/coverage.ts` is the authority; 26 methods are still `todo`. Six are
-AI and are switched off by default (Papan has its own assistant — see
-`UPSTREAM-CHANGES.md`, Change 8); two are desktop screen capture and will never
-apply. The remaining eighteen, by what they cost Papan:
+`src/host/coverage.ts` is the authority; **39** methods are now `todo`, up from
+26, because the 2026-10 upstream merge added 22 methods to `DesktopApi`.
+Eleven of the 39 are AI or skills and are switched off by default (Papan has
+its own assistant — see `UPSTREAM-CHANGES.md`, Change 8); two are desktop
+screen capture and will never apply; two are the desktop MCP bridge and have no
+web counterpart at all. The rest, by what they cost Papan:
 
-| Group        | Methods                                                                                       | Why it matters                                           |
-| ------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Export       | `exportPdf`, `exportCsv`                                                                      | "Download as PDF/CSV" answers 501 today                  |
-| Create       | `createDocument`                                                                              | "New spreadsheet"                                        |
-| Recovery     | `writeWorkbookRecovery`, `replyRecoveryPrompt`, `reportCloseSaveResult`                       | Pairs with B9; without them the prompt has nowhere to go |
-| Host dialogs | `autoRenameWorkbook`, `confirmCsvSave`                                                        | Small; map to Papan flows the way Save As did            |
-| Merge        | `selectWorkbooksForMerge`, `openWorkbooksForMerge`                                            | A whole feature. Drop it or build it                     |
-| Media        | `readLocalImage`, `addPastedImage`, `fetchImage`, `webSearch`, `imageSearch`, `generateImage` | Only if Papan wants image insert                         |
-| Attachments  | `pickAttachments`, `addAttachmentPaths`, `readAttachment`, `readAttachmentImage`              | Composer attachments; AI-adjacent                        |
+| Group        | Methods                                                                                       | Why it matters                                                                                                                                                               |
+| ------------ | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Export       | `exportPdf`, `exportCsv`                                                                      | "Download as PDF/CSV" answers 501 today                                                                                                                                      |
+| Create       | `createDocument`                                                                              | "New spreadsheet"                                                                                                                                                            |
+| Recovery     | `writeWorkbookRecovery`, `replyRecoveryPrompt`, `reportCloseSaveResult`                       | Pairs with B9; without them the prompt has nowhere to go                                                                                                                     |
+| Host dialogs | `autoRenameWorkbook`, `confirmCsvSave`                                                        | Small; map to Papan flows the way Save As did                                                                                                                                |
+| Merge        | `selectWorkbooksForMerge`, `openWorkbooksForMerge`                                            | A whole feature. Drop it or build it                                                                                                                                         |
+| Media        | `readLocalImage`, `addPastedImage`, `fetchImage`, `webSearch`, `imageSearch`, `generateImage` | Only if Papan wants image insert                                                                                                                                             |
+| Attachments  | `pickAttachments`, `addAttachmentPaths`, `readAttachment`, `readAttachmentImage`              | Composer attachments; AI-adjacent                                                                                                                                            |
+| Printing     | `printWorkbook`, `listPrinters`, `headlessExportDone`                                         | New upstream; the web answer is export-PDF plus the browser's own print                                                                                                      |
+| Find         | `findWorkbookCells`                                                                           | New upstream: Find run **inside the engine** over the file's chunk index rather than over the viewport. The streamed-workbook case, which on the web is every heavy workbook |
+| Crash        | `reopenWorkbook`                                                                              | New upstream, and the other half of `onSidecarCrashed`: see D3                                                                                                               |
+| Outline      | `readWorkbookRowOutline`                                                                      | New upstream; a sidecar read like the ones already served                                                                                                                    |
+| Shell nav    | `openSourcePath`, `getDocumentTheme`                                                          | Shell file navigation and the dark-page setting; a host routes its own documents and owns its own theme                                                                      |
 
 `selectWorkbook` appears in the `todo` list for a different reason — it is
 served, but as "the document this connection is authorised for" rather than as
@@ -332,6 +339,11 @@ a file dialog.
 
 None of these block a document opening. They block specific buttons, so the
 decision is which buttons Papan ships in its first version.
+
+Three of them arrived with something to build _against_, which is new: the
+merge brought a sidecar-side Find, a positive sidecar-crash signal with a
+re-open path, and a headless-export handshake that is the shape `exportPdf`
+needs. Those are worth taking before the long tail of dialogs.
 
 ---
 
@@ -358,6 +370,18 @@ different cells never satisfy that, so each evicts the other and the workbook
 reloads. Latent today (two sessions, two snapshots); **not latent once
 `localPath()` is on**, which is B1. Correctness is safe; cost is not.
 `FINDINGS-COLLAB.md` §4.
+
+### D3b. A sidecar crash is now knowable, not inferable
+
+Upstream added `onSidecarCrashed` (a positive signal: every session id the
+renderer holds is gone) and `reopenWorkbook` (re-open a known path through the
+normal open path) in 2026-10. Our server infers a dead engine from a session
+guard's error text, which is the same answer it gives for a Save swap and for a
+closed workbook — three different situations, one message.
+
+The engine pool already knows when a process dies. Pushing that, and serving
+the re-open, turns recovery from a guess into a protocol. `coverage.ts` carries
+both as `todo` with a note pointing here.
 
 ### D3. Per-connection memory
 
