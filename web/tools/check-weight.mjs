@@ -113,6 +113,23 @@ function largestChunk(root) {
 
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`
 
+/**
+ * Library mode inlines every asset it is not told otherwise about, and a
+ * font inlined into a chunk is a base64 copy of a file the stylesheet already
+ * loads. It happened once, silently: upstream moved its canvas font fallback
+ * to a `?url` import, and 1.7 MB of base64 appeared in the editor chunk.
+ */
+for (const dir of [join(webRoot, 'dist'), join(webRoot, 'dist', 'chunks')]) {
+  for (const file of readdirSync(dir).filter((name) => name.endsWith('.js'))) {
+    const inlined = readFileSync(join(dir, file), 'utf8').match(/data:font\/[a-z0-9]+;base64/g)
+    if (inlined) {
+      failures.push(
+        `${file} carries ${inlined.length} base64 font(s) -- vite.lib.config.ts's fontsAsFiles has stopped covering an import`,
+      )
+    }
+  }
+}
+
 console.log('building two host applications …')
 const baseline = scaffold(
   'baseline',

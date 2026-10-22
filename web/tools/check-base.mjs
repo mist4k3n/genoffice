@@ -97,10 +97,21 @@ async function get(url, referrer) {
 const HTML_REF = /(?:src|href)="([^"]+)"/g
 const CSS_URL = /url\(\s*['"]?([^'")]+)['"]?\s*\)/g
 /**
- * The literal that upstream's `new URL('./fonts/…', import.meta.url)` leaves.
- * All three quote characters: the minifier rewrites it as a template literal.
+ * A font URL the JavaScript resolves against its own chunk at runtime --
+ * `new URL('fonts/Carlito-Regular.ttf', import.meta.url)`, which is what the
+ * bundler makes of upstream's `?url` imports. Matched by the `new URL(` around
+ * it rather than by a leading `./`: the pattern used to require one, the
+ * bundler stopped writing it after the 2026-10 merge, and this branch of the
+ * check then matched nothing and passed. All three quote characters, because
+ * the minifier writes template literals.
  */
-const JS_FONT = /["'`](\.\/fonts\/[A-Za-z0-9._-]+\.ttf)["'`]/g
+const JS_FONT =
+  /new URL\(\s*["'`]((?:\.{1,2}\/)?[A-Za-z0-9._/-]*\.ttf)["'`]\s*,\s*import\.meta\.url/g
+/**
+ * The same reference under an absolute `SHEETS_WEB_BASE`, where the bundler
+ * has nothing to resolve at runtime and writes the finished path as a string.
+ */
+const JS_FONT_ABSOLUTE = /["'`](\/[A-Za-z0-9._/-]*\.ttf)["'`]/g
 
 async function checkPage(origin, page) {
   const pageUrl = new URL(PREFIX + page, origin).href
@@ -124,7 +135,10 @@ async function checkPage(origin, page) {
       }
     }
     if (url.endsWith('.js')) {
-      const targets = new Set([...body.matchAll(JS_FONT)].map((match) => match[1]))
+      const targets = new Set(
+        [...body.matchAll(JS_FONT), ...body.matchAll(JS_FONT_ABSOLUTE)].map((match) => match[1]),
+      )
+      jsFontRefs += targets.size
       for (const target of targets) {
         await get(new URL(target, url).href, `${page} -> ${ref}`)
       }
@@ -132,13 +146,24 @@ async function checkPage(origin, page) {
   }
 }
 
+let jsFontRefs = 0
+
 async function run(label, base) {
   build(base)
+  jsFontRefs = 0
   const server = await serve(join(webRoot, 'src', 'dist'))
   const { port } = server.address()
   const before = failures.length
   for (const page of pages) await checkPage(`http://127.0.0.1:${port}`, page)
   server.close()
+  // The canvas font fallback resolves two faces from JavaScript. If no page
+  // references any, the pattern above has drifted from what the bundler
+  // writes, and this check is passing because it is no longer looking.
+  if (jsFontRefs === 0) {
+    failures.push(
+      `${label}: found no font URL in any script -- JS_FONT no longer matches the bundle`,
+    )
+  }
   const broken = failures.length - before
   console.log(`  ${label}: ${broken === 0 ? 'ok' : `${broken} broken reference(s)`}`)
 }

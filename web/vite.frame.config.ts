@@ -54,9 +54,8 @@ export default defineConfig({
     rollupOptions: {
       input: { 'sheets-frame': resolve(here, 'src/sheets-frame.html') },
       output: {
-        // `assets/fonts/`, unhashed, for the reason in vite.config.ts: the
-        // canvas font fallback builds two of these URLs at runtime, relative
-        // to the chunk that asked, and the chunks are in `assets/`.
+        // `assets/fonts/`, unhashed, with the OFL text beside them -- the
+        // same layout as the page build; see vite.config.ts for why.
         assetFileNames: (asset) =>
           asset.names.some((name) => name.endsWith('.ttf'))
             ? 'assets/fonts/[name][extname]'

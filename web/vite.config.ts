@@ -44,16 +44,20 @@ export default defineConfig({
       },
       output: {
         /**
-         * The font faces go in `assets/fonts/`, unhashed, because upstream's
-         * canvas font fallback builds two of these URLs itself -- `new
-         * URL('./fonts/Carlito-Regular.ttf', import.meta.url)` in
-         * `cell-font-fallback.ts`, resolved at runtime against the chunk that
-         * asked. Chunks live in `assets/`, so this is where that URL points.
-         * They feed the width-corrected aliases for Dosis and Aptos Narrow,
-         * and Aptos Narrow is what Excel 365 gives a new workbook.
+         * The font faces go in `assets/fonts/`, unhashed: one stable,
+         * documented place for them, with their OFL text beside them.
          *
-         * A literal path cannot carry a content hash. These four files are
-         * immutable, and the stylesheet that also references them is hashed.
+         * This was once forced. Upstream's canvas font fallback built two of
+         * these URLs at runtime -- `new URL('./fonts/Carlito-Regular.ttf',
+         * import.meta.url)` -- so the files had to sit exactly there. In
+         * 2026-10 upstream switched to `?url` imports, which the bundler
+         * resolves wherever the files land, so the layout is now a choice.
+         * The faces feed the width-corrected aliases for Dosis and Aptos
+         * Narrow, the font Excel 365 gives a new workbook; `npm run
+         * check:base` fetches both through the URLs the scripts carry.
+         *
+         * Unhashed costs cache-busting on a font change. These are four
+         * immutable files, and the stylesheet that references them is hashed.
          */
         assetFileNames: (asset) =>
           asset.names.some((name) => name.endsWith('.ttf'))

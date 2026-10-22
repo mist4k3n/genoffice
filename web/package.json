@@ -1,6 +1,6 @@
 {
   "name": "@mist4k3n/sheets-web",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Browser delivery of GenOffice Sheets. Additive-only fork delta; see PLAN.md.",

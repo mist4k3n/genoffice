@@ -78,14 +78,22 @@ pages -- sets it at build time and gets exactly that:
 SHEETS_WEB_BASE=https://cdn.papan.example/sheets/ npm run build:app
 ```
 
-The faces also moved to `assets/fonts/`, unhashed, for the reason recorded
-under A1: upstream's canvas font fallback builds two font URLs in JavaScript
-rather than CSS -- `new URL('./fonts/Carlito-Regular.ttf', import.meta.url)` in
-`cell-font-fallback.ts` -- resolved at runtime against the chunk that asked.
-Chunks live in `assets/`, so that is where those files have to be. They feed
-the width-corrected aliases for **Dosis** and **Aptos Narrow**, and Aptos
-Narrow is what Excel 365 gives a new workbook, so a 404 there is wrong cell
-widths on documents Papan will certainly have.
+The faces live in `assets/fonts/`, unhashed, with their OFL text beside them.
+That layout was originally forced: upstream's canvas font fallback built two
+font URLs at runtime -- `new URL('./fonts/Carlito-Regular.ttf',
+import.meta.url)` -- and the files had to sit exactly where that pointed. The
+2026-10 upstream merge replaced it with `?url` imports, which the bundler
+resolves, so the layout is now a choice rather than a constraint. Those two
+faces feed the width-corrected aliases for **Dosis** and **Aptos Narrow**, and
+Aptos Narrow is what Excel 365 gives a new workbook, so a 404 there is wrong
+cell widths on documents Papan will certainly have; `npm run check:base`
+fetches both through the URLs the scripts actually carry.
+
+The same import surfaced a library-build problem the merge review missed:
+library mode inlines every asset it is not told otherwise about, and those two
+faces landed in the editor chunk as 1.7 MB of base64, duplicating the files the
+stylesheet already loads. `vite.lib.config.ts` emits them as files now, and
+`npm run check:weight` fails if a font is ever inlined again.
 
 **One thing a relative base asks of the host.** It resolves against the
 _document's_ URL, so a page served at `/sheets/frame` (no extension, no
