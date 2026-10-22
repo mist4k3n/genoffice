@@ -49,8 +49,10 @@ export interface McpSheetHandlers {
 }
 
 /// `api` is this editor's host bridge (UPSTREAM-CHANGES.md, Change 1). On the
-/// web it is a no-op bridge: the MCP channels have no web counterpart, so
-/// `onMcpCommand` is absent there and this returns without subscribing.
+/// web the MCP channels have no counterpart, but the bridge still installs:
+/// `onMcpCommand` is a no-op subscription there, so nothing ever arrives, and
+/// `signalMcpReady` / `reportMcpResult` are answered as no-op sends. The guard
+/// below only matters to a host that omits the method entirely.
 export function installSheetsMcpBridge(handlers: McpSheetHandlers, api: DesktopApi): () => void {
   if (typeof api?.onMcpCommand !== 'function') return () => {}
 

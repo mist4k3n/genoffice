@@ -23,8 +23,11 @@
    *
    * The main process overwrites this value on every renderer from
    * `app-settings.json` (`uiScale`); 1 is "no scaling". The override is an
-   * inline style on <html> (apps/shell/src/main/ui-scale.ts), so it outranks
-   * this rule whichever selector carries it. */
+   * inline style on <html> (apps/shell/src/main/ui-scale.ts), which beats this
+   * rule on <html> itself -- but not on a descendant: an element matching
+   * [data-theme='light'] below <html> would reset the scale to 1 for its
+   * subtree. Nothing on the desktop carries the attribute below <html>, and an
+   * embedding host never sets --ui-scale, so both cases resolve correctly. */
   --ui-scale: 1;
 
   /* chrome */

@@ -4,7 +4,7 @@ import {
   AiModelPicker,
   type AiModelPickerBridge,
 } from '@genoffice/ui'
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AiComposer,
   AiQueueStrip,
@@ -331,6 +331,11 @@ export function AiChatPanel({
   readonly onCollapse: () => void
 }): React.JSX.Element {
   const hostApi = useHostApi()
+  // Memoized, not rebuilt per render: AiModelPicker keys its refresh effect on
+  // the bridge's identity, so a new object each render re-fetched the settings
+  // and resubscribed on every keystroke in the composer. Upstream's module-level
+  // constant was stable by construction; this keeps that property per editor.
+  const pickerBridge = useMemo(() => modelBridge(hostApi), [hostApi])
   const { t, lang } = useI18n()
   /** messages queued while a reply runs; the pump re-sends them through onSend on settle */
   const msgQueue = useChatRunQueue<readonly AttachmentMeta[]>({
@@ -913,7 +918,7 @@ export function AiChatPanel({
           stopIcon={<img src={sendStop} alt="" aria-hidden />}
           footerStart={
             <>
-              <AiModelPicker bridge={modelBridge(hostApi)} lang={lang} />
+              <AiModelPicker bridge={pickerBridge} lang={lang} />
               {sessionUsage && <AiUsageChip usage={sessionUsage} session lang={lang} />}
               <AiSkillsMenu
                 lang={lang}
