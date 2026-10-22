@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
+import { thirdPartyNotices } from './tools/license-notices'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 
@@ -62,7 +64,17 @@ export default defineConfig({
       },
     },
   },
-  plugins: [react()],
+  plugins: [
+    react(),
+    thirdPartyNotices({
+      fileName: 'THIRD-PARTY-NOTICES.txt',
+      supplements: resolve(here, 'licenses'),
+      fontLicense: {
+        source: resolve(repoRoot, 'apps/docs/src/renderer/fonts/LICENSE-OFL.txt'),
+        fileName: 'assets/fonts/LICENSE-OFL.txt',
+      },
+    }),
+  ],
   resolve: {
     dedupe: ['react', 'react-dom'],
   },

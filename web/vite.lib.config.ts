@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
 
+import { thirdPartyNotices } from './tools/license-notices'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 
@@ -96,7 +98,18 @@ export default defineConfig({
       },
     },
   },
-  plugins: [fontsAsFiles(), react()],
+  plugins: [
+    fontsAsFiles(),
+    react(),
+    thirdPartyNotices({
+      fileName: 'THIRD-PARTY-NOTICES.txt',
+      supplements: resolve(here, 'licenses'),
+      fontLicense: {
+        source: resolve(repoRoot, 'apps/docs/src/renderer/fonts/LICENSE-OFL.txt'),
+        fileName: 'fonts/LICENSE-OFL.txt',
+      },
+    }),
+  ],
   resolve: {
     // Same reason as the page build: one React instance. Workspace packages
     // are symlinks, and without this both the renderer and @genoffice/ui can

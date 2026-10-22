@@ -1,0 +1,28 @@
+@mist4k3n/sheets-web
+Copyright 2026 Elyas Asmad
+
+This package is built from a fork of GenOffice
+(https://github.com/genspark-ai/genoffice) and bundles GenOffice code, some of
+it modified to run in a browser and to be embedded several times on one page.
+Every change to an upstream file is listed, with the reason for it, in
+web/UPSTREAM-CHANGES.md at https://github.com/mist4k3n/genoffice.
+
+Third-party software bundled in this package, and the license text each one
+requires, is listed in dist/THIRD-PARTY-NOTICES.txt (the editor) and
+dist/frame/THIRD-PARTY-NOTICES.txt (the frame page). Both are generated from the
+module graph of the build that produced them. The bundled Carlito font faces
+are licensed under the SIL Open Font License 1.1, reproduced beside them in
+dist/fonts/LICENSE-OFL.txt and dist/frame/assets/fonts/LICENSE-OFL.txt.
+
+The GenOffice NOTICE attribution, as required by section 4(d) of the Apache
+License, follows. The remainder of that NOTICE describes components this
+package does not bundle -- the desktop installer's own notices file, the
+downloadable font catalogue, Unicode data used by the PDF app, and test-only
+XML schemas -- and is omitted as not pertaining to it.
+
+-------------------------------------------------------------------------------
+
+GenOffice
+Copyright 2026 Mainfunc, Inc.
+
+This product includes software developed at Mainfunc, Inc.

@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "description": "Browser delivery of GenOffice Sheets. Additive-only fork delta; see PLAN.md.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mist4k3n/genoffice.git",
+    "directory": "web"
+  },
   "main": "./dist/sheets-web.js",
   "module": "./dist/sheets-web.js",
   "types": "./dist/sheets-web.d.ts",
@@ -17,7 +23,9 @@
     "./sheets-frame.html": "./dist/frame/sheets-frame.html"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "NOTICE"
   ],
   "sideEffects": [
     "**/*.css"
@@ -65,6 +73,7 @@
     "@types/node": "^22.20.2",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.1.1",
+    "hono": "^4.13.13",
     "rollup": "^4.63.3",
     "rollup-plugin-dts": "^6.5.1",
     "tsx": "^4.23.13",
@@ -76,7 +85,6 @@
     "esbuild@0.28.2": true
   },
   "dependencies": {
-    "hono": "^4.13.7",
     "zod": "^4.3.6"
   }
 }
