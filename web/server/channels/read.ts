@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
-import { readArchiveEntryText } from '../../../apps/sheets/src/gateway/xlsx-package-io'
-import { parsePivotDefinition } from '../../../apps/sheets/src/gateway/xlsx-pivot'
+import { readArchiveEntryText } from '@genoffice/xlsx-gateway/gateway/xlsx-package-io'
+import { parsePivotDefinition } from '@genoffice/xlsx-gateway/gateway/xlsx-pivot'
 import {
   workbookFormulaCellsRequestSchema,
   workbookFormulaCellsResultSchema,

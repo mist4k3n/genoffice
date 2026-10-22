@@ -10,6 +10,9 @@ import type { UpdateUiState } from '../src/shared/update-api'
 const appState = { isPackaged: true }
 
 const openExternal = vi.hoisted(() => vi.fn())
+const showMessageBox = vi.hoisted(() =>
+  vi.fn<(opts: unknown) => Promise<{ response: number }>>(() => Promise.resolve({ response: 0 })),
+)
 const readFileSyncMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => string>())
 
 vi.mock('electron', () => ({
@@ -21,6 +24,9 @@ vi.mock('electron', () => ({
   },
   shell: {
     openExternal: (url: string) => openExternal(url),
+  },
+  dialog: {
+    showMessageBox: (opts: unknown) => showMessageBox(opts),
   },
 }))
 
@@ -39,16 +45,25 @@ const updaterState = {
   allowDowngrade: false,
 }
 const checkForUpdates = vi.fn(() => Promise.resolve(null))
-const downloadUpdate = vi.fn<() => Promise<unknown>>(() => Promise.resolve([]))
+const downloadUpdate = vi.fn<(token?: FakeCancellationToken) => Promise<unknown>>(() =>
+  Promise.resolve([]),
+)
+class FakeCancellationToken {
+  cancelled = false
+  cancel(): void {
+    this.cancelled = true
+  }
+}
 const quitAndInstall = vi.fn()
 
 vi.mock('electron-updater', () => ({
+  CancellationToken: FakeCancellationToken,
   autoUpdater: {
     on: (event: string, listener: Listener) => {
       updaterState.listeners.set(event, listener)
     },
     checkForUpdates: () => checkForUpdates(),
-    downloadUpdate: () => downloadUpdate(),
+    downloadUpdate: (token?: FakeCancellationToken) => downloadUpdate(token),
     quitAndInstall: (...args: unknown[]) => quitAndInstall(...(args as [boolean, boolean])),
     set autoDownload(v: boolean) {
       updaterState.autoDownload = v
@@ -93,6 +108,9 @@ vi.mock('../src/main/update-window', () => ({
   showUpdateWindow: (...args: [unknown, UpdateUiState, UpdateActions]) => showUpdateWindow(...args),
   pushUpdateState: (patch: Partial<UpdateUiState>) => pushUpdateState(patch),
   closeUpdateWindow: () => closeUpdateWindow(),
+  isUpdateWindowOpen: () => false,
+  setUpdateParentWindow: () => {},
+  clearUpdateState: () => closeUpdateWindow(),
 }))
 
 const FIRST_CHECK_DELAY_MS = 15_000
@@ -144,6 +162,8 @@ beforeEach(() => {
   pushUpdateState.mockClear()
   closeUpdateWindow.mockClear()
   openExternal.mockClear()
+  showMessageBox.mockReset()
+  showMessageBox.mockImplementation(() => Promise.resolve({ response: 0 }))
   readFileSyncMock.mockReset()
   readFileSyncMock.mockImplementation(() => {
     throw new Error('no app-update.yml')
@@ -315,6 +335,76 @@ describe('initAutoUpdater', () => {
     expect(updaterState.channel).toBe('latest')
     expect(updaterState.allowDowngrade).toBe(false)
     expect(checkForUpdates).toHaveBeenCalledTimes(2)
+  })
+
+  it('applyUpdateChannel drops a downloaded package of the previous channel', async () => {
+    const { initAutoUpdater, applyUpdateChannel } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    updaterState.listeners.get('update-downloaded')!({ version: '0.2.0' })
+    expect(updaterState.autoInstallOnAppQuit).toBe(true)
+    lastShownActions().onLater()
+
+    applyUpdateChannel('beta')
+    // the stale package must not install on quit or via a stale window action
+    expect(updaterState.autoInstallOnAppQuit).toBe(false)
+    lastShownActions().onInstall()
+    vi.advanceTimersByTime(0)
+    expect(quitAndInstall).not.toHaveBeenCalled()
+
+    // the new channel's version is offered from scratch, not swallowed
+    available({ version: '0.3.0-beta.1' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(2)
+    expect(lastShownState().phase).toBe('available')
+    expect(lastShownState().version).toBe('0.3.0-beta.1')
+    lastShownActions().onDownload()
+    expect(downloadUpdate).toHaveBeenCalledTimes(2)
+    // a late completion of the old channel's download is ignored
+    updaterState.listeners.get('update-downloaded')!({ version: '0.2.0' })
+    expect(pushUpdateState).not.toHaveBeenLastCalledWith({ phase: 'downloaded', percent: 100 })
+    updaterState.listeners.get('update-downloaded')!({ version: '0.3.0-beta.1' })
+    expect(pushUpdateState).toHaveBeenLastCalledWith({ phase: 'downloaded', percent: 100 })
+    expect(updaterState.autoInstallOnAppQuit).toBe(true)
+    lastShownActions().onInstall()
+    vi.advanceTimersByTime(0)
+    expect(quitAndInstall).toHaveBeenCalledWith(true, true)
+  })
+
+  it('applyUpdateChannel cancels an in-flight download and shields the new one from its leftovers', async () => {
+    let rejectOld: (err: Error) => void = () => {}
+    downloadUpdate.mockImplementationOnce(() => new Promise((_, reject) => (rejectOld = reject)))
+    downloadUpdate.mockImplementation(() => new Promise(() => {}))
+    const { initAutoUpdater, applyUpdateChannel } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    updaterState.listeners.get('download-progress')!({ percent: 37 })
+    const oldToken = downloadUpdate.mock.calls[0][0]!
+
+    applyUpdateChannel('beta')
+    expect(closeUpdateWindow).toHaveBeenCalledTimes(1)
+    expect(oldToken.cancelled).toBe(true)
+    // progress still trickling out of the dropped request is ignored
+    updaterState.listeners.get('download-progress')!({ percent: 40 })
+    expect(pushUpdateState).not.toHaveBeenCalledWith({ phase: 'downloading', percent: 40 })
+
+    available({ version: '0.3.0-beta.1' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(2)
+    expect(lastShownState().phase).toBe('available')
+    expect(lastShownState().percent).toBe(0)
+    lastShownActions().onDownload()
+    expect(downloadUpdate).toHaveBeenCalledTimes(2)
+    expect(downloadUpdate.mock.calls[1][0]).not.toBe(oldToken)
+
+    // the dropped request's late rejection must not fail the new download
+    rejectOld(new Error('cancelled'))
+    await flushAsync()
+    expect(pushUpdateState).not.toHaveBeenCalledWith({ phase: 'error' })
+    updaterState.listeners.get('download-progress')!({ percent: 5 })
+    expect(pushUpdateState).toHaveBeenLastCalledWith({ phase: 'downloading', percent: 5 })
   })
 
   it('applyUpdateChannel is a no-op before the real updater is active', async () => {
@@ -515,5 +605,220 @@ describe('initAutoUpdater (fake update preview)', () => {
     lastShownActions().onInstall()
     expect(closeUpdateWindow).toHaveBeenCalledTimes(2)
     expect(quitAndInstall).not.toHaveBeenCalled()
+  })
+})
+
+describe('checkForUpdatesNow (r148 manual check)', () => {
+  function lastDialogOpts(): { type: string; message: string; buttons: string[] } {
+    return showMessageBox.mock.calls.at(-1)![0] as never
+  }
+
+  it('points installs without a self-update mechanism at the download page', async () => {
+    appState.isPackaged = false
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    showMessageBox.mockImplementation(() => Promise.resolve({ response: 1 }))
+
+    await checkForUpdatesNow()
+
+    expect(showMessageBox).toHaveBeenCalledTimes(1)
+    expect(lastDialogOpts().buttons.length).toBe(2)
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/genspark-ai/genoffice/releases/latest',
+    )
+    expect(checkForUpdates).not.toHaveBeenCalled()
+  })
+
+  it("shows you're-up-to-date (with the current version) when nothing newer exists", async () => {
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    checkForUpdates.mockImplementation(() => Promise.resolve({ isUpdateAvailable: false } as never))
+
+    await checkForUpdatesNow()
+
+    expect(showMessageBox).toHaveBeenCalledTimes(1)
+    expect(lastDialogOpts().type).toBe('info')
+    expect(lastDialogOpts().message).toContain('0.1.0')
+    expect(showUpdateWindow).not.toHaveBeenCalled()
+  })
+
+  it('does not report up-to-date when the updater skips the check', async () => {
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    checkForUpdates.mockImplementation(() => Promise.resolve(null))
+    await checkForUpdatesNow()
+    expect(lastDialogOpts().type).toBe('warning')
+    expect(showUpdateWindow).not.toHaveBeenCalled()
+    expect(downloadUpdate).not.toHaveBeenCalled()
+  })
+
+  it('ignores duplicate clicks while checking and allows a retry afterwards', async () => {
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    let resolveCheck!: (value: null) => void
+    checkForUpdates.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCheck = resolve
+        }),
+    )
+    const pending = checkForUpdatesNow()
+    await checkForUpdatesNow()
+    expect(checkForUpdates).toHaveBeenCalledTimes(1)
+    expect(showMessageBox).not.toHaveBeenCalled()
+    resolveCheck(null)
+    await pending
+    await checkForUpdatesNow()
+    expect(checkForUpdates).toHaveBeenCalledTimes(2)
+    expect(downloadUpdate).not.toHaveBeenCalled()
+  })
+
+  it('re-offers a version the user dismissed with "later" this session', async () => {
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    updaterState.listeners.get('update-available')!({ version: '0.2.0' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(1)
+    lastShownActions().onLater()
+    // background recheck stays quiet for the dismissed version…
+    updaterState.listeners.get('update-available')!({ version: '0.2.0' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(1)
+    // …but an explicit user check offers it again, with no extra dialog
+    checkForUpdates.mockImplementation(() => {
+      updaterState.listeners.get('update-available')!({ version: '0.2.0' })
+      return Promise.resolve({ isUpdateAvailable: true } as never)
+    })
+
+    await checkForUpdatesNow()
+
+    expect(showUpdateWindow).toHaveBeenCalledTimes(2)
+    expect(showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('resumes a downloaded update at Restart & Install instead of re-offering the download', async () => {
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    updaterState.listeners.get('update-downloaded')!({ version: '0.2.0' })
+    lastShownActions().onLater()
+    checkForUpdates.mockImplementation(() => {
+      available({ version: '0.2.0' })
+      return Promise.resolve({ isUpdateAvailable: true } as never)
+    })
+
+    await checkForUpdatesNow()
+
+    expect(showUpdateWindow).toHaveBeenCalledTimes(2)
+    expect(lastShownState().phase).toBe('downloaded')
+    expect(lastShownState().percent).toBe(100)
+    lastShownActions().onDownload()
+    expect(downloadUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('resumes an in-flight download with its progress and does not start a second one', async () => {
+    downloadUpdate.mockImplementation(() => new Promise(() => {}))
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    updaterState.listeners.get('download-progress')!({ percent: 37 })
+    lastShownActions().onLater()
+    checkForUpdates.mockImplementation(() => {
+      available({ version: '0.2.0' })
+      return Promise.resolve({ isUpdateAvailable: true } as never)
+    })
+
+    await checkForUpdatesNow()
+
+    expect(lastShownState().phase).toBe('downloading')
+    expect(lastShownState().percent).toBe(37)
+    lastShownActions().onDownload()
+    expect(downloadUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves a newer version alone while the previous one is downloading or downloaded', async () => {
+    downloadUpdate.mockImplementation(() => new Promise(() => {}))
+    const { initAutoUpdater } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    available({ version: '0.3.0' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(1)
+    updaterState.listeners.get('update-downloaded')!({ version: '0.2.0' })
+    available({ version: '0.3.0' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(1)
+    lastShownActions().onDownload()
+    expect(downloadUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('brings back the in-progress flow when a manual check finds a newer version mid-download', async () => {
+    downloadUpdate.mockImplementation(() => new Promise(() => {}))
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    updaterState.listeners.get('download-progress')!({ percent: 58 })
+    lastShownActions().onLater()
+    // background recheck with a newer version stays quiet…
+    available({ version: '0.3.0' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(1)
+    // …an explicit check re-opens the download that is already running
+    checkForUpdates.mockImplementation(() => {
+      available({ version: '0.3.0' })
+      return Promise.resolve({ isUpdateAvailable: true } as never)
+    })
+
+    await checkForUpdatesNow()
+
+    expect(showUpdateWindow).toHaveBeenCalledTimes(2)
+    expect(lastShownState().version).toBe('0.2.0')
+    expect(lastShownState().phase).toBe('downloading')
+    expect(lastShownState().percent).toBe(58)
+    expect(showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('offers a newer version from scratch after the previous download failed', async () => {
+    downloadUpdate.mockImplementation(() => Promise.reject(new Error('offline')))
+    const { initAutoUpdater } = await loadUpdater()
+    initAutoUpdater(() => null)
+    const available = updaterState.listeners.get('update-available')!
+    available({ version: '0.2.0' })
+    lastShownActions().onDownload()
+    await flushAsync()
+    expect(pushUpdateState).toHaveBeenCalledWith({ phase: 'error' })
+    available({ version: '0.3.0' })
+    expect(showUpdateWindow).toHaveBeenCalledTimes(2)
+    expect(lastShownState().version).toBe('0.3.0')
+    expect(lastShownState().phase).toBe('available')
+    expect(lastShownState().percent).toBe(0)
+  })
+
+  it('shows the failure dialog when the check itself fails', async () => {
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+    checkForUpdates.mockImplementation(() => Promise.reject(new Error('offline')))
+
+    await checkForUpdatesNow()
+
+    expect(showMessageBox).toHaveBeenCalledTimes(1)
+    expect(lastDialogOpts().type).toBe('warning')
+    expect(showUpdateWindow).not.toHaveBeenCalled()
+  })
+
+  it('re-shows the simulated update window in GENOFFICE_FAKE_UPDATE runs', async () => {
+    appState.isPackaged = false
+    process.env.GENOFFICE_FAKE_UPDATE = '9.9.9'
+    const { initAutoUpdater, checkForUpdatesNow } = await loadUpdater()
+    initAutoUpdater(() => null)
+
+    await checkForUpdatesNow()
+
+    expect(showUpdateWindow).toHaveBeenCalledTimes(1)
+    expect(lastShownState().version).toBe('9.9.9')
+    expect(showMessageBox).not.toHaveBeenCalled()
   })
 })

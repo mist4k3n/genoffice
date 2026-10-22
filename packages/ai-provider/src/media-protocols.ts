@@ -10,7 +10,9 @@
  */
 
 import { aiFetch } from './fetch'
+import { endpointUrl } from './protocols/shared'
 import { httpBodyDetail } from './http-error'
+import { openAiContentText, readCappedResponseText } from './protocols/shared'
 import {
   DASHSCOPE_BASE_URL,
   GEMINI_MEDIA_BASE_URL,
@@ -32,6 +34,9 @@ export interface GenerateImageInput {
   aspectRatio?: string | undefined
   /** images to edit / draw from */
   references?: MediaBlob[] | undefined
+  /** ask for real PNG alpha where the API has a control for it (gpt-image background=transparent);
+   * vendors without one ignore the flag */
+  transparent?: boolean | undefined
 }
 
 export interface AnalyzeMediaInput {
@@ -62,20 +67,31 @@ function metaOf(provider: ByokMediaProviderId): AiMediaProviderMeta {
 
 /** base URL of the OpenAI-shaped endpoints (images + chat) for a provider */
 function openAiBase(provider: ByokMediaProviderId, config: AiMediaProviderConfig): string {
-  if (provider === 'qwen') return `${dashscopeRoot(config)}/compatible-mode/v1`
+  if (provider === 'qwen') return endpointUrl(dashscopeRoot(config), '/compatible-mode/v1')
   const meta = metaOf(provider)
   return trimSlash(config.baseUrl || meta.defaultBaseUrl || OPENAI_IMAGES_BASE_URL)
 }
 
-/** DashScope root; a pasted compatible-mode or api/v1 URL is reduced to it */
+/**
+ * DashScope root; a pasted compatible-mode or api/v1 URL is reduced to it. The
+ * suffixes are stripped from the pathname, not the whole string: a base URL
+ * carrying a query (gateway style) ends with `?...`, so an anchored replace on
+ * the raw string would miss and the suffix would ride along.
+ */
 function dashscopeRoot(config: AiMediaProviderConfig): string {
-  return trimSlash(config.baseUrl || DASHSCOPE_BASE_URL)
-    .replace(/\/compatible-mode\/v1$/, '')
-    .replace(/\/api\/v1$/, '')
+  const url = new URL(config.baseUrl || DASHSCOPE_BASE_URL)
+  url.pathname = trimSlash(url.pathname).replace(/(\/compatible-mode\/v1|\/api\/v1)$/, '')
+  return url.toString()
 }
 
 function geminiBase(config: AiMediaProviderConfig): string {
   return trimSlash(config.baseUrl || GEMINI_MEDIA_BASE_URL)
+}
+
+function geminiModelsProbeUrl(config: AiMediaProviderConfig): string {
+  const url = new URL(endpointUrl(geminiBase(config), '/models'))
+  url.searchParams.set('pageSize', '1')
+  return url.toString()
 }
 
 function bearer(config: AiMediaProviderConfig): Record<string, string> {
@@ -130,7 +146,10 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 async function failFrom(label: string, resp: Response): Promise<never> {
-  const body = await resp.text().catch(() => '')
+  const body = await readCappedResponseText(resp, {
+    maxBytes: MAX_ERROR_BODY_BYTES,
+    onOverflow: 'truncate',
+  })
   throw new Error(`${label} ${resp.status}: ${httpBodyDetail(body)}`)
 }
 
@@ -138,16 +157,70 @@ function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
 }
 
+/**
+ * A 200 carrying an HTML shell / empty / truncated body (gateway soft-failure) makes
+ * `resp.json()` throw, and that SyntaxError reached the user from a media call that
+ * already knows how to report a failure. Same guard the chat protocols use: read the
+ * text, parse it here, and shape a non-JSON body through httpBodyDetail. Read whole,
+ * as `json()` did — a valid body can carry a multi-megabyte base64 image, so this
+ * deliberately does not reuse the capped error-body read.
+ */
+async function readJson(label: string, resp: Response): Promise<Record<string, unknown>> {
+  const body = await resp.text()
+  try {
+    return asRecord(JSON.parse(body))
+  } catch {
+    throw new Error(`${label} the response was not JSON: ${httpBodyDetail(body)}`)
+  }
+}
+
 function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
   const timeout = AbortSignal.timeout(ms)
   return signal ? AbortSignal.any([signal, timeout]) : timeout
+}
+
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+/** An error body is only ever read for a short diagnostic (httpBodyDetail keeps 500
+ * characters), so it is capped hard: a vendor answering an error with a multi-megabyte
+ * HTML page must not be buffered whole just to be truncated afterwards. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024
+
+/** the body counted as it streams and dropped past the cap; a missing Content-Length is unknown, not zero */
+async function readCapped(resp: Response, label: string): Promise<Uint8Array> {
+  const declared = Number(resp.headers.get('content-length') ?? NaN)
+  if (declared > MAX_DOWNLOAD_BYTES) {
+    await resp.body?.cancel().catch(() => {})
+    throw new Error(`${label} download too large`)
+  }
+  if (!resp.body) return new Uint8Array(await resp.arrayBuffer())
+  const reader = resp.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > MAX_DOWNLOAD_BYTES) {
+      await reader.cancel().catch(() => {})
+      throw new Error(`${label} download too large`)
+    }
+    chunks.push(value)
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
 }
 
 /** vendors that return a URL instead of bytes: download it (the links are short-lived, so right away) */
 async function downloadImage(label: string, url: string, signal: AbortSignal): Promise<MediaBlob> {
   const img = await aiFetch(url, { signal })
   if (!img.ok) return failFrom(`${label} download`, img)
-  const bytes = new Uint8Array(await img.arrayBuffer())
+  const bytes = await readCapped(img, label)
   return { bytes, mime: sniffImageMime(bytes, img.headers.get('content-type') ?? 'image/png') }
 }
 
@@ -215,7 +288,7 @@ async function openAiImageResult(
   signal: AbortSignal,
 ): Promise<MediaBlob> {
   if (!resp.ok) return failFrom(label, resp)
-  const json = asRecord(await resp.json())
+  const json = await readJson(label, resp)
   const first = asRecord((json.data as unknown[] | undefined)?.[0])
   if (typeof first.b64_json === 'string' && first.b64_json) return fromBase64(first.b64_json)
   if (typeof first.url === 'string' && first.url) return downloadImage(label, first.url, signal)
@@ -233,13 +306,15 @@ async function generateImageOpenAi(
   const style = openAiImagesStyle(provider)
   const size = style.size(input.aspectRatio)
   const refs = input.references ?? []
+  // `background` exists only on the gpt-image family; dall-e-3 and lookalike vendors 400 on it
+  const transparent = input.transparent && /gpt-image/i.test(model)
   if (refs.length && style.edits === 'none') {
     throw new Error(
       `${metaOf(provider).label} cannot edit or reference images here; generate from the prompt alone or pick another image provider.`,
     )
   }
   if (refs.length === 0 || style.edits === 'inline') {
-    const resp = await aiFetch(`${base}/images/generations`, {
+    const resp = await aiFetch(endpointUrl(base, '/images/generations'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bearer(config) },
       body: JSON.stringify({
@@ -247,6 +322,7 @@ async function generateImageOpenAi(
         prompt: input.prompt,
         n: 1,
         ...(size ? { size } : {}),
+        ...(transparent ? { background: 'transparent' } : {}),
         ...style.bodyExtras,
         ...(refs.length ? { image: refs.map(dataUrl) } : {}),
       }),
@@ -259,6 +335,7 @@ async function generateImageOpenAi(
   form.set('model', model)
   form.set('prompt', input.prompt)
   if (size) form.set('size', size)
+  if (transparent) form.set('background', 'transparent')
   refs.forEach((ref, i) => {
     const ext = ref.mime.split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'
     form.append(
@@ -267,7 +344,7 @@ async function generateImageOpenAi(
       ref.name ?? `ref-${i}.${ext}`,
     )
   })
-  const resp = await aiFetch(`${base}/images/edits`, {
+  const resp = await aiFetch(endpointUrl(base, '/images/edits'), {
     method: 'POST',
     headers: bearer(config),
     body: form,
@@ -301,7 +378,7 @@ async function generateImageDashscope(
   }
   const size = input.aspectRatio ? DASHSCOPE_SIZES[input.aspectRatio] : undefined
   const resp = await aiFetch(
-    `${dashscopeRoot(config)}/api/v1/services/aigc/multimodal-generation/generation`,
+    endpointUrl(dashscopeRoot(config), '/api/v1/services/aigc/multimodal-generation/generation'),
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bearer(config) },
@@ -314,7 +391,7 @@ async function generateImageDashscope(
     },
   )
   if (!resp.ok) return failFrom('Image generation failed:', resp)
-  const json = asRecord(await resp.json())
+  const json = await readJson('Image generation failed:', resp)
   if (typeof json.code === 'string' && json.code) {
     throw new Error(`Image generation failed: ${json.code} ${String(json.message ?? '')}`)
   }
@@ -347,7 +424,7 @@ async function generateImageMinimax(
   const base = trimSlash(config.baseUrl || MINIMAX_BASE_URL)
   const ratio =
     input.aspectRatio && MINIMAX_RATIOS.has(input.aspectRatio) ? input.aspectRatio : undefined
-  const resp = await aiFetch(`${base}/image_generation`, {
+  const resp = await aiFetch(endpointUrl(base, '/image_generation'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...bearer(config) },
     body: JSON.stringify({
@@ -360,7 +437,7 @@ async function generateImageMinimax(
     signal,
   })
   if (!resp.ok) return failFrom('Image generation failed:', resp)
-  const json = asRecord(await resp.json())
+  const json = await readJson('Image generation failed:', resp)
   const status = asRecord(json.base_resp)
   if (typeof status.status_code === 'number' && status.status_code !== 0) {
     throw new Error(
@@ -376,19 +453,6 @@ async function generateImageMinimax(
 }
 
 // ── OpenAI-compatible chat understanding ───────────────────────────
-
-function openAiContentText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        const p = asRecord(part)
-        return typeof p.text === 'string' ? p.text : ''
-      })
-      .join('')
-  }
-  return ''
-}
 
 async function analyzeMediaOpenAi(
   provider: ByokMediaProviderId,
@@ -412,14 +476,14 @@ async function analyzeMediaOpenAi(
       )
     }
   }
-  const resp = await aiFetch(`${openAiBase(provider, config)}/chat/completions`, {
+  const resp = await aiFetch(endpointUrl(openAiBase(provider, config), '/chat/completions'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...bearer(config) },
     body: JSON.stringify({ model, messages: [{ role: 'user', content: parts }] }),
     signal,
   })
   if (!resp.ok) return failFrom('Media analysis failed:', resp)
-  const json = asRecord(await resp.json())
+  const json = await readJson('Media analysis failed:', resp)
   const choice = asRecord((json.choices as unknown[] | undefined)?.[0])
   const text = openAiContentText(asRecord(choice.message).content).trim()
   if (!text) throw new Error('Media analysis returned an empty answer')
@@ -467,7 +531,7 @@ async function generateImageGemini(
   const aspectRatio =
     input.aspectRatio && GEMINI_ASPECT_RATIOS.has(input.aspectRatio) ? input.aspectRatio : undefined
   if (model.startsWith('imagen-')) {
-    const resp = await aiFetch(`${base}/models/${model}:predict`, {
+    const resp = await aiFetch(endpointUrl(base, `/models/${model}:predict`), {
       method: 'POST',
       headers: geminiHeaders(config),
       body: JSON.stringify({
@@ -477,14 +541,14 @@ async function generateImageGemini(
       signal,
     })
     if (!resp.ok) return failFrom('Image generation failed:', resp)
-    const json = asRecord(await resp.json())
+    const json = await readJson('Image generation failed:', resp)
     const first = asRecord((json.predictions as unknown[] | undefined)?.[0])
     if (typeof first.bytesBase64Encoded !== 'string') {
       throw new Error(`Image generation returned no image: ${JSON.stringify(json).slice(0, 200)}`)
     }
     return fromBase64(first.bytesBase64Encoded, first.mimeType)
   }
-  const resp = await aiFetch(`${base}/models/${model}:generateContent`, {
+  const resp = await aiFetch(endpointUrl(base, `/models/${model}:generateContent`), {
     method: 'POST',
     headers: geminiHeaders(config),
     body: JSON.stringify({
@@ -507,7 +571,7 @@ async function generateImageGemini(
     signal,
   })
   if (!resp.ok) return failFrom('Image generation failed:', resp)
-  const json = asRecord(await resp.json())
+  const json = await readJson('Image generation failed:', resp)
   const parts = geminiParts((json.candidates as unknown[] | undefined)?.[0])
   const image = parts
     .map((p) => asRecord(p.inlineData ?? p.inline_data))
@@ -531,8 +595,9 @@ async function geminiUploadFile(
   signal: AbortSignal,
 ): Promise<{ file_data: { mime_type: string; file_uri: string } }> {
   const base = geminiBase(config)
-  const root = base.replace(/\/v1(beta)?$/, '')
-  const start = await aiFetch(`${root}/upload/v1beta/files`, {
+  const root = new URL(base)
+  root.pathname = trimSlash(root.pathname).replace(/\/v1(beta)?$/, '')
+  const start = await aiFetch(endpointUrl(root.toString(), '/upload/v1beta/files'), {
     method: 'POST',
     headers: {
       ...geminiHeaders(config),
@@ -559,7 +624,7 @@ async function geminiUploadFile(
     signal,
   })
   if (!upload.ok) return failFrom('Media upload failed:', upload)
-  let file = asRecord(asRecord(await upload.json()).file)
+  let file = asRecord((await readJson('Media upload failed:', upload)).file)
   const deadline = Date.now() + GEMINI_FILE_READY_TIMEOUT_MS
   // videos are transcoded server-side before they can be referenced
   while (file.state === 'PROCESSING') {
@@ -567,12 +632,12 @@ async function geminiUploadFile(
       throw new Error('Media upload timed out while the file was processing')
     }
     await new Promise((r) => setTimeout(r, GEMINI_FILE_POLL_MS))
-    const poll = await aiFetch(`${base}/${String(file.name)}`, {
+    const poll = await aiFetch(endpointUrl(base, `/${String(file.name)}`), {
       headers: { 'x-goog-api-key': config.apiKey },
       signal,
     })
     if (!poll.ok) return failFrom('Media upload failed:', poll)
-    file = asRecord(await poll.json())
+    file = await readJson('Media upload failed:', poll)
   }
   if (file.state !== 'ACTIVE' || typeof file.uri !== 'string') {
     throw new Error(`Media upload failed: file state ${String(file.state ?? 'unknown')}`)
@@ -596,7 +661,7 @@ async function analyzeMediaGemini(
         : await geminiUploadFile(config, blob, signal),
     )
   }
-  const resp = await aiFetch(`${geminiBase(config)}/models/${model}:generateContent`, {
+  const resp = await aiFetch(endpointUrl(geminiBase(config), `/models/${model}:generateContent`), {
     method: 'POST',
     headers: geminiHeaders(config),
     body: JSON.stringify({
@@ -605,7 +670,7 @@ async function analyzeMediaGemini(
     signal,
   })
   if (!resp.ok) return failFrom('Media analysis failed:', resp)
-  const json = asRecord(await resp.json())
+  const json = await readJson('Media analysis failed:', resp)
   const text = geminiParts((json.candidates as unknown[] | undefined)?.[0])
     .map((p) => (typeof p.text === 'string' ? p.text : ''))
     .join('')
@@ -677,9 +742,12 @@ export async function analyzeMediaWithProvider(
 }
 
 /**
- * Cheap credential check — the settings-UI connection test; no image is
- * billed. A model listing is the closest thing every vendor has; vendors
- * without one answer 404/405 to a valid key, so only 401/403 count as failure.
+ * Cheap credential check for the settings-UI connection test; no image is
+ * billed. A model listing is the closest thing every vendor has. Vendors
+ * without a model-listing endpoint answer 404/405 even for a valid key, so
+ * only those two statuses count as a pass when the response is not ok.
+ * Every other non-ok status (auth failures, rate limits, server errors)
+ * is surfaced as a failure with the status code included.
  */
 export async function testMediaProvider(
   provider: ByokMediaProviderId,
@@ -692,20 +760,36 @@ export async function testMediaProvider(
     const guard = withTimeout(signal, TEST_TIMEOUT_MS)
     const resp =
       provider === 'gemini'
-        ? await aiFetch(`${geminiBase(config)}/models?pageSize=1`, {
+        ? await aiFetch(geminiModelsProbeUrl(config), {
             headers: { 'x-goog-api-key': config.apiKey },
             signal: guard,
           })
-        : await aiFetch(`${openAiBase(provider, config)}/models`, {
+        : await aiFetch(endpointUrl(openAiBase(provider, config), '/models'), {
             headers: bearer(config),
             signal: guard,
           })
     if (resp.ok) return { ok: true }
-    const body = await resp.text().catch(() => '')
-    if (resp.status === 401 || resp.status === 403 || provider === 'gemini') {
-      return { ok: false, error: `HTTP ${resp.status}: ${httpBodyDetail(body)}` }
+    // Vendors without a model-listing endpoint answer 404/405 to a valid
+    // key, so those statuses still mean the credentials are usable.
+    if (resp.status === 404 || resp.status === 405) return { ok: true }
+    const body = await readCappedResponseText(resp, {
+      maxBytes: MAX_ERROR_BODY_BYTES,
+      onOverflow: 'truncate',
+    })
+    const detail = httpBodyDetail(body)
+    if (resp.status === 429) {
+      return {
+        ok: false,
+        error: `HTTP 429: rate limit exceeded, retry later${detail ? ` (${detail})` : ''}`,
+      }
     }
-    return { ok: true }
+    if (resp.status >= 500) {
+      return {
+        ok: false,
+        error: `HTTP ${resp.status}: server error, retry later${detail ? ` (${detail})` : ''}`,
+      }
+    }
+    return { ok: false, error: `HTTP ${resp.status}: ${detail}` }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { foldCase } from '@genoffice/ui'
 import { buildSearchIndex, searchInIndex, type SearchIndex } from '../src/renderer/search'
 
 interface FakeItem {
@@ -52,6 +53,22 @@ describe('buildSearchIndex', () => {
     expect(index[0]!.text).toBe('line1\n\nline2')
   })
 
+  it('keeps text from an item that carries no transform', async () => {
+    // Geometry is missing but the glyphs are real: dropping the text made the
+    // item unsearchable while its hasEOL newline still shifted the line breaks.
+    const doc = fakeDoc([
+      [{ str: 'invisible', width: 40, height: 12, hasEOL: true }, item('Visible', 10, 700, 60, 12)],
+    ])
+    const index = await buildSearchIndex(doc)
+
+    expect(index[0]!.text).toBe('invisible\nVisible')
+    expect(index[0]!.lower).toBe('invisible\nvisible')
+    // No box to highlight for the geometry-less item, but the following item's
+    // char range still accounts for the text that was kept.
+    expect(index[0]!.items).toEqual([{ start: 10, end: 17, x: 10, y: 700, w: 60, h: 12 }])
+    expect(searchInIndex(index, 'Visible')).toHaveLength(1)
+  })
+
   it('derives height from the transform when height is missing', async () => {
     const doc = fakeDoc([[{ str: 'x', transform: [1, 0, 3, 4, 0, 0], width: 5 }]])
     const index = await buildSearchIndex(doc)
@@ -83,7 +100,7 @@ describe('buildSearchIndex', () => {
 describe('searchInIndex', () => {
   const entry = (text: string, items: SearchIndex[number]['items']): SearchIndex[number] => ({
     text,
-    lower: text.toLowerCase(),
+    lower: foldCase(text),
     items,
   })
 
@@ -148,5 +165,14 @@ describe('searchInIndex', () => {
     const text = 'a'.repeat(2000)
     const index = [entry(text, [{ start: 0, end: 2000, x: 0, y: 0, w: 2000, h: 10 }])]
     expect(searchInIndex(index, 'a')).toHaveLength(1000)
+  })
+
+  it('keeps folded text the same length so rects stay aligned (dotted capital)', async () => {
+    const doc = fakeDoc([[item('İ', 10, 700, 10, 12)]])
+    const index = await buildSearchIndex(doc)
+    expect(index[0]!.lower.length).toBe(index[0]!.text.length)
+    const matches = searchInIndex(index, 'i')
+    expect(matches).toHaveLength(0)
+    expect(searchInIndex(index, 'İ')).toHaveLength(1)
   })
 })

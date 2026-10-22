@@ -1,4 +1,5 @@
 import type { AiPanelPrefs } from '@genoffice/ui'
+import type { HeadlessExportTarget } from '@genoffice/electron-utils/headless-export'
 import type { Lang } from '@genoffice/i18n'
 import type {
   AiSettings,
@@ -17,10 +18,14 @@ export const HTML_CHANNELS = {
   save: 'html:save',
   saveRequest: 'html:save-request',
   saveRequestAck: 'html:save-request-ack',
+  readTextRequest: 'html:read-text-request',
+  readTextResult: 'html:read-text-result',
   dirtyChanged: 'html:dirty-changed',
   closeSaveRequest: 'html:close-save-request',
   closeSaveResult: 'html:close-save-result',
   fileRenamed: 'html:file-renamed',
+  fileChangedOnDisk: 'html:file-changed-on-disk',
+  ackFileChangedOnDisk: 'html:ack-file-changed-on-disk',
   provisionalTitle: 'html:provisional-title',
   pickImage: 'html:pick-image',
   saveImage: 'html:save-image',
@@ -29,7 +34,11 @@ export const HTML_CHANNELS = {
   exportRequest: 'html:export-request',
   exportDocx: 'html:export-docx',
   exportPdf: 'html:export-pdf',
+  exportHtml: 'html:export-html',
+  consumeHeadlessExport: 'html:consume-headless-export',
+  headlessExportDone: 'html:headless-export-done',
   printRequest: 'html:print-request',
+  printHtml: 'html:print-html',
   aiGenerateImage: 'html:ai-generate-image',
   filesPick: 'html:files-pick',
   filesAdd: 'html:files-add',
@@ -104,6 +113,8 @@ export interface SaveHtmlRequest {
   suggestedName?: string
   /** Default file name offered by the save dialog of an untitled document */
   defaultName?: string
+  /** write even though the file changed on disk since it was loaded or last saved */
+  overwrite?: boolean
 }
 
 export type SaveHtmlResult =
@@ -114,11 +125,14 @@ export type SaveHtmlResult =
       imageRewrites?: Array<{ from: string; to: string }>
     }
   | { ok: true; canceled: true }
-  | { ok: false; error: string }
+  | { ok: false; error: string; conflict?: true }
 
 /** AI channels are app-wide shared ipcMain handlers (shell registers via docs-main registerAiIpc); pass-through only */
 export const AI_CHANNELS = {
   getSettings: 'ai:get-settings',
+  setSettings: 'ai:set-settings',
+  settingsChanged: 'ai:settings-changed',
+  openModelSettings: 'ai:open-model-settings',
   gskStatus: 'ai:gsk-status',
   stream: 'ai:stream',
   streamChunk: 'ai:stream-chunk',
@@ -142,7 +156,7 @@ export interface ImageSearchResult {
   error?: string
 }
 
-export type ExportFormat = 'pdf' | 'docx'
+export type ExportFormat = 'pdf' | 'docx' | 'html'
 
 /** Word export: html2docx renders the document in a hidden window and writes native OOXML; the result opens in Docs */
 export interface ExportDocxRequest {
@@ -150,16 +164,41 @@ export interface ExportDocxRequest {
   html: string
   /** file name (no extension) suggested in the dialog */
   suggestedName: string
+  /** headless export mode only: write here instead of opening the save dialog */
+  outPath?: string
 }
 
 export interface ExportPdfRequest {
   /** self-contained print HTML */
   html: string
   suggestedName: string
+  /** headless export mode only: write here instead of opening the save dialog */
+  outPath?: string
+}
+
+/** Single-file HTML export: local image references inlined as data URLs; opens without the assets/ folder */
+export interface ExportHtmlRequest {
+  /** the document text */
+  html: string
+  suggestedName: string
+  /** headless export mode only: write here instead of opening the save dialog */
+  outPath?: string
 }
 
 export type ExportResult =
-  { ok: true; path: string } | { ok: true; canceled: true } | { ok: false; error: string }
+  | { ok: true; path: string; skipped?: string[] }
+  | { ok: true; canceled: true }
+  | { ok: false; error: string }
+
+/** Shell menu Print: the renderer hands over the document text, main opens the system dialog */
+export interface PrintHtmlRequest {
+  /** the document text */
+  html: string
+}
+
+/** A cancelled job is the user closing the system dialog: an outcome, not a failure,
+ * so it must stay silent. Mirrors the `canceled` variant ExportResult already uses. */
+export type PrintResult = { ok: true } | { ok: true; canceled: true } | { ok: false; error: string }
 
 export interface ImageData {
   base64: string
@@ -170,6 +209,12 @@ export interface ImageData {
 export interface HtmlApi {
   /** Take the md path pending for this view (queued at tab creation); null = new untitled document */
   consumePending(): Promise<string | null>
+  /** open any shell-routed document path (an AI answer's filenav citation) */
+  openSourcePath(path: string): Promise<void>
+  /** Headless export mode: the path and format this hidden renderer must export, null in normal use */
+  consumeHeadlessExport(): Promise<HeadlessExportTarget | null>
+  /** Headless export mode: report the export outcome so the main process can quit */
+  headlessExportDone(result: { ok: boolean; error?: string }): void
   /** Read the file as UTF-8 text. Only paths granted to this view are allowed */
   readFile(path: string): Promise<string>
   /** Push the current buffer so html-preview:// serves it to the preview iframe */
@@ -192,11 +237,21 @@ export interface HtmlApi {
   onSaveRequest(handler: (mode: SaveMode) => void): () => void
   /** Resolves a menu-save waiter when doSave exits without ever invoking save() (busy/loading) */
   sendSaveRequestAck(ok: boolean): void
+  /**
+   * Main process asks for the live document source — the MCP read of an open
+   * document, unsaved edits included; reply through sendReadTextResult.
+   */
+  onReadTextRequest(handler: () => void): () => void
+  sendReadTextResult(result: { text: string } | { error: string }): void
   /** Main process picked "Save" in the close prompt → renderer saves and replies via sendCloseSaveResult */
   onCloseSaveRequest(handler: () => void): () => void
   sendCloseSaveResult(ok: boolean): void
   /** The file was renamed on disk (Home list rename) — renderer syncs its display path */
   onFileRenamed(handler: (newPath: string) => void): () => void
+  /** Another program wrote the open file; the renderer re-reads and decides whether to reload */
+  onFileChangedOnDisk(handler: (path: string) => void): () => void
+  /** the renderer has read the changed file and decided; a later save is checked against this version */
+  ackFileChangedOnDisk(): void
   /** Name an untitled document's tab before its first save (derived from the user's first AI request) */
   setProvisionalTitle(title: string): void
   /**
@@ -233,6 +288,9 @@ export interface HtmlApi {
   onPrintRequest(handler: () => void): () => void
   exportDocx(request: ExportDocxRequest): Promise<ExportResult>
   exportPdf(request: ExportPdfRequest): Promise<ExportResult>
+  exportHtml(request: ExportHtmlRequest): Promise<ExportResult>
+  /** Shell menu Print → main renders the document and opens the system print dialog */
+  printHtml(request: PrintHtmlRequest): Promise<PrintResult>
   getLanguage(): Promise<Lang>
   onLanguageChanged(handler: (lang: Lang) => void): () => void
   getTheme(): Promise<UiTheme>
@@ -241,11 +299,23 @@ export interface HtmlApi {
   onAutoSaveDefaultChanged(handler: (value: AutoSaveDefault) => void): () => void
   /** AI panel text size + chat-input spellcheck (Settings → General in the shell) */
   getAiPanelPrefs(): Promise<AiPanelPrefs>
+  setAiPanelPrefs(patch: Partial<AiPanelPrefs>): Promise<AiPanelPrefs>
   onAiPanelPrefsChanged(handler: (prefs: AiPanelPrefs) => void): () => void
   /** press on the shell chrome (tab strip is a sibling WebContentsView whose
    *  clicks produce no DOM event here) — dismiss open popovers */
   onChromePressed(handler: () => void): () => void
   getAiSettings(): Promise<AiSettings>
+  setAiSettings(settings: AiSettings): Promise<void>
+  /** ai-settings.json was rewritten by any renderer; re-read it */
+  onAiSettingsChanged(handler: () => void): () => void
+  /** shell only: switch to Home and open Settings › AI Model (rejects in standalone) */
+  openAiModelSettings(): Promise<void>
+  /** shell only: switch to Home and open Settings › Integrations (the skills list) */
+  openSkillsSettings(): Promise<void>
+  /** the skills the user installed into GenOffice (userData/skills) */
+  skillsList(): Promise<UserSkillEntry[]>
+  /** the body of one installed skill, by name — the main process resolves the path */
+  skillText(name: string): Promise<string>
   /** Genspark login state (shell-registered ai:gsk-status) — gates generate_image with the cloud-tools toggle */
   aiGskStatus(): Promise<GenSparkAccountStatus>
   aiStream(request: AiStreamRequest): Promise<void>
@@ -262,4 +332,10 @@ export interface HtmlApi {
     url?: string
     error?: string
   }>
+}
+
+export interface UserSkillEntry {
+  name: string
+  description: string
+  relevant: boolean
 }

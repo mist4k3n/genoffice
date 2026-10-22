@@ -6,14 +6,19 @@
 import type { Fill, Stroke, ShadowEffect } from '@genoffice/pptx-engine'
 import type { RenderFill, RenderStroke, RenderShadow } from './render-tree'
 import { emuToPx, EMU_PER_PT, type Viewport } from './coords'
+import { imageDpiFromDataUrl } from './image-dpi'
 
 /** Lookup function for image mediaRef → dataUrl (injected by the caller, may lazy-load). */
 export type MediaResolver = (mediaRef: string) => string | undefined
+
+/** Box a tile grid anchors to, in shape-local px (a table cell passes the whole table). */
+export type TileFrame = { x: number; y: number; w: number; h: number }
 
 export function resolveFill(
   fill: Fill | undefined,
   vp: Viewport,
   media?: MediaResolver,
+  tileFrame?: TileFrame,
 ): RenderFill {
   if (!fill) return { kind: 'none' }
   switch (fill.type) {
@@ -36,28 +41,35 @@ export function resolveFill(
               },
             }
           : {}),
+        ...(fill.path && fill.tileRect ? { tileRect: fill.tileRect } : {}),
       }
     case 'image': {
-      // Tile natural size: PowerPoint lays dpi-less bitmaps out at 144dpi (measured on
-      // page_transparent_bitmap: 94px tile = 0.653in), i.e. 2/3 of a 96dpi unit
-      const pxPerImagePx = vp.scale * (96 / 144)
+      const dataUrl = media?.(fill.mediaRef)
+      // Tile natural size: the bitmap's own dpi tag (PowerPoint measured: 75dpi JFIF texture,
+      // 150dpi PNG photo); dpi-less bitmaps lay out at 144dpi (page_transparent_bitmap:
+      // 94px tile = 0.653in), i.e. 2/3 of a 96dpi unit
+      const dpi = fill.tile ? imageDpiFromDataUrl(dataUrl) : undefined
+      const pxPerImagePxX = vp.scale * (96 / (dpi?.x ?? 144))
+      const pxPerImagePxY = vp.scale * (96 / (dpi?.y ?? 144))
       return {
         kind: 'image',
-        dataUrl: media?.(fill.mediaRef),
+        dataUrl,
         mode: fill.mode ?? 'stretch',
         ...(fill.alpha != null ? { alpha: fill.alpha } : {}),
         ...(fill.fillRect ? { fillRect: fill.fillRect } : {}),
         ...(fill.duotone ? { duotone: fill.duotone } : {}),
         ...(fill.lum ? { lum: fill.lum } : {}),
         ...(fill.clrChange ? { clrChange: fill.clrChange } : {}),
+        ...(fill.biLevel != null ? { biLevel: fill.biLevel } : {}),
         ...(fill.tile
           ? {
               tile: {
-                scaleX: pxPerImagePx * fill.tile.sx,
-                scaleY: pxPerImagePx * fill.tile.sy,
+                scaleX: pxPerImagePxX * fill.tile.sx,
+                scaleY: pxPerImagePxY * fill.tile.sy,
                 txPx: emuToPx(fill.tile.tx, vp.scale),
                 tyPx: emuToPx(fill.tile.ty, vp.scale),
                 algn: fill.tile.algn,
+                ...(tileFrame ? { frame: tileFrame } : {}),
               },
             }
           : {}),
@@ -91,8 +103,14 @@ export function resolveStroke(stroke: Stroke | undefined, vp: Viewport): RenderS
     }
     color = rf.stops[0]!.color
   } else if (rf.type === 'none') return undefined
-  const widthPx = Math.max(emuToPx(stroke.width || 12700, vp.scale), 0.5)
-  const widthPt = (stroke.width || 12700) / EMU_PER_PT
+  // A patterned line is mostly foreground ink, so a solid fg stroke is a far closer
+  // approximation than the #000000 fallback (resolveFill renders pattFill the same way).
+  // An image-filled line has no colour to borrow — returning undefined beats painting black.
+  else if (rf.type === 'pattern') color = rf.fg
+  else if (rf.type === 'image') return undefined
+  const widthEmu = stroke.width ?? 12700
+  const widthPx = Math.max(emuToPx(widthEmu, vp.scale), 0.5)
+  const widthPt = widthEmu / EMU_PER_PT
   const dash = dashPreset(stroke.dash, widthPx)
   const capMap = { flat: 'butt', round: 'round', square: 'square' } as const
   return {
@@ -159,23 +177,27 @@ function dashPreset(name: string | undefined, w: number): number[] | undefined {
   const u = w
   switch (name) {
     case 'dot':
+      return [u, 3 * u]
     case 'sysDot':
       return [u, u]
     case 'dash':
-    case 'sysDash':
       return [4 * u, 3 * u]
+    case 'sysDash':
+      return [3 * u, u]
     case 'lgDash':
       return [8 * u, 3 * u]
     case 'dashDot':
-    case 'sysDashDot':
       return [4 * u, 3 * u, u, 3 * u]
+    case 'sysDashDot':
+      return [3 * u, u, u, u]
     case 'lgDashDot':
       return [8 * u, 3 * u, u, 3 * u]
     case 'lgDashDotDot':
       return [8 * u, 3 * u, u, 3 * u, u, 3 * u]
     case 'dashDotDot':
-    case 'sysDashDotDot':
       return [4 * u, 3 * u, u, 3 * u, u, 3 * u]
+    case 'sysDashDotDot':
+      return [3 * u, u, u, u, u, u]
     default:
       return undefined
   }

@@ -6,6 +6,7 @@ import type { ComputedSnapshot } from '../preview/inspector-protocol'
 import type { StyleEdit } from './FloatToolbar'
 import { ColorField } from './ColorField'
 import { backgroundPickStyles, backgroundSwatch } from '../document/background-style'
+import { IconLock } from './icons'
 
 interface Props {
   tag: string
@@ -27,13 +28,14 @@ interface Props {
 
 type NumberField = 'fontSize' | 'width' | 'height' | 'borderRadius' | 'padding'
 
-const PX_FIELDS: Record<NumberField, { prop: string; label: StringKey; min: number }> = {
-  fontSize: { prop: 'font-size', label: 'fontSize', min: 1 },
-  width: { prop: 'width', label: 'width', min: 0 },
-  height: { prop: 'height', label: 'height', min: 0 },
-  borderRadius: { prop: 'border-radius', label: 'radius', min: 0 },
-  padding: { prop: 'padding', label: 'padding', min: 0 },
-}
+const PX_FIELDS: Record<NumberField, { prop: string; label: StringKey; min: number; max: number }> =
+  {
+    fontSize: { prop: 'font-size', label: 'fontSize', min: 1, max: 500 },
+    width: { prop: 'width', label: 'width', min: 0, max: 5000 },
+    height: { prop: 'height', label: 'height', min: 0, max: 5000 },
+    borderRadius: { prop: 'border-radius', label: 'radius', min: 0, max: 2500 },
+    padding: { prop: 'padding', label: 'padding', min: 0, max: 2500 },
+  }
 
 function PxInput({
   field,
@@ -52,10 +54,13 @@ function PxInput({
       <input
         type="number"
         min={def.min}
+        max={def.max}
         value={value}
         onChange={(e) => {
           const v = e.target.value
-          if (v !== '' && Number(v) >= def.min) onStyle({ [def.prop]: `${v}px` })
+          // Infinity passes a >= check and would persist as Infinitypx
+          const n = Number(v)
+          if (v !== '' && Number.isFinite(n) && n >= def.min) onStyle({ [def.prop]: `${v}px` })
         }}
       />
     </label>
@@ -155,6 +160,20 @@ function ImageSection(p: Props & { altCommitRef: MutableRefObject<() => void> })
 export function StylePanel(p: Props) {
   const { t } = useI18n()
   const isImage = p.tag === 'img'
+  const [lockRatio, setLockRatio] = useState(true)
+  /** with the lock on, editing one side scales the other by the current displayed ratio */
+  const sizeStyle: StyleEdit = (styles) => {
+    const w = Number(p.computed.width)
+    const h = Number(p.computed.height)
+    if (!isImage || !lockRatio || !(w > 0 && h > 0)) return p.onStyle(styles)
+    const next = { ...styles }
+    const px = (v: string | null | undefined) => (v ? parseFloat(v) : NaN)
+    if ('width' in next && Number.isFinite(px(next.width)))
+      next.height = `${Math.round((px(next.width) * h) / w)}px`
+    else if ('height' in next && Number.isFinite(px(next.height)))
+      next.width = `${Math.round((px(next.height) * w) / h)}px`
+    p.onStyle(next)
+  }
   const {
     value: text,
     setValue: setText,
@@ -164,10 +183,22 @@ export function StylePanel(p: Props) {
     if (p.textRun !== null) p.onText(v)
   })
   const altCommitRef = useRef<() => void>(() => {})
-  const [css, setCss] = useState('')
+  const {
+    value: css,
+    setValue: setCss,
+    commitRef: cssCommitRef,
+  } = useDraft('', (value) => {
+    const trimmed = value.trim()
+    if (trimmed) p.onCustomCss(trimmed)
+  })
+  const commitCss = () => {
+    cssCommitRef.current()
+    if (css.trim()) setCss('')
+  }
   const flushDrafts = () => {
     textCommitRef.current()
     altCommitRef.current()
+    commitCss()
   }
   p.draftRef.current = flushDrafts
   const draftRef = p.draftRef
@@ -178,12 +209,6 @@ export function StylePanel(p: Props) {
     },
     [draftRef],
   )
-  const commitCss = () => {
-    if (css.trim()) {
-      p.onCustomCss(css.trim())
-      setCss('')
-    }
-  }
 
   return (
     <aside className="hx-panel" aria-label={t('stylePanel')}>
@@ -255,8 +280,20 @@ export function StylePanel(p: Props) {
 
       <div className="hx-panel-section">{t('sizeSection')}</div>
       <div className="hx-panel-row">
-        <PxInput field="width" value={p.computed.width} onStyle={p.onStyle} />
-        <PxInput field="height" value={p.computed.height} onStyle={p.onStyle} />
+        <PxInput field="width" value={p.computed.width} onStyle={sizeStyle} />
+        {isImage && (
+          <button
+            type="button"
+            className={`hx-panel-lock${lockRatio ? ' on' : ''}`}
+            data-tip={t('lockAspect')}
+            aria-label={t('lockAspect')}
+            aria-pressed={lockRatio}
+            onClick={() => setLockRatio((v) => !v)}
+          >
+            <IconLock size={14} />
+          </button>
+        )}
+        <PxInput field="height" value={p.computed.height} onStyle={sizeStyle} />
       </div>
       {isImage && (
         <button

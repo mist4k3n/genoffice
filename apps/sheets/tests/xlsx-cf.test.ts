@@ -5,7 +5,7 @@ import {
   buildDxfXml,
   cfRuleUnsaveableReason,
   iconSetSaveable,
-} from '../src/gateway/xlsx-cf'
+} from '@genoffice/xlsx-gateway/gateway/xlsx-cf'
 
 const SHEET =
   '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>' +
@@ -25,6 +25,33 @@ class FakeDxfs {
 const range = { startRow: 0, endRow: 4, startColumn: 0, endColumn: 0 }
 
 describe('applyCfRules', () => {
+  it('appends after the existing sections with a free priority', () => {
+    const dxfs = new FakeDxfs()
+    const xml = applyCfRules(
+      SHEET,
+      [
+        {
+          ranges: [{ startRow: 0, endRow: 0, startColumn: 1, endColumn: 1 }],
+          stopIfTrue: false,
+          rule: {
+            type: 'highlightCell',
+            subType: 'number',
+            operator: 'greaterThan',
+            value: 5,
+            style: { bg: { rgb: '#FFF2CC' } },
+          },
+        },
+      ],
+      dxfs,
+      { append: true },
+    )
+    expect(xml).toContain('type="cellIs" dxfId="0" priority="1" operator="lessThan"')
+    expect(xml.match(/<conditionalFormatting\b/g)).toHaveLength(2)
+    expect(xml.indexOf('sqref="B1"')).toBeGreaterThan(xml.indexOf('sqref="A1:A5"'))
+    expect(xml).toMatch(/sqref="B1"><cfRule type="cellIs" dxfId="0" priority="2"/)
+    expect(xml.indexOf('</conditionalFormatting><pageMargins')).toBeGreaterThan(0)
+  })
+
   it('replaces every existing section with the snapshot', () => {
     const dxfs = new FakeDxfs()
     const xml = applyCfRules(
@@ -350,7 +377,7 @@ describe('applyCfRules with x14 extensions', () => {
     const xml = applyCfRules(X14_SHEET, [highlight([range])], new FakeDxfs())
     expect(xml).toContain(X14_EXT)
     expect(xml).not.toContain('operator="lessThan"')
-    expect(xml).toContain('<cfRule type="cellIs" dxfId="0" priority="2" operator="greaterThan">')
+    expect(xml).toContain('<cfRule type="cellIs" dxfId="0" priority="4" operator="greaterThan">')
     const removedAll = applyCfRules(X14_SHEET, [], new FakeDxfs())
     expect(removedAll).toContain(X14_EXT)
     expect(removedAll).not.toContain('<conditionalFormatting ')
@@ -362,9 +389,9 @@ describe('applyCfRules with x14 extensions', () => {
       [highlight([range]), highlight([{ ...range, startColumn: 3, endColumn: 3 }])],
       new FakeDxfs(),
     )
-    expect(xml).toContain('priority="2" operator="greaterThan"')
     expect(xml).toContain('priority="4" operator="greaterThan"')
-    expect(xml).not.toMatch(/<cfRule type="cellIs"[^>]* priority="[13]"/)
+    expect(xml).toContain('priority="5" operator="greaterThan"')
+    expect(xml).not.toMatch(/<cfRule type="cellIs"[^>]* priority="[123]"/)
   })
 
   it('passes an unchanged x14-linked data bar through verbatim and avoids its priority', () => {

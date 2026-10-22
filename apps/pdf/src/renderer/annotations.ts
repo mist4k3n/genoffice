@@ -15,6 +15,11 @@ export interface PageGeom {
   pw: number
   ph: number
   rot: number
+  /** CropBox lower-left in PDF user space. */
+  x0?: number
+  y0?: number
+  /** PDF /UserUnit; layout coordinates use this multiplier while PDF APIs use raw units. */
+  userUnit?: number
 }
 
 const normRot = (r: number) => ((r % 360) + 360) % 360
@@ -26,30 +31,47 @@ export function geomDispSize(g: PageGeom): { width: number; height: number } {
 
 /** Display coords (origin at page top-left, y down, scale=1) → PDF user space (y up) */
 export function viewToPdf(g: PageGeom, vx: number, vy: number): [number, number] {
+  const x0 = g.x0 ?? 0
+  const y0 = g.y0 ?? 0
+  const unit = g.userUnit ?? 1
+  const pw = g.pw / unit
+  const ph = g.ph / unit
+  vx /= unit
+  vy /= unit
   switch (normRot(g.rot)) {
     case 90:
-      return [vy, vx]
+      return [x0 + vy, y0 + vx]
     case 180:
-      return [g.pw - vx, vy]
+      return [x0 + pw - vx, y0 + vy]
     case 270:
-      return [g.pw - vy, g.ph - vx]
+      return [x0 + pw - vy, y0 + ph - vx]
     default:
-      return [vx, g.ph - vy]
+      return [x0 + vx, y0 + ph - vy]
   }
 }
 
 /** PDF user space → display coords (scale=1) */
 export function pdfToView(g: PageGeom, x: number, y: number): [number, number] {
+  x -= g.x0 ?? 0
+  y -= g.y0 ?? 0
+  const unit = g.userUnit ?? 1
+  const pw = g.pw / unit
+  const ph = g.ph / unit
+  let result: [number, number]
   switch (normRot(g.rot)) {
     case 90:
-      return [y, x]
+      result = [y, x]
+      break
     case 180:
-      return [g.pw - x, y]
+      result = [pw - x, y]
+      break
     case 270:
-      return [g.ph - y, g.pw - x]
+      result = [ph - y, pw - x]
+      break
     default:
-      return [x, g.ph - y]
+      result = [x, ph - y]
   }
+  return [result[0] * unit, result[1] * unit]
 }
 
 /** PDF-space rect [x1,y1,x2,y2] → displayed pixel box (scaled) */
@@ -112,13 +134,6 @@ const crossBounds = (r: ViewRect): [number, number] => [r.top, r.bottom]
 
 const mainBounds = (r: ViewRect): [number, number] => [r.left, r.right]
 
-const rectBounds = (rects: readonly ViewRect[]): ViewRect => ({
-  left: Math.min(...rects.map((r) => r.left)),
-  right: Math.max(...rects.map((r) => r.right)),
-  top: Math.min(...rects.map((r) => r.top)),
-  bottom: Math.max(...rects.map((r) => r.bottom)),
-})
-
 /** Pick the one common line band that overlaps most; ties stay independent. */
 function matchingLine(lines: readonly SelectionLine[], rect: ViewRect): SelectionLine | null {
   const [start, end] = crossBounds(rect)
@@ -154,22 +169,68 @@ function normalizeSelectionRects(rects: readonly ViewRect[]): ViewRect[] {
   }
 
   return lineBands.flatMap((line) => {
-    const clusters: ViewRect[][] = []
+    // the running union of each cluster, widened in place: rebuilding it from the
+    // cluster's rects on every fragment made the sweep quadratic in line length
+    const clusters: ViewRect[] = []
     // Text-layer spans arrive in content-stream order, not visual order
     for (const rect of [...line.rects].sort((a, b) => a.left - b.left)) {
       const previous = clusters.at(-1)
       if (!previous) {
-        clusters.push([rect])
+        clusters.push(rect)
         continue
       }
-      const [previousStart, previousEnd] = mainBounds(rectBounds(previous))
+      const [previousStart, previousEnd] = mainBounds(previous)
       const [start, end] = mainBounds(rect)
       const gap = Math.max(start - previousEnd, previousStart - end, 0)
-      if (gap <= line.minCrossSize / 2) previous.push(rect)
-      else clusters.push([rect])
+      if (gap <= line.minCrossSize / 2) {
+        clusters[clusters.length - 1] = {
+          left: Math.min(previous.left, rect.left),
+          right: Math.max(previous.right, rect.right),
+          top: Math.min(previous.top, rect.top),
+          bottom: Math.max(previous.bottom, rect.bottom),
+        }
+      } else clusters.push(rect)
     }
-    return clusters.map(rectBounds)
+    return clusters
   })
+}
+
+/**
+ * Drop the element-level boxes that merely enclose span-level ones, so the union a
+ * line cluster collapses to stays tight. getClientRects hands back both, and a big
+ * box left in place would widen every quad on its line to the whole paragraph.
+ *
+ * getClientRects is in tree order, so a box precedes what it contains: one sweep
+ * keeping the containers still open to the right of and above the cursor replaces
+ * the all-pairs containment test, which was quadratic over the thousands of boxes
+ * a selection across a large text page returns.
+ */
+function dropEnclosingRects(rects: readonly DOMRect[]): DOMRect[] {
+  const enclosing = new Set<DOMRect>()
+  const open: DOMRect[] = []
+  for (const r of rects) {
+    // a container can hold nothing more once the sweep has moved past its box:
+    // tree order only ever moves right along a line and down to the next line.
+    // A box starting at another's right edge is a sibling, not a child, so
+    // abutting spans on one line drop off the stack instead of piling up
+    while (open.length > 0) {
+      const top = open[open.length - 1]!
+      if (r.left < top.right - 1 && r.top < top.bottom - 1) break
+      open.pop()
+    }
+    for (const c of open) {
+      if (
+        r.left < c.left - 1 ||
+        r.right > c.right + 1 ||
+        r.top < c.top - 1 ||
+        r.bottom > c.bottom + 1
+      )
+        continue
+      if (r.width < c.width - 1 || r.height < c.height - 1) enclosing.add(c)
+    }
+    open.push(r)
+  }
+  return rects.filter((r) => !enclosing.has(r))
 }
 
 /**
@@ -192,18 +253,7 @@ export function selectionQuadsByPage(
 
   // Selection rects mix element-level big boxes with overlapping span-level ones: drop boxes containing others, then dedupe by pixel
   const raw = [...range.getClientRects()].filter((r) => r.width > 1 && r.height > 1)
-  const rects = raw.filter(
-    (r, i) =>
-      !raw.some(
-        (o, j) =>
-          j !== i &&
-          r.left <= o.left + 1 &&
-          r.right >= o.right - 1 &&
-          r.top <= o.top + 1 &&
-          r.bottom >= o.bottom - 1 &&
-          (o.width < r.width - 1 || o.height < r.height - 1),
-      ),
-  )
+  const rects = dropEnclosingRects(raw)
 
   const rectsByPage = new Map<number, ViewRect[]>()
   const seen = new Set<string>()

@@ -77,8 +77,18 @@ function readColorNode(node: unknown): string | undefined {
   const srgb = asXmlNode(n['a:srgbClr'])
   if (n['a:srgbClr']) return '#' + String(srgb['@_val']).toUpperCase()
   const sys = asXmlNode(n['a:sysClr'])
-  if (n['a:sysClr']) return '#' + String(sys['@_lastClr'] ?? '000000').toUpperCase()
+  if (n['a:sysClr']) return sysColorHex(sys['@_val'], sys['@_lastClr'])
   return undefined
+}
+
+/**
+ * PowerPoint paints `window`/`windowText` as the live system colors (white/black on every
+ * modern desktop) and ignores a stale `lastClr`; other system colors keep the cached value.
+ */
+export function sysColorHex(val: unknown, lastClr: unknown): string {
+  if (val === 'window') return '#FFFFFF'
+  if (val === 'windowText') return '#000000'
+  return '#' + String(lastClr ?? '000000').toUpperCase()
 }
 
 /** Font typeface attribute of e.g. fontScheme['a:majorFont']['a:latin'] (undefined when absent). */
@@ -265,8 +275,9 @@ const CLR_MAP_NAMES = [
 function clrMapFromTag(tag: string): Record<string, string> | undefined {
   const out: Record<string, string> = {}
   for (const name of CLR_MAP_NAMES) {
-    const m = new RegExp(`\\b${name}="([^"]+)"`).exec(tag)
-    if (m) out[name] = m[1]
+    // OPC allows single quotes, so match the attribute value either way round
+    const v = new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`).exec(tag)?.[2]
+    if (v) out[name] = v
   }
   return Object.keys(out).length ? out : undefined
 }

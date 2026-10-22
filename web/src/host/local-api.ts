@@ -41,7 +41,11 @@ export const LOCAL_HANDLERS: Partial<Record<keyof DesktopApi, LocalHandler>> = {
     }
     // A workbook is untrusted input, and its hyperlinks are attacker-supplied
     // strings. javascript: and data: URLs in a new tab run in this origin.
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'mailto:') {
+    if (
+      parsed.protocol !== 'http:' &&
+      parsed.protocol !== 'https:' &&
+      parsed.protocol !== 'mailto:'
+    ) {
       return Promise.reject(new Error(`Refusing to open a ${parsed.protocol} URL`))
     }
     const opened = window.open(parsed.href, '_blank', 'noopener,noreferrer')
@@ -107,4 +111,35 @@ export const LOCAL_HANDLERS: Partial<Record<keyof DesktopApi, LocalHandler>> = {
    * empty string reads as "no path", which is the truth.
    */
   getPathForFile: (() => '') as LocalHandler,
+
+  /**
+   * The shell's headless-export handshake: it queues an output path before the
+   * renderer boots, and the renderer asks for it on every start. There is no
+   * shell here, so there is never a queued path -- and `null` is upstream's own
+   * word for that, which its boot path already handles.
+   *
+   * Answered locally rather than left 'todo' because the renderer calls it
+   * unconditionally at boot: a rejection there is an uncaught error on every
+   * open, which is how this one was found (`npm run check:frame`).
+   */
+  consumeHeadlessExport: (() => Promise.resolve(null)) as LocalHandler,
+
+  /**
+   * Threaded-comment authorship. The shell knows the signed-in user; here the
+   * server does, through `identify()`, and does not serve it yet -- so this
+   * answers with upstream's own "unknown" value, the empty string, rather than
+   * rejecting at boot or inventing a name that would be written into comments.
+   *
+   * When the server serves it, this becomes an 'http' entry and the note in
+   * coverage.ts goes with it.
+   */
+  getUserDisplayName: (() => Promise.resolve('')) as LocalHandler,
+
+  /**
+   * The desktop MCP bridge announces readiness to the shell. `onMcpCommand` is
+   * a no-op subscription here, so the bridge installs and then announces into
+   * nothing: a send with no listener, which is a no-op and not a failure.
+   */
+  signalMcpReady: (() => {}) as LocalHandler,
+  reportMcpResult: (() => {}) as LocalHandler,
 }

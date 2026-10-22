@@ -7,7 +7,7 @@ code has to follow.
 See `PLAN.md` → "Drift management" for the escalation tiers and the rebase
 runbook.
 
-Baseline upstream SHA: `d2b898f`
+Baseline upstream SHA: `58dfd0b5`
 
 That is the commit the watch list was last **reviewed** at, and
 `npm run check:drift` diffs it against a fetched `upstream/main` to report

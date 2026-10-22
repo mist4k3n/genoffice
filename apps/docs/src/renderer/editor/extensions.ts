@@ -1,4 +1,9 @@
+import { ScriptFonts } from './script-fonts'
+import { MultiSelect } from './multi-select'
 import { Editor, Extension, Node } from '@tiptap/core'
+import { SHAPE_INLINE_WRAP } from './floating-z-order'
+import { StreamingTailGuardExtension } from './streaming-tail-guard'
+import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
 import { Gapcursor, UndoRedo } from '@tiptap/extensions'
 import { DOMSerializer } from '@tiptap/pm/model'
@@ -13,6 +18,9 @@ import {
   type Transaction,
 } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { appendsAtEnd, touchedTopLevelBlocks } from './touched-blocks'
+import { containsNode, localEditBlocks, touchedNeedsRecompute } from './local-edit'
+import { installProseMirrorPerf } from './prosemirror-perf'
 import type { EditorView } from '@tiptap/pm/view'
 import {
   CellSelection,
@@ -25,60 +33,110 @@ import {
   tableEditing,
 } from '@tiptap/pm/tables'
 import {
-  autospaceBoundaries,
+  asciiOnlyCjkFace,
+  autospaceSeams,
+  autospaceLatinFirst,
+  autospaceMode,
   autospacePadBetween,
+  autospacePadClass,
+  autospacePadScale,
+  latinAutospaceGapEm,
+  krNoBreakOffsets,
+  type AutospaceMode,
   codePointLengthAt,
   cjkDeclaredLineFactor,
   cjkScriptRanges,
+  emptyEaSlotHangulFactor,
   cssAutoLineMult,
   cssFontFamily,
   cssRunFontFamily,
+  cutAdjustedAlias,
+  hangulSpaceOffsets,
+  hangulSpaceWideningOn,
   cssGridSpacingPt,
+  cssLeadTop,
   cssLineHeight,
+  cssExactLineCap,
+  fontBoxCss,
   isCjkFontName,
   lineHeightFactor,
+  nonCjkInkRanges,
+  symbolBulletLinePt,
+  oversizedMarkerExtraPt,
   paraLineFactorCss,
   SIMSUN_GAP_CHAR_RE,
   simsunGapLineFactor,
+  SPACE_ONLY_RE,
   strutFontCss,
   textHasCjk,
   justifySymbolRanges,
   textHasHangul,
   textHasLatinInk,
+  runLatinFactorFaces,
+  cssCsFontFamily,
+  textHasComplexScript,
   cssSimsunGapLineExpr,
-  WORD_AUTO_SPACING_PT,
+  autoSpacingPt,
+  spaceBeforeProp,
 } from '../line-metrics'
+import { textAlignDecl } from './text-effects'
 import { noteMarkText } from '../note-format'
 import { t } from '../i18n/locale'
 import {
   ommlToMathML,
+  parseLazyMediaUrl,
   patchMathTokens,
   type ChartDisplay,
   type DiagramDisplay,
   type DocDefaults,
   type FieldDisplay,
   type FormulaDisplay,
+  type ImageEffects,
   type NewChart,
   type NumberingDef,
   type NumberingLevel,
+  type ParaFrameBox,
   type Run,
   type StrayIndent,
   type StyleDisplay,
   type StyleInfo,
+  type TabStop,
   type TableCell,
   type TableModel,
   type TextboxDisplay,
   type TextboxListMarker,
+  type ParaFrame,
+  type TextFlowDirection,
 } from '@genoffice/docx-engine'
 import {
-  bulletMarkerScale,
+  substituteBullet,
+  markerFallbackFace,
+  SEGOE_UI_SYMBOL_RE,
   computeListMarkerInfos,
   markerTabAdvance,
   type ListItemRef,
 } from './numbering'
 import { symbolFontCovers } from '../font-check'
 import { dropActiveSubEditor, notifySubEditorState, setActiveSubEditor } from './active-editor'
-import { borderLineCss, paraBorderCss } from './hf-dom'
+import {
+  type BorderLine,
+  borderDrawnPx,
+  borderTruePx,
+  cellDiagonalCss,
+  cellPadPx,
+} from './border-metrics'
+import {
+  borderLineCss,
+  PARA_BORDER_SHADOW,
+  paraBorderCss,
+  paraBorderLinesWithPad,
+  paraBorderPadding,
+  paraBorderPaddingDecls,
+  paraBorderShadowDecls,
+} from './hf-dom'
+import { paraFrameCss } from './para-frame'
+
+installProseMirrorPerf()
 
 export { borderLineCss }
 import {
@@ -87,20 +145,49 @@ import {
   parseInlineRuleEl,
   type InlineRule,
 } from './inline-rule'
-import { DK_SIDE, dkBackground, dkBorder, dkColor, dkTableBorders } from './dark-page'
+import {
+  DK_SIDE,
+  darkPageColor,
+  dkBackground,
+  dkBackgroundImage,
+  dkBorder,
+  dkColor,
+  dkTableBorders,
+} from './dark-page'
+import { effectivePPrCss } from './effective-css'
 import { fillInk } from './shading-ink'
+import { FloatTableSpacingExtension } from './float-table-spacing'
 import {
   FloatVShiftsExtension,
   PaginationGapsExtension,
   RowFillsExtension,
 } from './pagination-gaps'
-import { CaretMarksMemory, FORMAT_MARKS, firstTextMarksIn, serializeMarks } from './caret-marks'
-import { insertPageBreak } from './page-break'
+import {
+  CaretMarksMemory,
+  FORMAT_MARKS,
+  firstParaFormatIn,
+  firstTextMarksIn,
+  paraFormatIsDefault,
+  serializeMarks,
+} from './caret-marks'
+import { insertColumnBreak, insertPageBreak } from './page-break'
 import { ColumnLayoutExtension } from './column-layout'
+import { WrapObstaclesExtension } from './wrap-obstacles'
 import { TableHandle } from './table-handle'
 import { TRACK_IGNORE, TrackChangesExtension } from './revisions'
-import { inlineToRuns, runsToInline, textboxParaSignature, type PmNode as PmJson } from './convert'
+import {
+  cellSpacingBorderPx,
+  cellSpacingGridSharesTwips,
+  inlineToRuns,
+  runsToInline,
+  textboxParaSignature,
+  type PmNode as PmJson,
+} from './convert'
+import { inlineMathML } from './equation'
 import { constrainTableWidthAtCell } from './table-sizing'
+import { tableColumnDrag } from './table-column-drag'
+import { tableRowDrag } from './table-row-drag'
+import { PERSISTABLE_IMAGE_URL } from './persistable-image'
 
 /**
  * Custom schema mirroring the docx-engine Block model 1:1.
@@ -110,7 +197,8 @@ import { constrainTableWidthAtCell } from './table-sizing'
 
 import {
   CHART_MAX_WIDTH_PX,
-  CHART_TITLE_ROW_PX,
+  chartTitleRowPx,
+  cellBoxesSpec,
   drawChartSvg,
   renderChartSpec,
   renderFieldSpec,
@@ -128,7 +216,10 @@ import {
   CommentMark,
   DelMark,
   InsMark,
+  CtrlCheckboxMark,
+  FormatOffClearExtension,
   InstrFieldMark,
+  SymMark,
   ItalicMark,
   LinkMark,
   RefFieldMark,
@@ -138,6 +229,7 @@ import {
   TextStyleMark,
   UnderlineMark,
 } from './marks'
+import { DocRedaction } from './redaction'
 import {
   DropCapExtension,
   EaHintQuotesExtension,
@@ -155,8 +247,11 @@ import {
 import { JustifyShrinkExtension } from './justify-shrink'
 import { CjkPunctShrinkExtension } from './cjk-punct-shrink'
 import { AutoDirectionExtension } from './direction'
+import { AutoCorrectExtension } from './autocorrect'
 import { InactiveSelectionExtension } from './inactive-selection'
+import { FieldCodesExtension } from './field-codes'
 import { AiQueueAnchorsExtension } from './ai-queue-anchors'
+import { CheckboxToggleExtension } from './checkbox-toggle'
 import { PageGapNavExtension } from './page-gap-nav'
 import { TrailingTableExitExtension } from './trailing-table-exit'
 import { moveBlocks } from './move-block'
@@ -171,6 +266,8 @@ export * from './decoration-extensions'
 
 const anchorAttrs = {
   docxIndex: { default: null as number | null },
+  /** JSON of the table-style paragraph properties (convert.ts tableStyleParaAttr); display only */
+  tblPara: { default: null as string | null },
   styleId: { default: null as string | null },
   aiChanged: { default: false },
   /** user bookmark names starting in this paragraph */
@@ -191,6 +288,10 @@ const anchorAttrs = {
   indentLeft: { default: null as number | null },
   indentRight: { default: null as number | null },
   indentFirstLine: { default: null as number | null },
+  /** w:firstLineChars (hundredths of a character, 200 = 2 chars): the first-line
+   *  indent as a character unit — rescales with the first run's font size
+   *  (issue #1892); indentFirstLine carries the resolved twips twin */
+  indentFirstLineChars: { default: null as number | null },
   spaceBefore: { default: null as number | null },
   spaceAfter: { default: null as number | null },
   /** w:beforeAutospacing / w:afterAutospacing: Word's HTML auto spacing (14pt) replaces
@@ -199,17 +300,23 @@ const anchorAttrs = {
   spaceAfterAuto: { default: null as boolean | null },
   /** w:contextualSpacing on the pPr itself; false = explicit off overriding the style */
   contextualSpacing: { default: null as boolean | null },
+  /** pagination flags on the pPr itself (tri-state; null = the style's value shows through) */
+  keepNext: { default: null as boolean | null },
+  keepLines: { default: null as boolean | null },
+  widowControl: { default: null as boolean | null },
+  suppressLineNumbers: { default: null as boolean | null },
   // never copied to the second half of an Enter split: Word's page break is a
   // character before the paragraph content, so a newline must not clone the
-  // break onto the new paragraph (alpha ledger r157)
+  // break onto the new paragraph
   pageBreakBefore: { default: false, keepOnSplit: false },
   /** RTL paragraph (w:bidi); align is already the visual value */
   bidi: { default: false },
   /** render-only RTL inferred from run w:rtl / RTL script when w:bidi is absent
       (HTML-converted docs); align is the visual value as-is, never saved */
   bidiInferred: { default: false },
-  /** CJK-Latin/digit auto spacing (w:autoSpaceDE/DN); null = Word default on */
-  autoSpace: { default: null as boolean | null },
+  /** CJK-Latin/digit auto spacing (w:autoSpaceDE/DN); null = Word default on,
+   *  'latin' / 'digits' = only that kind of gap */
+  autoSpace: { default: null as boolean | 'latin' | 'digits' | null },
   /** w:wordWrap; false = hangul words may break between syllables (Word's allow-word-split option) */
   wordWrap: { default: null as boolean | null },
   /** w:overflowPunct; false = a line-end CJK stop never hangs into the margin */
@@ -219,20 +326,32 @@ const anchorAttrs = {
   shadingFill: { default: null as string | null },
   /** display-only pattern-shading blend (w:shd pctNN); never saved back */
   shadingDisplay: { default: null as string | null },
+  /** explicit w:shd fill=auto: cancels the style's shading (display-only) */
+  shadingClear: { default: null as boolean | null },
   /** sides a direct w:pBdr resets to none: cancels the style-level border (display-only) */
   borderReset: { default: null as string | null },
+  /** JSON ParaFrameBox: w:framePr width/height/wrap the paragraph lays out in (display-only) */
+  frameBox: { default: null as string | null },
   /** w:sz (half-points) of the paragraph mark / dropped empty runs; sizes the line of run-less paragraphs */
   emptyRunSize: { default: null as number | null },
   /** w:rFonts of the paragraph mark / dropped empty runs; faces the line of run-less paragraphs */
   emptyRunFont: { default: null as string | null },
+  /** w:sz (half-points) of the paragraph mark; sizes the list marker */
+  markSize: { default: null as number | null },
   /** subset of "tblr": which sides have a single-line border */
   borders: { default: null as string | null },
   /** JSON per-side {color?,szPt?} for `borders` (w:pBdr declared look) */
   borderLines: { default: null as string | null },
+  /** JSON per-side pt: w:space of reset sides, kept as padding / shading-box widening (display-only) */
+  borderPad: { default: null as string | null },
   /** custom tab stops JSON: Array<{pos:number,val:string,leader?:string}> */
   tabStops: { default: null as string | null },
   /** drop cap: JSON {type:'drop'|'margin',lines:number} */
   dropCap: { default: null as string | null },
+  /** positioned frame: JSON ParaFrame (w:framePr with a width) */
+  frame: { default: null as string | null },
+  /** w:pPr w:textDirection: tbRl | tbRlV | btLr (rendered inside frames) */
+  textDirection: { default: null as string | null },
   /** SDT shell: JSON SdtShell (alias, tag, controlType, openXml, closeXml) */
   sdtShell: { default: null as string | null },
   /** move revision type: 'from' (content moved away) or 'to' (content moved here) */
@@ -241,37 +360,178 @@ const anchorAttrs = {
   pPrChange: { default: null as string | null },
   /** JSON {author,date?,id?} when the paragraph mark is a tracked deletion (w:pPr/w:rPr/w:del) */
   paraMarkDel: { default: null as string | null },
+  /** JSON {author,date?,id?} when the paragraph mark is a tracked insertion (w:pPr/w:rPr/w:ins) */
+  paraMarkIns: { default: null as string | null },
   /** top-level insertion/deletion revision ({kind,author,date?}) */
   blockRevision: { default: null as Record<string, string> | null },
   /** JSON marks snapshot for an empty block's caret (Word's pilcrow
       formatting): stamped while the caret holds stored marks in an empty
       block, restored as storedMarks when the caret re-enters bare — arrow
-      navigation must not drop the pending format (alpha ledger r114) */
+      navigation must not drop the pending format */
   caretMarks: { default: null as string | null },
 }
 
-/** Max explicit run size (half-points, plus size uniformity) when *every* text child declares one, else null.
- *  Any run inheriting the body size keeps the inherited strut (conservative: never shrinks a line Word would keep tall). */
-function explicitStrutHalfPoints(node: {
+/** Word lays a space-only paragraph out like an empty one: the mark sizes the line;
+ *  page/column breaks beside the spaces keep it mark-sized */
+function isSpaceOnlyParagraph(node: {
+  textContent?: string
+  childCount?: number
   descendants?: PmNode['descendants']
-}): { halfPoints: number; uniform: boolean } | null {
+}): boolean {
+  if (!node.childCount || !node.descendants || !SPACE_ONLY_RE.test(node.textContent ?? ''))
+    return false
+  let textOnly = true
+  node.descendants((child) => {
+    const pageOrColBreak =
+      child.type.name === 'hardBreak' && !!(child.attrs.pageBreak || child.attrs.colBreak)
+    if (!child.isText && !pageOrColBreak) textOnly = false
+    return false
+  })
+  return textOnly
+}
+
+function isBreakOnlyParagraph(node: { childCount?: number; forEach?: PmNode['forEach'] }): boolean {
+  if (!node.childCount || !node.forEach) return false
+  let breaksOnly = true
+  node.forEach((child) => {
+    if (child.type.name !== 'hardBreak') breaksOnly = false
+  })
+  return breaksOnly
+}
+
+/** run size the mark paints: its own w:sz(Cs), else the Cs size an rtl run inherits */
+function markSizeHalfPoints(attrs: Record<string, unknown> | undefined): number | null {
+  return (attrs?.sizeHalfPoints ?? attrs?.csSize ?? null) as number | null
+}
+
+/** Smallest explicit run size (half-points) when *every* text child declares one, else null.
+ *  Any run inheriting the body size keeps the inherited strut (conservative: never shrinks a line Word would keep tall). */
+function explicitStrutHalfPoints(node: { descendants?: PmNode['descendants'] }): number | null {
   if (!node.descendants) return null
-  let max: number | null = null
   let min: number | null = null
   let inherited = false
   node.descendants((child) => {
     if (inherited) return false
     if (!child.isText) return true
-    const sz = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs.sizeHalfPoints as
-      number | null | undefined
+    // space-only runs never size a line (Word probe 2026-09-11)
+    if (SPACE_ONLY_RE.test(child.text ?? '')) return false
+    const sz = markSizeHalfPoints(child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs)
     if (sz == null) inherited = true
-    else {
-      max = Math.max(max ?? 0, sz)
-      min = Math.min(min ?? Infinity, sz)
+    else min = Math.min(min ?? Infinity, sz)
+    return false
+  })
+  return inherited ? null : min
+}
+
+/**
+ * Cell paragraph whose declared Latin faces differ in line factor: each run
+ * keeps its own line box (styles.css .doc-mixed-face) because a shorter face
+ * centred in the inherited line-height lifts the line above the strut, while
+ * Word lays a mixed line at max ascent + max descent (probe 2026-09-30).
+ * Numeric strut factor only (every run declares a face) and one run size
+ * (uniform or all inherited): then no run box can exceed the strut line, so
+ * the strut keeps carrying a typed grid in adjustLineHeightInTable cells.
+ */
+function paraMixedFaceClass(
+  node: { textContent?: string; descendants?: PmNode['descendants'] },
+  factor: string,
+): string | undefined {
+  const max = Number(factor)
+  if (!Number.isFinite(max) || !node.descendants || textHasCjk(node.textContent ?? ''))
+    return undefined
+  let mixed = false
+  let oneSize = true
+  let size: number | null | undefined
+  node.descendants((child) => {
+    if (!oneSize) return false
+    if (!child.isText) return true
+    if (SPACE_ONLY_RE.test(child.text ?? '')) return false
+    const attrs = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs
+    const sz = markSizeHalfPoints(attrs)
+    if (size === undefined) size = sz
+    else if (size !== sz) oneSize = false
+    for (const family of runLatinFactorFaces(
+      child.text ?? '',
+      attrs?.fontAscii as string | null | undefined,
+      attrs?.csFont as string | null | undefined,
+    )) {
+      if (family && lineHeightFactor(family) < max - 1e-3) mixed = true
     }
     return false
   })
-  return inherited || max === null ? null : { halfPoints: max, uniform: max === min }
+  return mixed && oneSize ? 'doc-mixed-face' : undefined
+}
+
+/**
+ * Mixed Latin + complex-script paragraph at one run size: every cs span
+ * (marks.ts data-cs) gives up its own line box (styles.css .doc-cs-mixed) and
+ * the strut, already at the tallest face's factor, sizes the line. Chromium
+ * centres each face in the inherited line-height, so an Arial Arabic span under
+ * a Calibri strut paced 1.31em where Word paces 1.22 (probe 2026-10-13). One
+ * run size only: with mixed sizes the strut shrinks to the smallest run.
+ */
+function paraCsMixedClass(node: {
+  textContent?: string
+  attrs?: Record<string, unknown>
+  descendants?: PmNode['descendants']
+}): string | undefined {
+  const text = node.textContent ?? ''
+  const rule = node.attrs?.lineRule
+  if (rule === 'exact' || rule === 'atLeast' || !node.descendants) return undefined
+  if (!textHasComplexScript(text) || !/[A-Za-z]/.test(text) || textHasCjk(text)) return undefined
+  let csRun = false
+  let oneSize = true
+  let size: number | null | undefined
+  node.descendants((child) => {
+    if (!oneSize) return false
+    if (!child.isText) return true
+    if (SPACE_ONLY_RE.test(child.text ?? '')) return false
+    const attrs = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs
+    const sz = markSizeHalfPoints(attrs)
+    if (size === undefined) size = sz
+    else if (size !== sz) oneSize = false
+    if (attrs?.csFont && textHasComplexScript(child.text ?? '')) csRun = true
+    return false
+  })
+  return csRun && oneSize ? 'doc-cs-mixed' : undefined
+}
+
+/**
+ * One-size Latin paragraph with a bold/italic run of a per-cut size-adjusted
+ * alias (line-metrics cutAdjustedAlias): the span's box differs in size from
+ * the regular-cut strut and the union inflates the line (Merriweather 10.5pt
+ * label/value lines paced 13.5 where Word paces 13.2, prod corpus 20261020
+ * sample 043). The run gives up its own box (styles.css .doc-cut-adjusted).
+ */
+function paraCutAdjustedClass(node: {
+  textContent?: string
+  attrs?: Record<string, unknown>
+  descendants?: PmNode['descendants']
+}): string | undefined {
+  const rule = node.attrs?.lineRule
+  if (rule === 'exact' || rule === 'atLeast' || !node.descendants) return undefined
+  if (textHasCjk(node.textContent ?? '')) return undefined
+  let cutRun = false
+  let oneSize = true
+  let size: number | null | undefined
+  node.descendants((child) => {
+    if (!oneSize) return false
+    if (!child.isText) return true
+    if (SPACE_ONLY_RE.test(child.text ?? '')) return false
+    const attrs = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs
+    const sz = markSizeHalfPoints(attrs)
+    if (size === undefined) size = sz
+    else if (size !== sz) oneSize = false
+    if (
+      !cutRun &&
+      attrs?.fontAscii &&
+      child.marks.some((m) => m.type.name === 'bold' || m.type.name === 'italic') &&
+      cutAdjustedAlias(cssRunFontFamily(String(attrs.fontAscii), null))
+    )
+      cutRun = true
+    return false
+  })
+  return cutRun && oneSize ? 'doc-cut-adjusted' : undefined
 }
 
 /**
@@ -292,12 +552,20 @@ function latinParaFactor(
     if (!child.isText) return true
     if (latinInkOnly && !textHasLatinInk(child.text ?? '')) return false
     const attrs = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs
+    // per-line mode lifts an ascii-only CJK face through its own stretches
+    if (latinInkOnly && attrs && asciiOnlyCjkFace(attrs)) return false
     // ascii/hAnsi slot only: Word lays Latin text with the (possibly inherited)
     // ascii face, so an eastAsia-only declaration (attrs.font) must not drag
     // its factor onto a Latin line (EA "Arial Unicode MS" = 1.74, sample 13)
-    const family = attrs?.fontAscii as string | null | undefined
-    if (family) declaredMax = Math.max(declaredMax, lineHeightFactor(family))
-    else undeclared = true
+    const faces = runLatinFactorFaces(
+      child.text ?? '',
+      attrs?.fontAscii as string | null | undefined,
+      attrs?.csFont as string | null | undefined,
+    )
+    for (const family of faces) {
+      if (family) declaredMax = Math.max(declaredMax, lineHeightFactor(family))
+      else undeclared = true
+    }
     return false
   })
   if (declaredMax <= 0) return scriptVar
@@ -309,8 +577,52 @@ function latinParaFactor(
  *  so a paragraph face with a taller ascent than the runs' inflates every line
  *  past the computed line-height. No run inherits the face, so only the strut
  *  (and list markers without their own font) changes. */
-function paraDeclaredFontFamily(node: { descendants?: PmNode['descendants'] }): string | null {
+/**
+ * Complex-script-only paragraph (Arabic/Hebrew text, no Latin letters): Word
+ * lays every line in the w:cs face, so the strut takes that face as well. A
+ * Latin strut (Calibri) under cs spans (Arial) unions two differently centred
+ * boxes and paces 1.25em where Word paces Arial's 1.15 (probe 2026-10-13).
+ * Null when a run lacks a cs face or the runs' cs chains differ.
+ */
+function paraComplexScriptFamily(node: {
+  textContent?: string
+  descendants?: PmNode['descendants']
+}): string | null {
+  const text = node.textContent ?? ''
+  if (!node.descendants || !textHasComplexScript(text) || /[A-Za-z]/.test(text)) return null
+  if (textHasCjk(text)) return null
+  let family: string | null = null
+  let bail = false
+  node.descendants((child) => {
+    if (bail) return false
+    if (!child.isText) return true
+    if (SPACE_ONLY_RE.test(child.text ?? '')) return false
+    const attrs = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs
+    const cs = attrs?.csFont ? String(attrs.csFont) : null
+    if (!cs) {
+      bail = true
+      return false
+    }
+    // same chain the run's span renders (marks.ts), so the strut face equals the run face
+    const chain = cssCsFontFamily(
+      cs,
+      attrs?.fontAscii ? String(attrs.fontAscii) : undefined,
+      attrs?.font ? String(attrs.font) : undefined,
+    )
+    if (family === null) family = chain
+    else if (family !== chain) bail = true
+    return false
+  })
+  return bail ? null : family
+}
+
+function paraDeclaredFontFamily(node: {
+  textContent?: string
+  descendants?: PmNode['descendants']
+}): string | null {
   if (!node.descendants) return null
+  const csFamily = paraComplexScriptFamily(node)
+  if (csFamily) return csFamily
   let first: string | null = null
   let inherited = false
   node.descendants((child) => {
@@ -350,6 +662,17 @@ function paraMixedDeclaredCjk(node: { descendants?: PmNode['descendants'] }): bo
   return declaredCjk && inherited
 }
 
+/** .doc-ea-strut: inheriting paragraphs whose CJK stretches render through the
+ *  --doc-east-asian-font spans, a primary face other than the strut's. Only
+ *  documents whose EA face carries a Word metric alias style it (doc-style-css). */
+function eaStrutClass(node: {
+  textContent?: string
+  descendants?: PmNode['descendants']
+}): string | undefined {
+  if (paraMixedDeclaredCjk(node)) return 'doc-grid-strut'
+  return textHasCjk(node.textContent ?? '') ? 'doc-ea-strut' : undefined
+}
+
 /**
  * Per-paragraph --doc-line-factor value: CJK runs with a declared font take that
  * font's LO-metric factor (max over runs); undeclared CJK runs keep the
@@ -372,18 +695,33 @@ function paraLineFactor(node: {
     // document font choice: LO cascades such runs to the document's EA default,
     // so they count as undeclared here (the doc-level var carries that factor).
     // Latin-named faces likewise don't drive CJK line height — an ascii-only
-    // "Times New Roman" run still renders its CJK via the inherited EA font.
+    // "Times New Roman" run still renders its CJK via the inherited EA font,
+    // and so does an ascii-only CJK-named face (probe 2026-09-30).
     const family =
-      mark?.attrs.eaSlotEmpty === true
+      mark?.attrs.eaSlotEmpty === true || (mark && asciiOnlyCjkFace(mark.attrs))
         ? null
         : ((mark?.attrs.font ?? mark?.attrs.fontAscii) as string | null | undefined)
-    if (family && isCjkFontName(family)) {
+    const emptySlotKr =
+      mark?.attrs.eaSlotEmpty === true
+        ? emptyEaSlotHangulFactor(mark.attrs.font as string | null, child.text ?? '')
+        : null
+    if (emptySlotKr !== null) declaredMax = Math.max(declaredMax, emptySlotKr)
+    else if (family && isCjkFontName(family)) {
       declaredMax = Math.max(declaredMax, cjkDeclaredLineFactor(family) ?? lineHeightFactor(family))
     } else undeclaredCjk = true
     return false
   })
   if (declaredMax <= 0) return scriptVar
   return undeclaredCjk ? `max(${scriptVar}, ${declaredMax})` : String(declaredMax)
+}
+
+/** a picture paragraph's mark line follows its Latin face; the eastAsia slot
+ *  only counts when it is the sole declared face */
+function pictureMarkLineFactor(latin: string | null, eastAsia: string | null): string | null {
+  if (latin) return String(lineHeightFactor(latin))
+  if (eastAsia && isCjkFontName(eastAsia))
+    return String(cjkDeclaredLineFactor(eastAsia) ?? lineHeightFactor(eastAsia))
+  return null
 }
 
 type RunFactorRange = { from: number; to: number; style: string }
@@ -411,17 +749,31 @@ function perLineFactors(node: PmNode): { strut: string; runs: RunFactorRange[] }
   node.forEach((child) => {
     if (child.isText && child.text) {
       const mark = child.marks.find((m) => m.type.name === 'docTextStyle')
+      const asciiCjk = mark ? asciiOnlyCjkFace(mark.attrs) : null
       const family =
-        mark?.attrs.eaSlotEmpty === true
+        mark?.attrs.eaSlotEmpty === true || asciiCjk
           ? null
           : ((mark?.attrs.font ?? mark?.attrs.fontAscii) as string | null | undefined)
+      const emptySlotKr =
+        mark?.attrs.eaSlotEmpty === true
+          ? emptyEaSlotHangulFactor(mark.attrs.font as string | null, child.text)
+          : null
       const factor =
-        family && isCjkFontName(family)
-          ? String(cjkDeclaredLineFactor(family) ?? lineHeightFactor(family))
-          : scriptVar
+        emptySlotKr !== null
+          ? String(emptySlotKr)
+          : family && isCjkFontName(family)
+            ? String(cjkDeclaredLineFactor(family) ?? lineHeightFactor(family))
+            : scriptVar
       const style = `--doc-line-factor:${factor}${lh ? `;line-height:${lh}` : ''}`
       for (const r of cjkScriptRanges(child.text)) {
         runs.push({ from: offset + r.from, to: offset + r.to, style })
+      }
+      // the ascii-only CJK face draws only the non-CJK glyphs; Word lifts just their lines
+      if (asciiCjk) {
+        const lift = `--doc-line-factor:${lineHeightFactor(asciiCjk)}${lh ? `;line-height:${lh}` : ''}`
+        for (const r of nonCjkInkRanges(child.text)) {
+          runs.push({ from: offset + r.from, to: offset + r.to, style: lift })
+        }
       }
     }
     offset += child.nodeSize
@@ -435,7 +787,7 @@ function perLineFactors(node: PmNode): { strut: string; runs: RunFactorRange[] }
  * a crafted/corrupt payload can't smuggle wrong-typed values into the model.
  * Identity/anchor attrs stay out on purpose: a pasted paragraph is NEW content,
  * so docxIndex (save patch anchor), bookmarks, comment endpoints, sdtShell and
- * revision metadata must not be duplicated by copy/paste (alpha ledger r117).
+ * revision metadata must not be duplicated by copy/paste.
  */
 const CLIPBOARD_PARA_ATTR_TYPES: Record<string, 'string' | 'number' | 'boolean'> = {
   styleId: 'string',
@@ -447,11 +799,16 @@ const CLIPBOARD_PARA_ATTR_TYPES: Record<string, 'string' | 'number' | 'boolean'>
   indentLeft: 'number',
   indentRight: 'number',
   indentFirstLine: 'number',
+  indentFirstLineChars: 'number',
   spaceBefore: 'number',
   spaceAfter: 'number',
   spaceBeforeAuto: 'boolean',
   spaceAfterAuto: 'boolean',
   contextualSpacing: 'boolean',
+  keepNext: 'boolean',
+  keepLines: 'boolean',
+  widowControl: 'boolean',
+  suppressLineNumbers: 'boolean',
   pageBreakBefore: 'boolean',
   bidi: 'boolean',
   bidiInferred: 'boolean',
@@ -461,14 +818,20 @@ const CLIPBOARD_PARA_ATTR_TYPES: Record<string, 'string' | 'number' | 'boolean'>
   eaLang: 'string',
   shadingFill: 'string',
   shadingDisplay: 'string',
+  shadingClear: 'boolean',
   borderReset: 'string',
+  frameBox: 'string',
   emptyRunSize: 'number',
   emptyRunFont: 'string',
+  markSize: 'number',
   borders: 'string',
   borderLines: 'string',
+  borderPad: 'string',
   outlineOnly: 'boolean',
   tabStops: 'string',
   dropCap: 'string',
+  frame: 'string',
+  textDirection: 'string',
   // docListItem identity (paragraphs never set them; ProseMirror drops attrs
   // unknown to the parsing node type). numId stays out: a pasted copy pointing
   // at another document's numbering table would dangle.
@@ -507,11 +870,61 @@ export function clipboardParaAttrs(el: HTMLElement): Record<string, unknown> | n
   const attrs: Record<string, unknown> = {}
   for (const [key, type] of Object.entries(CLIPBOARD_PARA_ATTR_TYPES)) {
     const v = (parsed as Record<string, unknown>)[key]
-    if (typeof v !== type) continue
+    if (typeof v !== type && !(key === 'autoSpace' && (v === 'latin' || v === 'digits'))) continue
     if (type === 'number' && !Number.isFinite(v)) continue
     attrs[key] = v
   }
   return Object.keys(attrs).length > 0 ? attrs : null
+}
+
+/**
+ * Word orders a run without w:rtl left-to-right even inside a w:bidi paragraph
+ * (probe 2026-09-16: "arabic (LATIN)" keeps the Latin on the right, a leading
+ * bullet glyph stays at the left edge). The paragraph keeps its RTL start side
+ * and mirrored indents; only the text is isolated as one LTR item when no run
+ * is an RTL run. Runs marked rtl (or inheriting it) keep the browser's RTL base.
+ */
+function paraContentSpec(node: PmNode): DOMOutputSpec | 0 {
+  if (!(node.attrs.bidi || node.attrs.bidiInferred) || !node.textContent) return 0
+  let rtlRun = false
+  node.descendants((child) => {
+    if (child.isText && child.marks.some((m) => m.attrs.cs === true || m.attrs.rtl === true)) {
+      rtlRun = true
+    }
+    return !rtlRun
+  })
+  return rtlRun ? 0 : ['span', { class: 'doc-ltr-runs' }, 0]
+}
+
+/** every inline child is an in-flow picture (no wrap, no rule): the paragraph's
+ *  line is the picture extent (CSS .doc-p-pic) */
+function isPictureOnlyContent(node: {
+  childCount?: number
+  descendants?: PmNode['descendants']
+}): boolean {
+  if (!node.descendants) return false
+  let ok = true
+  node.descendants((child) => {
+    if (child.type.name !== 'docInlineImage' || child.attrs.wrap || child.attrs.rule) ok = false
+    return false
+  })
+  return ok
+}
+
+interface TblParaProps {
+  align?: string
+  spaceBefore?: number
+  spaceAfter?: number
+  line?: { rule: 'auto' | 'atLeast' | 'exact'; raw: number }
+}
+
+function tblParaOf(attrs: Record<string, unknown>): TblParaProps | undefined {
+  if (typeof attrs.tblPara !== 'string') return undefined
+  try {
+    return JSON.parse(attrs.tblPara) as TblParaProps
+  } catch {
+    return undefined
+  }
 }
 
 function blockAttrs(
@@ -519,6 +932,7 @@ function blockAttrs(
     attrs: Record<string, unknown>
     textContent?: string
     childCount?: number
+    firstChild?: PmNode | null
     descendants?: PmNode['descendants']
   },
   {
@@ -543,6 +957,16 @@ function blockAttrs(
   // textless paragraph: table-cell CSS shrinks these to the Latin line height
   // (an empty cell inheriting the CJK factor would out-grow the content cells)
   if (!node.textContent) classes.push('doc-p-empty')
+  // in-line pictures and nothing else: Word sizes the line to the picture
+  // extent, no strut or descent under it (probe 2026-10-13: a 19.5pt icon in a
+  // tcMar 40 cell makes a 23.52pt row; a text run beside it adds its descent)
+  const picOnly = !node.textContent && (node.childCount ?? 0) > 0 && isPictureOnlyContent(node)
+  if (picOnly) classes.push('doc-p-pic')
+  // a column break leading a paragraph with text has no line of its own: Word
+  // opens the next column with the first text line (CSS hides the break)
+  const lead = node.firstChild
+  if (lead?.type.name === 'hardBreak' && lead.attrs.colBreak && node.textContent)
+    classes.push('doc-lead-col-br')
   if (node.attrs.pageBreakBefore) {
     classes.push('page-break-before')
     attrs['data-page-break-label'] = t('editorPageBreak')
@@ -556,11 +980,14 @@ function blockAttrs(
     // table's dir="rtl" mirrors column order but must not reorder cell text
     styles.push('direction:ltr')
   }
-  // explicit autoSpaceDE/DN off also disables the browser's native 1/8em gap
-  if (node.attrs.autoSpace === false) styles.push('text-autospace:no-autospace')
-  if (node.attrs.align) {
-    styles.push(`text-align:${node.attrs.align === 'distribute' ? 'justify' : node.attrs.align}`)
+  // explicit autoSpaceDE/DN off also disables the browser's native 1/8em gap;
+  // with only one switch off the pads supply the remaining kind of gap alone
+  if (node.attrs.autoSpace != null && node.attrs.autoSpace !== true) {
+    styles.push('text-autospace:no-autospace')
   }
+  const tbl = tblParaOf(node.attrs)
+  if (node.attrs.align) styles.push(textAlignDecl(String(node.attrs.align)))
+  else if (tbl?.align) styles.push(textAlignDecl(tbl.align))
   // the line-height factor follows paragraph content (approximating Word's max-of-inline-fonts
   // line height): CJK paragraphs get the CJK factor, pure-Western ones the document's
   // font-aware Latin factor (doc-style-css sets --doc-line-factor-latin per body font).
@@ -568,20 +995,29 @@ function blockAttrs(
   // (LO probe: line height follows the requested face's metrics even when CJK
   // glyphs fall through to another font — EA "Times New Roman" lays at 1.15em);
   // the paragraph takes the max over its CJK runs, like Word's tallest-run rule.
-  if (node.textContent) {
+  const spaceOnly = isSpaceOnlyParagraph(node)
+  if (node.textContent && !spaceOnly) {
     // Word breaks Korean at spaces (UAX#14 default would break between syllables);
     // scoped to Hangul-bearing paragraphs so CJ text keeps per-char breaking.
     // overflow-wrap keeps the sim's overlong-word hard-break fallback.
     if (textHasHangul(node.textContent) && node.attrs.wordWrap !== false) {
       styles.push('word-break:keep-all', 'overflow-wrap:anywhere')
     }
-    styles.push(`--doc-line-factor:${paraLineFactor(node)}`)
+    const factor = paraLineFactor(node)
+    styles.push(`--doc-line-factor:${factor}`)
+    // CJK lines follow the East Asian factor rule, their glyph rest is unprobed
+    if (textHasCjk(node.textContent)) styles.push('--doc-lead-gap:0px')
     const fam = paraDeclaredFontFamily(node)
-    if (fam) styles.push(`font-family:${fam}`)
-    else if (paraMixedDeclaredCjk(node)) classes.push('doc-grid-strut')
+    const cls = fam ? paraMixedFaceClass(node, factor) : eaStrutClass(node)
+    if (fam) styles.push(`font-family:${fam}`, ...fontBoxCss(fam))
+    if (cls) classes.push(cls)
+    const csMixed = paraCsMixedClass(node)
+    if (csMixed) classes.push(csMixed)
+    const cutAdjusted = paraCutAdjustedClass(node)
+    if (cutAdjusted) classes.push(cutAdjusted)
     // Word's line strut follows run sizes; without this the paragraph inherits the
     // body size (often larger than table-cell runs) and every line box inflates.
-    // Mixed sizes shrink-only, a uniform run size sizes every line (strutFontCss)
+    // the smallest declared run size carries the strut; larger runs lay their own boxes (strutFontCss)
     const strut = explicitStrutHalfPoints(node)
     if (strut) styles.push(...strutFontCss(strut))
   } else {
@@ -593,18 +1029,49 @@ function blockAttrs(
     // CJK marks down to the document factor and doubled their grid rows)
     const fam = node.attrs.emptyRunFont ? String(node.attrs.emptyRunFont) : null
     if (fam) {
-      styles.push(`--doc-line-factor:${lineHeightFactor(fam)}`, `font-family:${cssFontFamily(fam)}`)
-    } else if (!node.childCount) {
+      const chain = cssFontFamily(fam)
+      styles.push(
+        `--doc-line-factor:${lineHeightFactor(fam)}`,
+        `font-family:${chain}`,
+        ...fontBoxCss(chain),
+      )
+      if (isCjkFontName(fam)) styles.push('--doc-lead-gap:0px')
+    } else if (!node.childCount || spaceOnly || isBreakOnlyParagraph(node)) {
       // a mark without its own w:rFonts lays the line with the inherited ascii
-      // face (Word probe 2026-09-05), not the document's CJK root factor
+      // face (Word probe 2026-09-05), not the document's CJK root factor; a
+      // break-only paragraph lays its break line the same way (Word probe
+      // 2026-10-20: ko-KR doc, Malgun eastAsia default, Calibri 11 break line
+      // still fits at 14pt remaining)
       styles.push('--doc-line-factor:var(--doc-line-factor-latin,1.2)')
     }
   }
-  const lineRule = (node.attrs.lineRule as 'auto' | 'atLeast' | 'exact' | null) ?? undefined
-  const lineRawTwips = node.attrs.lineRawTwips != null ? Number(node.attrs.lineRawTwips) : undefined
-  const lineSpacing = node.attrs.lineSpacing ? Number(node.attrs.lineSpacing) : undefined
+  const ownLine =
+    node.attrs.lineRule != null || node.attrs.lineRawTwips != null || !!node.attrs.lineSpacing
+  const tblLine = !ownLine ? tbl?.line : undefined
+  const lineRule =
+    (node.attrs.lineRule as 'auto' | 'atLeast' | 'exact' | null) ?? tblLine?.rule ?? undefined
+  const lineRawTwips =
+    node.attrs.lineRawTwips != null
+      ? Number(node.attrs.lineRawTwips)
+      : tblLine && tblLine.rule !== 'auto'
+        ? tblLine.raw
+        : undefined
+  const lineSpacing = node.attrs.lineSpacing
+    ? Number(node.attrs.lineSpacing)
+    : tblLine?.rule === 'auto'
+      ? Math.round((tblLine.raw / 240) * 100) / 100
+      : undefined
   const lh = cssLineHeight(lineRule, lineRawTwips, lineSpacing)
-  if (lh) styles.push(`line-height:${lh}`)
+  // a picture-only line keeps its zero strut under an auto/atLeast rule (the
+  // multiple's extra is padding, .doc-p-pic); an exact rule still pins it
+  const picLine = picOnly && lineRule !== 'exact' && lineRule !== 'atLeast'
+  if (lh && !picLine) styles.push(`line-height:${lh}`)
+  const lhCap = cssExactLineCap(lineRule, lineRawTwips)
+  if (lhCap) styles.push(`--doc-lh-cap:${lhCap}`)
+  // a direct atLeast must not cap its runs at an inherited style-level exact rule
+  else if (lineRule === 'atLeast') styles.push('--doc-lh-cap:initial')
+  const leadTop = cssLeadTop(lineRule, lineRawTwips, lineSpacing)
+  if (leadTop) styles.push(`--doc-lead-top:${leadTop}`)
   // grid-doc span snapping (doc-style-css): fixed-height lines opt out (atLeast
   // never snaps, including the line="0" opt-out form), multiples scale
   if ((lineRule === 'exact' && lineRawTwips) || lineRule === 'atLeast') {
@@ -645,22 +1112,29 @@ function blockAttrs(
     styles.push(`margin-inline-end:${Number(node.attrs.indentRight) / 20}pt`)
   if (node.attrs.indentFirstLine != null) {
     const firstLine = Number(node.attrs.indentFirstLine)
+    // the character-unit indent renders in em so it rescales with the first
+    // run's font size (w:firstLineChars semantics), not frozen at the twips twin
+    const chars = Number(node.attrs.indentFirstLineChars)
+    const indent =
+      chars > 0 ? `text-indent:calc(${chars / 100}em)` : `text-indent:${firstLine / 20}pt`
     if (listGeometry && firstLine < 0) styles.push(`--li-hang:${-firstLine / 20}pt`)
-    else if (!listGeometry || firstLine > 0) styles.push(`text-indent:${firstLine / 20}pt`)
+    else if (!listGeometry || firstLine > 0) styles.push(indent)
   }
   // explicit 0 must still emit (w:after="0" overrides the style/docDefaults margin)
   // autospacing replaces the literal with Word's HTML auto value (14pt, measured);
   // the sp-auto-* classes let CSS collapse it to 0 between two list items (Word)
+  const spaceBefore = node.attrs.spaceBefore ?? tbl?.spaceBefore
+  const spaceAfter = node.attrs.spaceAfter ?? tbl?.spaceAfter
   if (node.attrs.spaceBeforeAuto) {
-    styles.push(`margin-top:${cssGridSpacingPt(WORD_AUTO_SPACING_PT)}`)
+    styles.push(`${spaceBeforeProp()}:${cssGridSpacingPt(autoSpacingPt())}`)
     classes.push('sp-auto-b')
-  } else if (node.attrs.spaceBefore != null)
-    styles.push(`margin-top:${cssGridSpacingPt(Number(node.attrs.spaceBefore) / 20)}`)
+  } else if (spaceBefore != null)
+    styles.push(`${spaceBeforeProp()}:${cssGridSpacingPt(Number(spaceBefore) / 20)}`)
   if (node.attrs.spaceAfterAuto) {
-    styles.push(`margin-bottom:${cssGridSpacingPt(WORD_AUTO_SPACING_PT)}`)
+    styles.push(`margin-bottom:${cssGridSpacingPt(autoSpacingPt())}`)
     classes.push('sp-auto-a')
-  } else if (node.attrs.spaceAfter != null)
-    styles.push(`margin-bottom:${cssGridSpacingPt(Number(node.attrs.spaceAfter) / 20)}`)
+  } else if (spaceAfter != null)
+    styles.push(`margin-bottom:${cssGridSpacingPt(Number(spaceAfter) / 20)}`)
   // direct w:contextualSpacing: same-style adjacency suppression / explicit opt-out
   // (the style-level rules live in doc-style-css and honor these classes)
   if (node.attrs.contextualSpacing === true) classes.push('ctx-sp')
@@ -668,38 +1142,73 @@ function blockAttrs(
   if (classes.length > 0) attrs['class'] = classes.join(' ')
   const shdBg = node.attrs.shadingDisplay ?? node.attrs.shadingFill
   // authored colors stay the declaration; the --dk-* twins feed the dark page (dark-page.ts)
-  if (shdBg) styles.push(`background-color:#${shdBg}`, dkBackground(`#${shdBg}`))
+  if (shdBg)
+    styles.push(
+      `background-color:#${shdBg}`,
+      dkBackground(`#${shdBg}`),
+      `--pbdr-fill:#${shdBg}`,
+      `box-shadow:${PARA_BORDER_SHADOW}`,
+    )
+  else if (node.attrs.shadingClear)
+    styles.push('background-color:transparent', '--pbdr-fill:transparent')
   const ink = fillInk(shdBg ? String(shdBg) : null)
   if (ink) attrs['data-ink'] = ink
-  if (node.attrs.borders) {
-    const borders = String(node.attrs.borders)
-    let borderLines: Partial<Record<string, { color?: string; szPt?: number }>> = {}
-    if (node.attrs.borderLines) {
-      try {
-        borderLines = JSON.parse(String(node.attrs.borderLines))
-      } catch {
-        /* malformed attr: fall back to legacy line */
-      }
+  const borderPad = parseJsonAttr<Partial<Record<'t' | 'b' | 'l' | 'r', number>>>(
+    node.attrs.borderPad,
+  )
+  if (node.attrs.borderReset) {
+    for (const side of ['top', 'bottom', 'left', 'right'] as const) {
+      const key = DK_SIDE[side]
+      if (!String(node.attrs.borderReset).includes(key)) continue
+      styles.push(`border-${side}:none`)
+      // list items indent through padding-inline-start, so their reset l/r sides keep it
+      if ((!listGeometry || side === 'top' || side === 'bottom') && !borderPad?.[key])
+        styles.push(`padding-${side}:0`)
     }
+  }
+  if (node.attrs.borders || borderPad) {
+    const borders = String(node.attrs.borders ?? '')
+    const borderLines = paraBorderLinesWithPad(
+      parseJsonAttr<Partial<Record<'t' | 'b' | 'l' | 'r', { color?: string; szPt?: number }>>>(
+        node.attrs.borderLines,
+      ),
+      borderPad,
+    )
     for (const side of ['top', 'bottom', 'left', 'right'] as const) {
       const key = DK_SIDE[side]
       if (!borders.includes(key)) continue
-      const line = paraBorderCss(borderLines[key])
+      const line = paraBorderCss(borderLines[key] ?? undefined)
       styles.push(`border-${side}:${line}`, dkBorder(key, line))
     }
-    styles.push('padding:1px 4px')
-  }
-  if (node.attrs.borderReset) {
-    for (const side of ['top', 'bottom', 'left', 'right'] as const) {
-      if (String(node.attrs.borderReset).includes(DK_SIDE[side])) styles.push(`border-${side}:none`)
+    const padding = paraBorderPadding(borders, borderLines)
+    // list items indent through padding-inline-start; a border must not replace it
+    if (listGeometry) {
+      delete padding.paddingLeft
+      delete padding.paddingRight
     }
+    styles.push(...paraBorderPaddingDecls(padding), ...paraBorderShadowDecls(borderLines))
   }
+  // a positioned frame (below) models the same w:framePr; frameBox only covers frames without a width
+  if (node.attrs.frameBox && !node.attrs.frame)
+    styles.push(...frameBoxCss(String(node.attrs.frameBox)))
   if (node.attrs.tabStops) {
     // debugging aid only; actual tab layout is measured by TabStopExtension
     attrs['data-tab-stops'] = String(node.attrs.tabStops)
   }
   if (node.attrs.dropCap) {
     attrs['data-drop-cap'] = String(node.attrs.dropCap)
+  }
+  if (node.attrs.frame) {
+    try {
+      const frame = JSON.parse(String(node.attrs.frame)) as ParaFrame
+      if (frame && frame.wTwips > 0) {
+        const fc = paraFrameCss(frame, node.attrs.textDirection as TextFlowDirection | null)
+        attrs['class'] = [attrs['class'], ...fc.classes].filter(Boolean).join(' ')
+        styles.push(...fc.styles)
+      }
+    } catch {
+      /* ignore malformed */
+    }
   }
   if (node.attrs.sdtShell) {
     attrs['data-sdt'] = 'true'
@@ -712,6 +1221,15 @@ function blockAttrs(
   }
   if (styles.length > 0) attrs['style'] = styles.join(';')
   return attrs
+}
+
+function parseJsonAttr<T>(raw: unknown): T | undefined {
+  if (!raw) return undefined
+  try {
+    return JSON.parse(String(raw)) as T
+  } catch {
+    return undefined
+  }
 }
 
 export const DocDocument = Node.create({
@@ -737,6 +1255,9 @@ export const DocNoteRef = Node.create({
       kind: { default: 'footnote' as 'footnote' | 'endnote' },
       id: { default: '' },
       num: { default: 1 },
+      // the marker run's own rPr bytes, so a styled reference survives a save
+      // that rebuilds its paragraph (same bargain as the inline image's attr)
+      rawRPr: { default: null as string | null, rendered: false },
     }
   },
   parseHTML() {
@@ -835,6 +1356,8 @@ export const DocInlineImage = Node.create({
       wrap: { default: null as string | null },
       offsetXEmu: { default: null as number | null },
       offsetYEmu: { default: null as number | null },
+      relV: { default: null as string | null },
+      relH: { default: null as string | null },
       wrapDistTopEmu: { default: null as number | null },
       wrapDistBottomEmu: { default: null as number | null },
       wrapDistLeftEmu: { default: null as number | null },
@@ -893,11 +1416,13 @@ export const DocInlineImage = Node.create({
     const xf = pictureTransformFns(node.attrs.rotDeg, node.attrs.flipH, node.attrs.flipV)
     const px = (v: number) => `${v.toFixed(1)}px`
     const wrap = node.attrs.wrap as string | null
+    const relV = node.attrs.relV as string | null
+    const pageRelV = relV === 'page' || relV === 'margin'
     if (wrap === 'front' || wrap === 'behind') {
       // no-wrap / behind-text anchor: absolute overlay at the anchor offset from
       // the hosting paragraph's origin (styles.css positions that paragraph;
-      // zero flow footprint, like Word); behind approximated by reduced
-      // opacity — the flowing canvas has no z layer under the text
+      // zero flow footprint, like Word); behind-text drops under the flow via
+      // z-index (Word paints it at full opacity)
       const left = Number(node.attrs.offsetXEmu ?? 0) / EMU_PER_PX
       const top = Number(node.attrs.offsetYEmu ?? 0) / EMU_PER_PX
       // positive offsets ride on transform, not left/top: an off-page anchor
@@ -908,13 +1433,40 @@ export const DocInlineImage = Node.create({
       // page-wide picture's static box right would create that same overflow.
       const lx = Math.min(left, 0)
       const ty = Math.min(top, 0)
+      // page-relative Y in content-area coordinates; pagination re-pins it on
+      // the anchor's page. A paragraph-relative offset counts from above the
+      // paragraph's spacing-before (Word), which the host's margin-top keeps
+      // outside its box: --anchor-before (pinParagraphRelVPictures) undoes it
+      const dy =
+        relV === 'page'
+          ? `calc(${px(top - ty)} - var(--doc-margin-top,0px))`
+          : relV == null
+            ? `calc(${px(top - ty)} - var(--anchor-before,0px))`
+            : px(top - ty)
+      // page/margin-relative X is absolute on the page: a paper-edge offset
+      // skips the left margin, and the canvas undoes the hosting block's column
+      // shift and indent through --page-rel-x-undo (pinPageRelXPictures)
+      const relH = node.attrs.relH as string | null
+      const pageRelX = relH === 'page' || relH === 'margin'
+      const dx = pageRelX
+        ? `calc(${px(left - lx)}${relH === 'page' ? ' - var(--doc-margin-left,0px)' : ''} - var(--page-rel-x-undo,0px))`
+        : px(left - lx)
       styles.push(
         `position:absolute;left:${px(lx)};top:${px(ty)}`,
-        `transform:translate(${px(left - lx)}, ${px(top - ty)})${xf.length ? ` ${xf.join(' ')}` : ''}`,
+        `transform:translate(${dx}, ${dy})${xf.length ? ` ${xf.join(' ')}` : ''}`,
         'max-width:none',
       )
       attrs.style = styles.join(';')
       if (wrap === 'behind') attrs.class += ' doc-inline-img--behind'
+      if (pageRelV) {
+        attrs['data-page-rel-v'] = '1'
+        if (relV === 'page') attrs['data-page-rel-from'] = 'page'
+      }
+      if (pageRelX) {
+        attrs['data-page-rel-x'] = '1'
+        attrs['data-page-rel-x-px'] = left.toFixed(1)
+        if (relH === 'page') attrs['data-page-rel-x-from'] = 'page'
+      }
       return [
         'span',
         { class: 'doc-inline-img-anchor', 'data-inline-image-anchor': '1' },
@@ -926,6 +1478,8 @@ export const DocInlineImage = Node.create({
     // flow reserves the quarter-turned bounding box; floats keep their own
     // side pinned and grow toward the text
     const qt = quarterTurnInsetPx(w, h, node.attrs.rotDeg)
+    // the column clamp must meet the turned bounding box, not the unturned extent
+    if (qt) styles.push('max-width:none')
     // topBottom is a centred block: its visual centre is the box centre, so
     // only the stylesheet's 2px band gap needs carrying
     const bandGap = wrap === 'topBottom' ? 2 : 0
@@ -942,12 +1496,16 @@ export const DocInlineImage = Node.create({
     // path: X measures from the column start; right floats convert it to a
     // right-edge inset so the picture is not stuck flush against the margin
     const tx = node.attrs.offsetXEmu != null ? Number(node.attrs.offsetXEmu) / EMU_PER_PX : null
+    // positionH page: the offset measures from the paper edge, one left margin before the column
+    const pageX = node.attrs.relH === 'page' ? ' - var(--doc-margin-left,0px)' : ''
     if (tx != null && wrap) {
       if (wrap.endsWith('-right') && w > 0) {
-        margin.right = `calc(100% - ${px(tx + w)})`
+        margin.right = pageX
+          ? `calc(100% - ${px(tx + w)} + var(--doc-margin-left,0px))`
+          : `calc(100% - ${px(tx + w)})`
         styles.push('max-width:none')
       } else if (wrap.endsWith('-left')) {
-        margin.left = px(tx)
+        margin.left = pageX ? `calc(${px(tx)}${pageX})` : px(tx)
         styles.push('max-width:none')
       }
     }
@@ -967,9 +1525,31 @@ export const DocInlineImage = Node.create({
       if (tx != null && wrap !== 'topBottom') {
         sliverGuard = wrapSliverGuardCss(wrap, tx + qt, qt ? h : w, right, qt)
       }
+      // wrap-obstacle mode (syncWrapObstacles) overlays the picture at its
+      // anchor offsets instead of floating it: the vars carry that position
+      if (wrap !== 'topBottom') {
+        const ghostY =
+          node.attrs.offsetYEmu != null && !pageRelV
+            ? Number(node.attrs.offsetYEmu) / EMU_PER_PX
+            : 0
+        if (tx != null) {
+          styles.push(`--obs-left:${pageX ? `calc(${px(tx)}${pageX})` : px(tx)}`)
+          attrs['data-obs-x'] = tx.toFixed(1)
+          if (pageX) attrs['data-obs-x-from'] = 'page'
+        } else {
+          styles.push(wrap.endsWith('-right') ? '--obs-right:0px' : '--obs-left:0px')
+        }
+        styles.push(`--obs-top:${px(ghostY)}`)
+        attrs['data-obs-y'] = ghostY.toFixed(1)
+        attrs['data-wrap-dist'] =
+          `${(left ?? 12).toFixed(1)} ${(right ?? 12).toFixed(1)} ${(top ?? 0).toFixed(1)} ${(bottom ?? 0).toFixed(1)}`
+      }
       // paragraph-relative posOffset Y: the float (and its text exclusion)
-      // starts that far below the anchor line; position wins over distT
-      const ty = node.attrs.offsetYEmu != null ? Number(node.attrs.offsetYEmu) / EMU_PER_PX : 0
+      // starts that far below the anchor line; position wins over distT. A
+      // page/margin-relative Y is a page position a CSS float cannot rise to,
+      // so it starts at the anchor line (Word anchors to the nearest paragraph)
+      const ty =
+        node.attrs.offsetYEmu != null && !pageRelV ? Number(node.attrs.offsetYEmu) / EMU_PER_PX : 0
       if ((ty !== 0 || qt) && wrap !== 'topBottom') {
         // the offset places the extent box, whose unturned top is the img box
         // top; the turned visual (Word's exclusion) starts an inset above it
@@ -977,17 +1557,61 @@ export const DocInlineImage = Node.create({
         // a float excludes its whole margin box: without a shape the lines
         // above the picture (Word lays them at full width) would shorten too
         if (ty - qt > 0) styles.push(`shape-outside:inset(${px(ty - qt)} 0 0 0)`)
+        // clampCellImageTops fills --cell-lift once the cell top is measured
+        if (ty < 0 && !/layoutInCell="(?:0|false)"/.test(String(node.attrs.xml ?? ''))) {
+          margin.top = `calc(${px(ty)} + var(--cell-lift,0px))`
+          attrs['data-cell-lift'] = '1'
+        }
       }
+    }
+    // a page-relative Y above the body top lifts the float there (Word draws
+    // the picture at its page position; the anchor line stays below the band)
+    if (wrap && relV === 'page' && node.attrs.offsetYEmu != null && wrap !== 'topBottom') {
+      const pageTy = Number(node.attrs.offsetYEmu) / EMU_PER_PX
+      margin.top = `min(0px, calc(${px(pageTy)} - var(--doc-margin-top,0px)))`
     }
     // positionV line/center: lift so the picture centers on the anchor line
     // (0.75em ≈ half a single-spaced line) instead of hanging below it
     if (node.attrs.lineCenterV && h > 0) margin.top = `calc(0.75em - ${px(h / 2)})`
+    // an in-line picture's line snaps to whole grid cells (doc-style-css)
+    if (!wrap && !qt && !node.attrs.lineCenterV && h > 0) styles.push(`--doc-obj-h:${px(h)}`)
     for (const side of ['top', 'right', 'bottom', 'left'] as const) {
       if (margin[side] != null) styles.push(`margin-${side}:${margin[side]}`)
     }
     if (sliverGuard) styles.push(sliverGuard)
     if (styles.length) attrs.style = styles.join(';')
     return ['img', attrs]
+  },
+  addNodeView() {
+    return ({ node }) => {
+      const render = (n: PmNode) =>
+        DOMSerializer.renderSpec(document, n.type.spec.toDOM!(n)).dom as HTMLElement
+      // rules and floating pictures keep their plain rendering (no handles)
+      if (node.attrs.rule || node.attrs.wrap) return { dom: render(node), update: () => false }
+      const img = render(node) as HTMLImageElement
+      const dom = document.createElement('span')
+      dom.className = INLINE_PIC_CLASS
+      dom.appendChild(img)
+      for (const spec of imageSelectionControlsSpec())
+        dom.appendChild(DOMSerializer.renderSpec(document, spec as never).dom)
+      return {
+        dom,
+        update: (n: PmNode) => {
+          if (n.type !== node.type || n.attrs.rule || n.attrs.wrap) return false
+          const fresh = render(n) as HTMLImageElement
+          if (fresh.tagName !== 'IMG') return false
+          img.className = fresh.className
+          img.setAttribute('style', fresh.getAttribute('style') ?? '')
+          if (img.getAttribute('src') !== fresh.getAttribute('src'))
+            img.setAttribute('src', fresh.getAttribute('src') ?? '')
+          return true
+        },
+        ignoreMutation: () => true,
+      }
+    }
+  },
+  addProseMirrorPlugins() {
+    return [inlinePictureResizePlugin()]
   },
 })
 
@@ -1009,6 +1633,7 @@ export const DocInlineMath = Node.create({
       latex: { default: null as string | null },
       /** flat token strip (word count / AI read fallback) */
       text: { default: '' },
+      sizeHalfPoints: { default: null as number | null },
     }
   },
   parseHTML() {
@@ -1059,9 +1684,11 @@ export const DocInlineMath = Node.create({
 })
 
 function inlineMathDomAttrs(node: { attrs: Record<string, unknown> }): Record<string, string> {
+  const size = node.attrs.sizeHalfPoints as number | null
   return {
     'data-inline-math': '1',
     class: 'doc-inline-math',
+    ...(size ? { style: `font-size:${size / 2}pt` } : {}),
     title: node.attrs.latex
       ? t('editorEquationEditHint', { latex: String(node.attrs.latex) })
       : t('editorEquation'),
@@ -1082,12 +1709,15 @@ export const DocHardBreak = Node.create({
       pageBreak: { default: false },
       // column break (w:br w:type="column"): next column, or next page in a single-column section
       colBreak: { default: false },
+      // text wrapping break (w:br w:type="textWrapping" w:clear="all"): the next line starts below the floats
+      wrapBreak: { default: false },
     }
   },
   parseHTML() {
     return [
       { tag: 'br.doc-page-br', attrs: { pageBreak: true } },
       { tag: 'br.doc-col-br', attrs: { colBreak: true } },
+      { tag: 'br.doc-wrap-br', attrs: { wrapBreak: true } },
       { tag: 'br' },
     ]
   },
@@ -1096,7 +1726,9 @@ export const DocHardBreak = Node.create({
       ? ['br', { class: 'doc-page-br' }]
       : node.attrs.colBreak
         ? ['br', { class: 'doc-col-br' }]
-        : ['br']
+        : node.attrs.wrapBreak
+          ? ['br', { class: 'doc-wrap-br' }]
+          : ['br']
   },
   addKeyboardShortcuts() {
     return {
@@ -1106,8 +1738,26 @@ export const DocHardBreak = Node.create({
 })
 
 /**
+ * TipTap core's clearDocument plugin runs clearNodes() after a select-all
+ * deletion, replacing the surviving paragraph with an attribute-less default
+ * one — a generic-editor convenience (reset a heading to a paragraph) that is
+ * the opposite of Word: Word keeps the paragraph formatting on the surviving
+ * paragraph mark, so a select-all + Delete (or Enter) must not reset the
+ * paragraph style, the paragraph-mark font, alignment or indents to the
+ * theme (r176 follow-up). The plugin is keyed, so it can be removed exactly.
+ */
+export const WordSelectAllDelete = Extension.create({
+  name: 'wordSelectAllDelete',
+  onBeforeCreate() {
+    // on 'mount', not onCreate: tiptap defers the create event to a timeout,
+    // which would leave the first user edit with the plugin still active
+    this.editor.on('mount', () => this.editor.unregisterPlugin('clearDocument'))
+  },
+})
+
+/**
  * Enter must replace ANY non-empty selection with a paragraph break (Word).
- * Two selection shapes broke the default chain (alpha ledger r125/r129):
+ * Two selection shapes broke the default chain:
  * - Ctrl+A's AllSelection: every command in the split chain declines
  *   (splitBlock needs a textblock-depth selection; AllSelection's ends sit at
  *   doc depth 0) — the press was a silent no-op.
@@ -1120,6 +1770,52 @@ export const DocHardBreak = Node.create({
  * both: the delete settles the document (and block merge) first, the split
  * then runs on an ordinary caret.
  */
+/**
+ * Enter at the end of a heading starts a body paragraph (Word: a heading's
+ * next style is Normal). splitBlock already switches the node type but keeps
+ * the paragraph attributes, so the heading's w:pStyle would ride along and the
+ * new line would still look and count as a heading.
+ */
+export const HeadingEnterNextStyle = Extension.create({
+  name: 'headingEnterNextStyle',
+  priority: 1001,
+  addKeyboardShortcuts() {
+    return {
+      Enter: () => {
+        const { $from, empty } = this.editor.state.selection
+        const parent = $from.parent
+        if (
+          !empty ||
+          parent.type.name !== 'docHeading' ||
+          parent.content.size === 0 ||
+          $from.parentOffset !== parent.content.size ||
+          parent.attrs.styleId == null
+        )
+          return false
+        return this.editor
+          .chain()
+          .splitBlock()
+          .command(({ state, tr, dispatch }) => {
+            const $caret = state.selection.$from
+            const block = $caret.parent
+            if (block.type.name !== 'docParagraph' || block.attrs.styleId == null) return true
+            if (dispatch) {
+              // keepOnSplit already keeps the page break on the heading; stated here so
+              // this end-of-paragraph split never clones it onto the body line
+              tr.setNodeMarkup($caret.before($caret.depth), undefined, {
+                ...block.attrs,
+                styleId: null,
+                pageBreakBefore: false,
+              })
+            }
+            return true
+          })
+          .run()
+      },
+    }
+  },
+})
+
 export const EnterReplacesSelection = Extension.create({
   name: 'enterReplacesSelection',
   addKeyboardShortcuts() {
@@ -1129,38 +1825,58 @@ export const EnterReplacesSelection = Extension.create({
         // Word keeps the formatting of the START of the replaced selection
         // for what is typed next; the split-off caret often sits in an
         // EMPTIED paragraph with no neighbor to inherit from, so the first
-        // deleted character's marks must ride along explicitly (alpha
-        // ledger r133: keyboard whole-line selections type in theme font)
+        // deleted character's marks must ride along explicitly (keyboard
+        // whole-line selections otherwise type in the theme font)
+        // paragraph formatting of the START of the replaced range: when the
+        // selection consumes whole paragraphs the delete leaves a DEFAULT
+        // filler block, so style-derived fonts, alignment and the
+        // paragraph-mark font all reset to the theme (r176 follow-up) —
+        // captured before the delete, applied to both emptied halves below
+        const paraFormat = firstParaFormatIn(sel.$from.doc, sel.from, sel.to)
         const carryMarks = () => {
           // first TEXT node in the replaced range (an AllSelection's $from
           // sits at doc depth 0, where nodeAt returns the block, not a run)
           const marks = firstTextMarksIn(sel.$from.doc, sel.from, sel.to)
           // formatting only: comment/link/ins/del must not reattach to new
-          // typing (they are inclusive:false for the same reason — bugbot)
+          // typing (they are inclusive:false for the same reason)
           const found = (marks ?? sel.$from.marks()).filter((mark) =>
             FORMAT_MARKS.has(mark.type.name),
           )
-          if (found.length > 0) {
-            const tr = this.editor.state.tr.setMeta('addToHistory', false)
-            // Word keeps the pending format on BOTH empty paragraphs the
-            // replace leaves behind. The caret-marks memory stamps only the
-            // block the caret sits in (the second), so arrowing up to the
-            // FIRST emptied line reverted typing to the theme font and the
-            // font box to "(Body)" (alpha ledger r133 residual). The stamp
-            // step must precede setStoredMarks: a doc-changing step resets
-            // the transaction's stored marks.
-            const $head = this.editor.state.selection.$from
-            const boundary = $head.before($head.depth)
-            const prev = this.editor.state.doc.resolve(boundary).nodeBefore
-            if (prev && prev.isTextblock && prev.content.size === 0 && 'caretMarks' in prev.attrs) {
-              tr.setNodeMarkup(boundary - prev.nodeSize, undefined, {
-                ...prev.attrs,
-                caretMarks: serializeMarks(found),
-              })
-            }
-            tr.setStoredMarks([...found])
-            this.editor.view.dispatch(tr)
+          const tr = this.editor.state.tr.setMeta('addToHistory', false)
+          let changed = false
+          // Word keeps the pending format on BOTH empty paragraphs the
+          // replace leaves behind. The caret-marks memory stamps only the
+          // block the caret sits in (the second), so arrowing up to the
+          // FIRST emptied line reverted typing to the theme font and the
+          // font box to "(Body)" (r133 residual). The stamp step must
+          // precede setStoredMarks: a doc-changing step resets the
+          // transaction's stored marks.
+          const $head = this.editor.state.selection.$from
+          const boundary = $head.before($head.depth)
+          const caretBlock = $head.parent
+          const prev = this.editor.state.doc.resolve(boundary).nodeBefore
+          const restoreOn = (pos: number, node: PmNode, extras: Record<string, unknown>) => {
+            const restore =
+              paraFormat && node.content.size === 0 && paraFormatIsDefault(node) ? paraFormat : null
+            if (!restore && Object.keys(extras).length === 0) return
+            tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...restore, ...extras })
+            changed = true
           }
+          if (prev && prev.isTextblock && prev.content.size === 0 && 'caretMarks' in prev.attrs) {
+            restoreOn(
+              boundary - prev.nodeSize,
+              prev,
+              found.length > 0 ? { caretMarks: serializeMarks(found) } : {},
+            )
+          }
+          if (caretBlock.isTextblock && 'caretMarks' in caretBlock.attrs) {
+            restoreOn(boundary, caretBlock, {})
+          }
+          if (found.length > 0) {
+            tr.setStoredMarks([...found])
+            changed = true
+          }
+          if (changed) this.editor.view.dispatch(tr)
         }
         if (sel instanceof AllSelection) {
           // an AllSelection maps to itself through the delete (it always
@@ -1197,7 +1913,7 @@ export const WordEditorShortcuts = Extension.create({
       // content — at offset 0 that is the second half (the new empty line
       // above must not steal it), everywhere else the first (splitting must
       // not clone the break onto the new paragraph and turn Enter into
-      // another page jump — alpha ledger r157). TipTap's keepOnSplit only
+      // another page jump). TipTap's keepOnSplit only
       // filters end-of-paragraph splits, so mid-splits are fixed up here.
       Enter: () => {
         const { $from, empty } = this.editor.state.selection
@@ -1238,8 +1954,7 @@ export const WordEditorShortcuts = Extension.create({
           .run()
       },
       'Mod-Enter': () => insertPageBreak(this.editor),
-      'Mod-Shift-Enter': () =>
-        this.editor.commands.insertContent({ type: 'hardBreak', attrs: { colBreak: true } }),
+      'Mod-Shift-Enter': () => insertColumnBreak(this.editor),
       // U+00A0 and U+2011: the characters Word inserts for these two chords
       'Mod-Shift-Space': () => this.editor.commands.insertContent('\u00a0'),
       'Mod-Shift--': () => this.editor.commands.insertContent('\u2011'),
@@ -1261,9 +1976,67 @@ export const DocParagraph = Node.create({
     return [{ tag: 'p', getAttrs: (el) => clipboardParaAttrs(el as HTMLElement) }]
   },
   renderHTML({ node }) {
-    return ['p', blockAttrs(node), 0]
+    return ['p', blockAttrs(node), paraContentSpec(node)]
+  },
+  addKeyboardShortcuts() {
+    return {
+      // Word: Backspace at the start of a paragraph with its own left indent
+      // (a list item after its number was removed) takes the indent away
+      // before it can join the previous paragraph
+      Backspace: () => {
+        const { state } = this.editor
+        const { $from, empty } = state.selection
+        if (!empty || $from.parentOffset !== 0) return false
+        const node = $from.parent
+        if (node.type.name !== 'docParagraph' || !(Number(node.attrs.indentLeft) > 0)) return false
+        const styleLeft = styleIndentLeftTw(node.attrs.styleId as string | null, this.editor)
+        const firstLine = node.attrs.indentFirstLine as number | null
+        return this.editor.commands.command(({ tr }) => {
+          tr.setNodeMarkup($from.before(), undefined, {
+            ...node.attrs,
+            indentLeft: styleLeft ? 0 : null,
+            indentFirstLine: firstLine != null && firstLine < 0 ? null : firstLine,
+          })
+          return true
+        })
+      },
+    }
   },
 })
+
+function styleIndentLeftTw(styleId: string | null, editor: Editor): number | null {
+  if (!styleId) return null
+  const storage = editor.storage.listNumbering as ListNumberingStorage | undefined
+  return storage?.styles?.get(styleId)?.display?.indentLeftTwips ?? null
+}
+
+/**
+ * Where a list item's text starts (twips): its own w:ind, else the numbering
+ * level's, else the style's, else the CSS default the item renders with.
+ */
+function listTextIndentTw(node: PmNode, editor: Editor): number {
+  if (node.attrs.indentLeft != null) return Number(node.attrs.indentLeft)
+  const ilvl = Number(node.attrs.ilvl) || 0
+  const storage = editor.storage.listNumbering as ListNumberingStorage | undefined
+  const numId = node.attrs.numId as string | null
+  const level = numId != null ? storage?.defs.get(numId)?.levels[ilvl] : undefined
+  if (level?.indentLeft !== undefined) return level.indentLeft
+  return (
+    styleIndentLeftTw(node.attrs.styleId as string | null, editor) ?? 792 + 432 * Math.min(ilvl, 4)
+  )
+}
+
+function paragraphAttrsOfListItem(node: PmNode): Record<string, unknown> {
+  const {
+    kind: _k,
+    numId: _n,
+    ilvl: _l,
+    indentLeft: _il,
+    indentFirstLine: _if,
+    ...rest
+  } = node.attrs
+  return { ...rest, docxIndex: null }
+}
 
 export const DocHeading = Node.create({
   name: 'docHeading',
@@ -1288,7 +2061,7 @@ export const DocHeading = Node.create({
     const attrs = blockAttrs(node)
     // heading by direct w:outlineLvl alone: the built-in h1-h6 font rules skip this class
     if (node.attrs.outlineOnly) attrs.class = `${attrs.class ?? ''} doc-outline-only`.trim()
-    return [`h${level}`, attrs, 0]
+    return [`h${level}`, attrs, paraContentSpec(node)]
   },
 })
 
@@ -1351,7 +2124,9 @@ export const DocListItem = Node.create({
     ]
       .filter(Boolean)
       .join(' ')
-    return ['div', { ...base, class: cls }, 0]
+    // doc-style-css keys the auto-spacing collapse between items on the list identity
+    if (node.attrs.numId != null) base['data-num'] = String(node.attrs.numId)
+    return ['div', { ...base, class: cls }, paraContentSpec(node)]
   },
   addCommands() {
     return {
@@ -1369,8 +2144,21 @@ export const DocListItem = Node.create({
           const node = $from.parent
           if (node.type.name !== 'docListItem') return false
           if (node.content.size === 0) {
+            // Word: an empty nested item climbs one level per Enter; at the top
+            // level it becomes a Normal paragraph with no indent
+            const ilvl = Number(node.attrs.ilvl) || 0
+            if (ilvl > 0)
+              return chain()
+                .updateAttributes('docListItem', { ilvl: ilvl - 1 })
+                .run()
             return chain()
-              .setNode('docParagraph', { ...node.attrs, docxIndex: null })
+              .command(({ tr }) => {
+                tr.setNodeMarkup($from.before(), state.schema.nodes.docParagraph, {
+                  ...paragraphAttrsOfListItem(node),
+                  styleId: null,
+                })
+                return true
+              })
               .run()
           }
           return chain()
@@ -1397,17 +2185,50 @@ export const DocListItem = Node.create({
     } as Partial<RawCommands>
   },
   addKeyboardShortcuts() {
+    // Word: Tab / Shift+Tab change the level only from the start of an item
+    // (or across several selected items); inside the text Tab is a tab character
+    const atLevelPoint = () => {
+      const { $from, $to } = this.editor.state.selection
+      return $from.parentOffset === 0 || !$from.sameParent($to)
+    }
     const changeLevel = (delta: number) => () => {
       if (!this.editor.isActive('docListItem')) return false
+      if (!atLevelPoint()) {
+        if (delta < 0) return true
+        return this.editor.commands.command(({ tr }) => {
+          tr.insertText('\t').scrollIntoView()
+          return true
+        })
+      }
       const ilvl = Number(this.editor.getAttributes('docListItem').ilvl) || 0
       const next = Math.min(Math.max(ilvl + delta, 0), 8)
       if (next === ilvl) return true
       return this.editor.commands.updateAttributes('docListItem', { ilvl: next })
     }
+    // Word's first Backspace at the start of an item: the number goes, the
+    // paragraph keeps its text position as a plain left indent
+    const removeMarker = () => {
+      const { state } = this.editor
+      const { $from, empty } = state.selection
+      if (!empty || $from.parentOffset !== 0) return false
+      const node = $from.parent
+      if (node.type.name !== 'docListItem') return false
+      const left = listTextIndentTw(node, this.editor)
+      // an explicit 0 must survive when the style has an indent of its own
+      const keepZero = !!styleIndentLeftTw(node.attrs.styleId as string | null, this.editor)
+      return this.editor.commands.command(({ tr }) => {
+        tr.setNodeMarkup($from.before(), state.schema.nodes.docParagraph, {
+          ...paragraphAttrsOfListItem(node),
+          indentLeft: left > 0 || keepZero ? left : null,
+        })
+        return true
+      })
+    }
     return {
       Tab: changeLevel(1),
       'Shift-Tab': changeLevel(-1),
       Enter: () => (this.editor.commands as unknown as DocListCommands).continueDocList(),
+      Backspace: removeMarker,
     }
   },
 })
@@ -1423,6 +2244,10 @@ export interface ListNumberingStorage {
    *  chain the ::before inherits (data-style rule -> .doc-page baseline) */
   styles?: Map<string, StyleInfo>
   docDefaults?: DocDefaults
+  /** settings.xml w:defaultTabStop (twips) the marker tab falls back to */
+  defaultTabTwips?: number
+  /** w:doNotUseIndentAsNumberingTabStop: the marker tab never stops at the hanging indent */
+  indentNotTabStop?: boolean
 }
 
 declare module '@tiptap/core' {
@@ -1453,23 +2278,62 @@ const lineFactorCache = new WeakMap<
   { style: string; cls?: string; runs?: RunFactorRange[] }
 >()
 
-const autospaceRangesCache = new WeakMap<PmNode, Array<{ from: number; to: number }>>()
+type PadRange = { from: number; to: number; scale?: number }
+const autospaceRangesCache = new WeakMap<PmNode, { inherited: string | null; ranges: PadRange[] }>()
 
-const simsunGapCache = new WeakMap<PmNode, Array<{ from: number; to: number }>>()
+const simsunGapCache = new WeakMap<
+  PmNode,
+  { inherited: string | null; ranges: Array<{ from: number; to: number }> }
+>()
 
-/** ranges (relative to the block's content start) of ・/〜 in SimSun-substituted runs */
-function simsunGapRanges(node: PmNode): Array<{ from: number; to: number }> {
-  let ranges = simsunGapCache.get(node)
+/** EA face a run without its own font inherits: paragraph style chain, then
+ *  Normal, then docDefaults (an empty-theme-slot backfill is not a choice) */
+export function inheritedEaFamily(
+  styleId: unknown,
+  storage: ListNumberingStorage | undefined,
+): string | null {
+  if (!storage) return null
+  const ownEa = (d: StyleDisplay | undefined): string | null =>
+    d?.font && !d.eaSlotEmpty && (d.font !== d.fontAscii || isCjkFontName(d.font)) ? d.font : null
+  let id = typeof styleId === 'string' ? styleId : null
+  for (let hops = 0; id && hops < 32; hops++) {
+    const info = storage.styles?.get(id)
+    const fam = ownEa(info?.display)
+    if (fam) return fam
+    id = info?.basedOn ?? null
+  }
+  for (const info of storage.styles?.values() ?? []) {
+    if (info.isDefault && info.type === 'paragraph') {
+      const fam = ownEa(info.display)
+      if (fam) return fam
+      break
+    }
+  }
+  const dd = storage.docDefaults
+  return dd?.eastAsiaFont && !dd.eaSlotEmpty ? dd.eastAsiaFont : null
+}
+
+/** ranges (relative to the block's content start) of U+30FB / U+301C in SimSun-substituted
+ *  runs; inherited = the EA face of runs that declare none (Word substitutes
+ *  the style's missing face the same way, probe 2026-10-13) */
+function simsunGapRanges(
+  node: PmNode,
+  inherited: string | null,
+): Array<{ from: number; to: number }> {
+  const cached = simsunGapCache.get(node)
+  let ranges = cached?.inherited === inherited ? cached.ranges : undefined
   if (ranges === undefined) {
     const found: Array<{ from: number; to: number }> = []
     let offset = 0
     node.forEach((child) => {
       if (child.isText && child.text && SIMSUN_GAP_CHAR_RE.test(child.text)) {
         const mark = child.marks.find((m) => m.type.name === 'docTextStyle')
+        // same slot rule as paraLineFactor: these glyphs come from the eastAsia face
+        const own = (mark?.attrs.font ?? mark?.attrs.fontAscii) as string | null | undefined
         const family =
-          mark?.attrs.eaSlotEmpty === true
+          mark?.attrs.eaSlotEmpty === true || (mark && asciiOnlyCjkFace(mark.attrs))
             ? null
-            : ((mark?.attrs.font ?? mark?.attrs.fontAscii) as string | null | undefined)
+            : (own ?? inherited)
         if (family && simsunGapLineFactor(family) !== null) {
           for (let i = 0; i < child.text.length; i++) {
             if (SIMSUN_GAP_CHAR_RE.test(child.text[i])) {
@@ -1481,39 +2345,202 @@ function simsunGapRanges(node: PmNode): Array<{ from: number; to: number }> {
       offset += child.nodeSize
     })
     ranges = found
-    simsunGapCache.set(node, ranges)
+    simsunGapCache.set(node, { inherited, ranges })
   }
   return ranges
 }
 
+/** ascii face a run without its own font inherits: paragraph style chain, Normal, docDefaults */
+function inheritedAsciiFamily(
+  styleId: unknown,
+  storage: ListNumberingStorage | undefined,
+): string | null {
+  if (!storage) return null
+  const own = (d: StyleDisplay | undefined): string | null => d?.fontAscii ?? d?.font ?? null
+  let id = typeof styleId === 'string' ? styleId : null
+  for (let hops = 0; id && hops < 32; hops++) {
+    const info = storage.styles?.get(id)
+    const fam = own(info?.display)
+    if (fam) return fam
+    id = info?.basedOn ?? null
+  }
+  for (const info of storage.styles?.values() ?? []) {
+    if (info.isDefault && info.type === 'paragraph')
+      return own(info.display) ?? storage.docDefaults?.asciiFont ?? null
+  }
+  return storage.docDefaults?.asciiFont ?? null
+}
+
 /**
  * ranges (relative to the block's content start) of the character after each
- * CJK-Latin pad boundary; that character carries the pad margin (.doc-autospace-pad)
+ * CJK-Latin pad boundary; that character carries the pad margin
+ * (.doc-autospace-pad). Latin -> CJK seams carry the Latin face's scale.
  */
-function autospaceRanges(node: PmNode): Array<{ from: number; to: number }> {
-  let ranges = autospaceRangesCache.get(node)
-  if (ranges === undefined) {
-    const found: Array<{ from: number; to: number }> = []
+export function autospaceRanges(
+  node: PmNode,
+  mode: AutospaceMode,
+  asciiOf: AsciiFamilyOf,
+): PadRange[] {
+  // the inherited face is part of the key: a style-table change keeps the node identity
+  const inherited = asciiOf(node.attrs.styleId)
+  const cached = autospaceRangesCache.get(node)
+  if (cached && cached.inherited === inherited) return cached.ranges
+  {
+    const found: PadRange[] = []
+    const faceOf = (child: PmNode): string | null => {
+      const mark = child.marks.find((m) => m.type.name === 'docTextStyle')
+      const own = (mark?.attrs.fontAscii ?? mark?.attrs.font) as string | null | undefined
+      return own || inherited
+    }
+    const push = (from: number, to: number, latinFirst: boolean, face: string | null) => {
+      const scale = latinFirst ? autospacePadScale(latinAutospaceGapEm(face), mode) : 1
+      found.push(scale === 1 ? { from, to } : { from, to, scale })
+    }
     let offset = 0
     let prevText = '' // reset by non-text inlines: pads need direct adjacency
+    let prevFace: string | null = null
     node.forEach((child) => {
       if (child.isText && child.text) {
         const text = child.text
-        const cuts = autospaceBoundaries(text)
-        if (autospacePadBetween(prevText, text)) cuts.unshift(0)
-        for (const i of cuts) {
-          found.push({ from: offset + i, to: offset + i + codePointLengthAt(text, i) })
+        const face = faceOf(child)
+        if (autospacePadBetween(prevText, text, mode)) {
+          push(offset, offset + codePointLengthAt(text, 0), autospaceLatinFirst(prevText), prevFace)
+        }
+        for (const seam of autospaceSeams(text, mode)) {
+          push(
+            offset + seam.at,
+            offset + seam.at + codePointLengthAt(text, seam.at),
+            seam.latinFirst,
+            face,
+          )
         }
         prevText = text
+        prevFace = face
       } else {
         prevText = ''
       }
       offset += child.nodeSize
     })
+    autospaceRangesCache.set(node, { inherited, ranges: found })
+    return found
+  }
+}
+
+const krNoBreakCache = new WeakMap<PmNode, number[]>()
+
+/** content offsets of hangul/punctuation seams Korean word-wrap keeps together (word-joiner widgets) */
+function krNoBreakBlockOffsets(node: PmNode): number[] {
+  let offsets = krNoBreakCache.get(node)
+  if (offsets === undefined) {
+    const found: number[] = []
+    if (node.attrs.wordWrap !== false && textHasHangul(node.textContent)) {
+      let offset = 0
+      let prevText = ''
+      node.forEach((child) => {
+        if (child.isText && child.text) {
+          for (const i of krNoBreakOffsets(child.text, prevText)) found.push(offset + i)
+          prevText = child.text
+        } else prevText = ''
+        offset += child.nodeSize
+      })
+    }
+    offsets = found
+    krNoBreakCache.set(node, offsets)
+  }
+  return offsets
+}
+
+function wordJoinerWidget(): HTMLElement {
+  const span = document.createElement('span')
+  span.className = 'doc-kr-wj'
+  span.textContent = '\u2060'
+  return span
+}
+
+const hangulSpaceCache = new WeakMap<PmNode, Array<{ from: number; to: number }>>()
+
+/** ranges (relative to the block's content start) of spaces with a hangul neighbour (.doc-hangul-space) */
+function hangulSpaceRanges(node: PmNode): Array<{ from: number; to: number }> {
+  let ranges = hangulSpaceCache.get(node)
+  if (ranges === undefined) {
+    const found: Array<{ from: number; to: number }> = []
+    if (hangulSpaceWideningOn() && textHasHangul(node.textContent)) {
+      const parts: Array<{ text: string; offset: number }> = []
+      let offset = 0
+      node.forEach((child) => {
+        // non-text inlines break adjacency, like the autospace pads
+        parts.push({ text: child.isText && child.text ? child.text : '', offset })
+        offset += child.nodeSize
+      })
+      parts.forEach((part, k) => {
+        const prev = parts[k - 1]?.text ?? ''
+        const next = parts[k + 1]?.text ?? ''
+        for (const i of hangulSpaceOffsets(part.text, prev, next)) {
+          found.push({ from: part.offset + i, to: part.offset + i + 1 })
+        }
+      })
+    }
     ranges = found
-    autospaceRangesCache.set(node, ranges)
+    hangulSpaceCache.set(node, ranges)
   }
   return ranges
+}
+
+const SIDE_WRAP_RE = /^(?:square|tight|through)-(left|right)$/
+const wrapGroupCache = new WeakMap<PmNode, Array<{ offset: number; style: string }> | null>()
+/** side-wrapped run pictures sharing a block: one float per side carries the union (wrap-group.ts) */
+function wrapGroupDecos(node: PmNode): Array<{ offset: number; style: string }> | null {
+  let cached = wrapGroupCache.get(node)
+  if (cached !== undefined) return cached
+  const pics: WrapPicture[] = []
+  const offsets: number[] = []
+  node.forEach((child, offset) => {
+    if (child.type.name !== 'docInlineImage') return
+    const a = child.attrs
+    const side = SIDE_WRAP_RE.exec(String(a.wrap ?? ''))?.[1] as 'left' | 'right' | undefined
+    const w = Number(a.widthPx)
+    const h = Number(a.heightPx)
+    if (
+      !side ||
+      a.offsetXEmu == null ||
+      a.relH === 'page' ||
+      a.relV === 'page' ||
+      a.relV === 'margin' ||
+      a.lineCenterV ||
+      a.rule ||
+      !(w > 0) ||
+      !(h > 0) ||
+      quarterTurnInsetPx(w, h, a.rotDeg)
+    ) {
+      return
+    }
+    const d = (k: string, dflt: number): number => (a[k] != null ? Number(a[k]) / EMU_PER_PX : dflt)
+    pics.push({
+      side,
+      x: Number(a.offsetXEmu) / EMU_PER_PX,
+      y: a.offsetYEmu != null ? Number(a.offsetYEmu) / EMU_PER_PX : 0,
+      w,
+      h,
+      dist: [
+        d('wrapDistLeftEmu', side === 'right' ? 12 : 0),
+        d('wrapDistRightEmu', side === 'left' ? 12 : 0),
+        d('wrapDistTopEmu', 0),
+        d('wrapDistBottomEmu', 0),
+      ],
+      turned: !!(a.rotDeg || a.flipH || a.flipV),
+    })
+    offsets.push(offset)
+  })
+  cached = null
+  if (pics.length >= 2) {
+    const out: Array<{ offset: number; style: string }> = []
+    wrapGroupCss(pics).styles.forEach((style, i) => {
+      if (style) out.push({ offset: offsets[i], style })
+    })
+    if (out.length) cached = out
+  }
+  wrapGroupCache.set(node, cached)
+  return cached
 }
 
 /** blocks hosting a front/behind picture are its positioning origin (styles.css .doc-anchor-origin) */
@@ -1536,86 +2563,200 @@ function hostsAnchoredPicture(node: PmNode): boolean {
   return hosts
 }
 
-function lineFactorDecos(doc: PmNode): DecorationSet {
+/** paragraph styleId -> inherited EA face (see inheritedEaFamily) */
+type EaFamilyOf = (styleId: unknown) => string | null
+/** paragraph styleId -> inherited ascii face (see inheritedAsciiFamily) */
+export type AsciiFamilyOf = (styleId: unknown) => string | null
+
+/** memoised inheritedAsciiFamily over the live style table (one lookup per style per table) */
+export function asciiFamilyResolver(
+  getStorage: () => ListNumberingStorage | undefined,
+): AsciiFamilyOf {
+  const memo = new WeakMap<object, Map<string, string | null>>()
+  return (styleId) => {
+    const storage = getStorage()
+    if (!storage?.styles) return inheritedAsciiFamily(styleId, storage)
+    let m = memo.get(storage.styles)
+    if (!m) memo.set(storage.styles, (m = new Map()))
+    const k = typeof styleId === 'string' ? styleId : ''
+    let fam = m.get(k)
+    if (fam === undefined) m.set(k, (fam = inheritedAsciiFamily(styleId, storage)))
+    return fam
+  }
+}
+
+function lineFactorDecos(doc: PmNode, eaOf: EaFamilyOf, asciiOf: AsciiFamilyOf): DecorationSet {
   const decos: Decoration[] = []
-  doc.descendants((node, pos) => {
-    if (!LINE_FACTOR_BLOCKS.has(node.type.name)) return true
-    // a class decoration instead of a stylesheet :has(): Blink's :has()
-    // invalidation crashed the renderer (OOM) on long picture-heavy documents
-    if (hostsAnchoredPicture(node)) {
-      decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'doc-anchor-origin' }))
-    }
-    if (node.textContent) {
-      let cached = lineFactorCache.get(node)
-      if (cached === undefined) {
-        const perLine = perLineFactors(node)
-        let style = `--doc-line-factor:${perLine ? perLine.strut : paraLineFactor(node)}`
-        let cls: string | undefined
-        const fam = paraDeclaredFontFamily(node)
-        if (fam) style += `;font-family:${fam}`
-        else if (paraMixedDeclaredCjk(node)) cls = 'doc-grid-strut'
-        const strut = explicitStrutHalfPoints(node)
-        if (strut) style += `;${strutFontCss(strut).join(';')}`
-        cached = { style, ...(cls ? { cls } : {}), ...(perLine ? { runs: perLine.runs } : {}) }
-        lineFactorCache.set(node, cached)
-      }
-      decos.push(
-        Decoration.node(pos, pos + node.nodeSize, {
-          style: cached.style,
-          ...(cached.cls ? { class: cached.cls } : {}),
-        }),
-      )
-      if (cached.runs) {
-        for (const r of cached.runs) {
-          decos.push(
-            Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, {
-              class: 'doc-run-lf',
-              style: r.style,
-            }),
-          )
-        }
-      }
-      if (node.attrs.autoSpace !== false) {
-        for (const r of autospaceRanges(node)) {
-          decos.push(
-            Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, { class: 'doc-autospace-pad' }),
-          )
-        }
-      }
-      // ・/〜 in SimSun-substituted runs: Word lifts the whole line to 1.7143 ×
-      // size (probe 2026-08-13); a taller inline strut reproduces the row lift.
-      // exact lineRule pins the line, so no lift there.
-      if (node.attrs.lineRule !== 'exact') {
-        const ranges = simsunGapRanges(node)
-        if (ranges.length > 0) {
-          const m =
-            Number(node.attrs.lineSpacing) ||
-            (node.attrs.lineRule === 'auto' && node.attrs.lineRawTwips
-              ? Number(node.attrs.lineRawTwips) / 240
-              : 1)
-          const gapStyle = `line-height:${cssSimsunGapLineExpr(m)}`
-          for (const r of ranges) {
-            decos.push(Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, { style: gapStyle }))
-          }
-        }
-      }
-      // symbols Chromium justifies like ideographs stay unstretched in non-CJK
-      // paragraphs (Word stretches only their spaces); CJK paragraphs keep
-      // Chromium's inter-ideograph distribution around them
-      if (
-        (node.attrs.align === 'justify' || node.attrs.align === 'distribute') &&
-        !textHasCjk(node.textContent)
-      ) {
-        for (const r of justifySymbolOffsets(node)) {
-          decos.push(
-            Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, { class: 'doc-justify-symbol' }),
-          )
-        }
-      }
-    }
-    return false
-  })
+  doc.descendants((node, pos) => pushLineFactorDecos(node, pos, decos, eaOf, asciiOf))
   return DecorationSet.create(doc, decos)
+}
+
+/**
+ * Only the touched top-level blocks recompute; every other block's
+ * decorations ride the mapping. Decorations are a pure function of the block
+ * node, so the result equals a full rebuild — without DecorationSet.create's
+ * scan of every span for every top-level block, which made each edit or
+ * streamed chunk cost (blocks × decorations) on long documents.
+ */
+function updateLineFactorDecos(
+  old: DecorationSet,
+  tr: Transaction,
+  eaOf: EaFamilyOf,
+  asciiOf: AsciiFamilyOf,
+): DecorationSet {
+  const { doc } = tr
+  const touched = touchedTopLevelBlocks(tr)
+  if (!touched) return lineFactorDecos(doc, eaOf, asciiOf)
+  // streamed tail chunks: mapping the whole set walked every decoration per chunk
+  let set = appendsAtEnd(tr) ? old : old.map(tr.mapping, doc)
+  const decos: Decoration[] = []
+  for (const offset of touched) {
+    const node = doc.nodeAt(offset)
+    if (!node) continue
+    const end = offset + node.nodeSize
+    // find() also returns neighbours that merely touch the boundary
+    const stale = set.find(offset, end).filter((d) => d.from >= offset && d.to <= end)
+    if (stale.length) set = set.remove(stale)
+    if (pushLineFactorDecos(node, offset, decos, eaOf, asciiOf)) {
+      node.descendants((child, pos) =>
+        pushLineFactorDecos(child, offset + 1 + pos, decos, eaOf, asciiOf),
+      )
+    }
+  }
+  return decos.length ? set.add(doc, decos) : set
+}
+
+/** content offsets of the leading soft breaks that carry their own run size */
+function leadingSizedBreaks(node: PmNode): number[] {
+  const offsets: number[] = []
+  for (let i = 0, off = 0; i < node.childCount; i++) {
+    const child = node.child(i)
+    if (child.type.name !== 'hardBreak' || child.attrs.pageBreak || child.attrs.colBreak) break
+    if (child.marks.some((m) => m.type.name === 'docTextStyle' && m.attrs.sizeHalfPoints != null))
+      offsets.push(off)
+    off += child.nodeSize
+  }
+  return offsets
+}
+
+/** decorations of one node; returns whether to descend into its children */
+function pushLineFactorDecos(
+  node: PmNode,
+  pos: number,
+  decos: Decoration[],
+  eaOf: EaFamilyOf,
+  asciiOf: AsciiFamilyOf,
+): boolean {
+  if (!LINE_FACTOR_BLOCKS.has(node.type.name)) return true
+  // Word sizes a line holding only a w:br by the break run; a block wrapper
+  // keeps the paragraph strut (and shared enclosing marks) off that line
+  for (const off of leadingSizedBreaks(node)) {
+    decos.push(
+      Decoration.inline(pos + 1 + off, pos + 2 + off, { nodeName: 'span', class: 'doc-br-line' }),
+    )
+  }
+  // a class decoration instead of a stylesheet :has(): Blink's :has()
+  // invalidation crashed the renderer (OOM) on long picture-heavy documents
+  const group = wrapGroupDecos(node)
+  if (hostsAnchoredPicture(node) || group) {
+    decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'doc-anchor-origin' }))
+  }
+  for (const g of group ?? []) {
+    decos.push(Decoration.node(pos + 1 + g.offset, pos + 1 + g.offset + 1, { style: g.style }))
+  }
+  if (node.textContent && !isSpaceOnlyParagraph(node)) {
+    let cached = lineFactorCache.get(node)
+    if (cached === undefined) {
+      const perLine = perLineFactors(node)
+      const factor = perLine ? perLine.strut : paraLineFactor(node)
+      let style = `--doc-line-factor:${factor}`
+      let cls: string | undefined
+      const fam = paraDeclaredFontFamily(node)
+      if (fam) {
+        style += `;font-family:${fam}`
+        cls = paraMixedFaceClass(node, factor)
+      } else cls = eaStrutClass(node)
+      for (const extra of [paraCsMixedClass(node), paraCutAdjustedClass(node)])
+        if (extra) cls = cls ? `${cls} ${extra}` : extra
+      const strut = explicitStrutHalfPoints(node)
+      if (strut) style += `;${strutFontCss(strut).join(';')}`
+      cached = { style, ...(cls ? { cls } : {}), ...(perLine ? { runs: perLine.runs } : {}) }
+      lineFactorCache.set(node, cached)
+    }
+    decos.push(
+      Decoration.node(pos, pos + node.nodeSize, {
+        style: cached.style,
+        ...(cached.cls ? { class: cached.cls } : {}),
+      }),
+    )
+    if (cached.runs) {
+      for (const r of cached.runs) {
+        decos.push(
+          Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, {
+            class: 'doc-run-lf',
+            style: r.style,
+          }),
+        )
+      }
+    }
+    const padMode = autospaceMode(node.attrs.autoSpace)
+    if (padMode) {
+      const padClass = autospacePadClass(padMode)
+      for (const r of autospaceRanges(node, padMode, asciiOf)) {
+        decos.push(
+          Decoration.inline(
+            pos + 1 + r.from,
+            pos + 1 + r.to,
+            r.scale === undefined
+              ? { class: padClass }
+              : {
+                  class: `${padClass} doc-autospace-pad-le`,
+                  style: `--doc-autospace-pad-le:${r.scale}`,
+                },
+          ),
+        )
+      }
+    }
+    for (const r of hangulSpaceRanges(node)) {
+      decos.push(Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, { class: 'doc-hangul-space' }))
+    }
+    for (const at of krNoBreakBlockOffsets(node)) {
+      decos.push(Decoration.widget(pos + 1 + at, wordJoinerWidget, { side: 0, key: 'kr-wj' }))
+    }
+    // ・/〜 in SimSun-substituted runs: Word lifts the whole line to 1.7143 ×
+    // size (probe 2026-08-13); a taller inline strut reproduces the row lift.
+    // exact lineRule pins the line, so no lift there.
+    if (node.attrs.lineRule !== 'exact') {
+      const ranges = simsunGapRanges(node, eaOf(node.attrs.styleId))
+      if (ranges.length > 0) {
+        const m =
+          Number(node.attrs.lineSpacing) ||
+          (node.attrs.lineRule === 'auto' && node.attrs.lineRawTwips
+            ? Number(node.attrs.lineRawTwips) / 240
+            : node.attrs.lineRule || node.attrs.lineRawTwips
+              ? 1
+              : 'inherited')
+        const gapStyle = `line-height:${cssSimsunGapLineExpr(m)}`
+        for (const r of ranges) {
+          decos.push(Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, { style: gapStyle }))
+        }
+      }
+    }
+    // symbols Chromium justifies like ideographs stay unstretched in non-CJK
+    // paragraphs (Word stretches only their spaces); CJK paragraphs keep
+    // Chromium's inter-ideograph distribution around them
+    if (
+      (node.attrs.align === 'justify' || node.attrs.align === 'distribute') &&
+      !textHasCjk(node.textContent)
+    ) {
+      for (const r of justifySymbolOffsets(node)) {
+        decos.push(
+          Decoration.inline(pos + 1 + r.from, pos + 1 + r.to, { class: 'doc-justify-symbol' }),
+        )
+      }
+    }
+  }
+  return false
 }
 
 /** ranges (relative to the block's content start) of Chromium's justification symbols */
@@ -1638,18 +2779,33 @@ export const LineFactorExtension = Extension.create({
   addProseMirrorPlugins() {
     const key = new PluginKey<DecorationSet>('lineFactorLive')
     const editor = this.editor
+    // one lookup per style per pass: the style table only changes with the document
+    const eaOf: EaFamilyOf = (styleId) => {
+      const storage = editor?.storage?.listNumbering as ListNumberingStorage | undefined
+      if (!storage?.styles) return inheritedEaFamily(styleId, storage)
+      let memo = eaMemo.get(storage.styles)
+      if (!memo) eaMemo.set(storage.styles, (memo = new Map()))
+      const k = typeof styleId === 'string' ? styleId : ''
+      let fam = memo.get(k)
+      if (fam === undefined) memo.set(k, (fam = inheritedEaFamily(styleId, storage)))
+      return fam
+    }
+    const eaMemo = new WeakMap<object, Map<string, string | null>>()
+    const asciiOf = asciiFamilyResolver(
+      () => editor?.storage?.listNumbering as ListNumberingStorage | undefined,
+    )
     return [
       new Plugin<DecorationSet>({
         key,
         state: {
-          init: (_config, state) => lineFactorDecos(state.doc),
+          init: (_config, state) => lineFactorDecos(state.doc, eaOf, asciiOf),
           apply: (tr, old) => {
-            if (tr.getMeta(key)) return lineFactorDecos(tr.doc)
+            if (tr.getMeta(key)) return lineFactorDecos(tr.doc, eaOf, asciiOf)
             if (!tr.docChanged) return old
             // inserting pad widgets next to an active IME composition aborts it;
             // keep the old set mapped and refresh on compositionend
             if (editor?.view?.composing) return old.map(tr.mapping, tr.doc)
-            return lineFactorDecos(tr.doc)
+            return updateLineFactorDecos(old, tr, eaOf, asciiOf)
           },
         },
         props: {
@@ -1670,13 +2826,27 @@ export const LineFactorExtension = Extension.create({
   },
 })
 
+function firstRunFontAscii(node: PmNode): string | null {
+  let font: string | null = null
+  node.descendants((child) => {
+    if (font !== null) return false
+    if (child.isText) {
+      const mark = child.marks.find((m) => m.type.name === 'docTextStyle')
+      font = ((mark?.attrs.fontAscii ?? mark?.attrs.font) as string | null) ?? null
+      return false
+    }
+    return true
+  })
+  return font
+}
+
 function firstRunSizeHalfPoints(node: PmNode): number | null {
   let sz: number | null = null
   node.descendants((child) => {
     if (sz !== null) return false
     if (child.isText) {
       const mark = child.marks.find((m) => m.type.name === 'docTextStyle')
-      sz = (mark?.attrs.sizeHalfPoints as number | null) ?? null
+      sz = markSizeHalfPoints(mark?.attrs)
       return false
     }
     return true
@@ -1686,18 +2856,19 @@ function firstRunSizeHalfPoints(node: PmNode): number | null {
 
 /** the font the ::before marker actually inherits: the item's [data-style] rule,
  *  else the .doc-page baseline (Normal / docDefaults) — same chain as doc-style-css */
+function defaultParagraphDisplay(storage: ListNumberingStorage): StyleDisplay | undefined {
+  for (const info of storage.styles?.values() ?? []) {
+    if (info.isDefault && info.type === 'paragraph' && info.display) return info.display
+  }
+  return undefined
+}
+
 function markerParagraphFont(
   styleId: unknown,
   storage: ListNumberingStorage,
 ): { family: string; sizeHalf: number; bold: boolean } {
   const style = typeof styleId === 'string' ? storage.styles?.get(styleId)?.display : undefined
-  let normal: StyleDisplay | undefined
-  for (const info of storage.styles?.values() ?? []) {
-    if (info.isDefault && info.type === 'paragraph' && info.display) {
-      normal = info.display
-      break
-    }
-  }
+  const normal = defaultParagraphDisplay(storage)
   const dd = storage.docDefaults
   return {
     // ascii slot first: dual-slot font-family rules put the Latin face first,
@@ -1737,13 +2908,16 @@ function measureMarkerTwips(
   return Number.isFinite(w) && w > 0 ? Math.round(w * 15) : null
 }
 
-/** substitute glyph for a symbol-font bullet: pin a Latin font (CJK fallback draws ・) and
- *  compensate its smaller bullet; --li-marker-lh:0 keeps the scaled em box from stretching the line */
-function substituteMarkerStyles(text: string): string[] {
-  const styles = [`--li-marker-font:Arial,'Helvetica Neue',sans-serif`]
-  const scale = bulletMarkerScale(text)
-  if (scale !== 1) styles.push(`--li-marker-scale:${scale}`, '--li-marker-lh:0')
-  return styles
+const MARKER_NATURAL_LINE_HEIGHT =
+  '--li-marker-lh:calc(var(--doc-line-factor,1.2) * 1em * var(--doc-line-mult,1))'
+
+/** a symbol-font bullet with no glyph on this platform: pin a Latin face (a CJK fallback
+ *  draws a small centered dot), or swap in the size-adjusted alias glyph */
+function substituteMarker(text: string): { text: string; styles: string[] } {
+  const sub = substituteBullet(text)
+  return sub
+    ? { text: sub.glyph, styles: [`--li-marker-font:'${sub.face}'`] }
+    : { text, styles: [`--li-marker-font:Arial,'Helvetica Neue',sans-serif`] }
 }
 
 /** Word clips cell content at the cell's text area: a marker whose box ends before it
@@ -1755,6 +2929,7 @@ function markerClippedByCell(
   attrs: Record<string, unknown>,
   level: NumberingLevel,
   szHalfPoints: number,
+  storage: ListNumberingStorage,
 ): boolean {
   const align = attrs.align as string | null | undefined
   const startSide = attrs.bidi || attrs.bidiInferred ? 'right' : 'left'
@@ -1770,30 +2945,94 @@ function markerClippedByCell(
     attrs.indentLeft != null
       ? Number(attrs.indentLeft)
       : (level.indentLeft ?? 792 + 432 * Number(attrs.ilvl || 0))
-  const firstLine = specialIndentTw(attrs, level) ?? -360
+  const firstLine = specialIndentTw(attrs, level, storage) ?? -360
   return left + firstLine + szHalfPoints * 5 <= 0
 }
 
 /**
  * Word merges w:ind per attribute: the paragraph's own firstLine/hanging (an
- * explicit firstLine="0" included) replaces the level's special indent.
+ * explicit firstLine="0" included) replaces the level's, and a level w:ind that
+ * declares neither leaves the style chain's firstLine/hanging in force (probe
+ * 2026-10-20: level `left=0` under Normal `firstLine=700` keeps the number at
+ * the 35pt first-line position; a style hanging survives a level `left=720`).
  * null = the level carries no indent at all and the CSS default hang applies.
  */
-function specialIndentTw(attrs: Record<string, unknown>, level: NumberingLevel): number | null {
-  if (attrs.indentFirstLine != null) return Number(attrs.indentFirstLine)
+function specialIndentTw(
+  attrs: Record<string, unknown>,
+  level: NumberingLevel,
+  storage: ListNumberingStorage,
+): number | null {
+  const display =
+    typeof attrs.styleId === 'string'
+      ? storage.styles?.get(attrs.styleId)?.display
+      : defaultParagraphDisplay(storage)
+  return listFirstLineTw(
+    attrs.indentFirstLine != null ? Number(attrs.indentFirstLine) : null,
+    level,
+    display?.indentFirstLineTwips,
+  )
+}
+
+/** the per-attribute w:ind merge above as a pure function (own direct firstLine/hanging,
+ *  else the level's, else the style chain's once the level declares any w:ind) */
+export function listFirstLineTw(
+  ownFirstLine: number | null,
+  level: Pick<NumberingLevel, 'hanging' | 'firstLine' | 'indentLeft'>,
+  styleFirstLine: number | undefined,
+): number | null {
+  if (ownFirstLine != null) return ownFirstLine
   if (level.hanging) return -level.hanging
-  return level.firstLine ?? (level.indentLeft ? 0 : null)
+  if (level.firstLine !== undefined) return level.firstLine
+  if (level.indentLeft === undefined) return null
+  return styleFirstLine || 0
 }
 
 function cssString(text: string): string {
   return `"${text.replace(/["\\]/g, '\\$&')}"`
 }
 
+/** custom tab stop positions (twips) the marker tab can land on: style chain + direct,
+ *  direct w:val="clear" removing the style's stop at that position */
+function paragraphTabStops(
+  attrs: Record<string, unknown>,
+  storage: ListNumberingStorage,
+): number[] {
+  const styleStops =
+    typeof attrs.styleId === 'string'
+      ? (storage.styles?.get(attrs.styleId)?.display?.tabStops ?? [])
+      : []
+  let direct: TabStop[] = []
+  if (typeof attrs.tabStops === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(attrs.tabStops)
+      if (Array.isArray(parsed)) direct = parsed as TabStop[]
+    } catch {
+      /* malformed attr: no direct stops */
+    }
+  }
+  const cleared = new Set(direct.filter((t) => t.val === 'clear').map((t) => t.pos))
+  return [...styleStops.filter((t) => !cleared.has(t.pos)), ...direct]
+    .filter((t) => t.val !== 'clear' && t.val !== 'bar' && !t.rel)
+    .map((t) => t.pos)
+}
+
 /** the stray line's list geometry in docListItem attr shape (its w:ind is the anchor paragraph's) */
+/** the paragraph's direct w:lineRule, else its style's (strays carry no direct spacing) */
+function effectiveLineRule(
+  nodeAttrs: Record<string, unknown>,
+  storage: ListNumberingStorage,
+): string | undefined {
+  if (nodeAttrs.lineRule != null || nodeAttrs.lineRawTwips != null) {
+    return (nodeAttrs.lineRule as string | null) ?? 'auto'
+  }
+  return storage.styles?.get(String(nodeAttrs.styleId ?? ''))?.display?.lineRule
+}
+
 function strayGeometryAttrs(node: PmNode): Record<string, unknown> {
   const ind = node.attrs.strayIndent as StrayIndent | null
   return {
     indentLeft: ind?.leftTwips ?? null,
+    indentRight: ind?.rightTwips ?? null,
     indentFirstLine: ind?.firstLineTwips ?? null,
     styleId: node.attrs.strayStyleId,
     ilvl: (node.attrs.strayList as ListItemRef).ilvl,
@@ -1802,6 +3041,75 @@ function strayGeometryAttrs(node: PmNode): Record<string, unknown> {
 
 /** the anchor paragraph's own empty line, laid out like any paragraph; the
  *  picture block ahead of it already carries the paragraph's page break */
+/** spacing / line-rule declarations of an anchor line spec for the stray line
+ *  (indent and alignment come from the stray's own attrs; fonts from its runs) */
+const STRAY_LINE_PROPS = new Set([
+  'margin-top',
+  'margin-bottom',
+  'line-height',
+  '--doc-lh-cap',
+  '--doc-line-mult',
+  '--doc-line-factor',
+  '--doc-grid-pitch',
+  'font-size',
+])
+const STRAY_LINE_CLASSES = new Set(['doc-lh-fixed', 'doc-nosnap', 'sp-auto-b', 'sp-auto-a'])
+
+function strayLineCss(spec: DomSpec, strayAttrs: Record<string, string>): string {
+  const attrs = spec[1] as Record<string, string>
+  for (const cls of (attrs.class ?? '').split(' ')) {
+    if (STRAY_LINE_CLASSES.has(cls)) strayAttrs.class += ` ${cls}`
+  }
+  return (attrs.style ?? '')
+    .split(';')
+    .filter((decl) => STRAY_LINE_PROPS.has(decl.slice(0, decl.indexOf(':')).trim()))
+    .join(';')
+}
+
+/** Word sizes the stray line by the faces on it: a run face with a taller line
+ *  box than the document strut lifts its line (the editor's doc-run-lf
+ *  decorations do the same for editable paragraphs) */
+function strayRunSpecs(run: Run): DomSpec[] {
+  const specs = runSpanSpecs(run)
+  const family = run.fontAscii ?? run.font
+  if (!family || !run.text || specs[0]?.[0] !== 'span') return specs
+  const factor = isCjkFontName(family)
+    ? (cjkDeclaredLineFactor(family) ?? lineHeightFactor(family))
+    : lineHeightFactor(family)
+  const [tag, a, ...rest] = specs[0] as [string, Record<string, string>, ...unknown[]]
+  const lifted: DomSpec = [
+    tag,
+    {
+      ...a,
+      class: a.class ? `${a.class} doc-run-lf` : 'doc-run-lf',
+      style: `${a.style ? `${a.style};` : ''}--doc-line-factor:${factor}`,
+    },
+    ...(rest as DomSpec[]),
+  ]
+  return [lifted, ...specs.slice(1)]
+}
+
+/** Chromium expands a tab to the next multiple of tab-size from the content
+ *  edge, so the first custom stop past the indent sizes that grid: exact for the
+ *  one-stop operator rows PDF converters emit, a plain grid beyond it */
+function strayTabCss(line: Record<string, unknown>, ind: StrayIndent | null): string {
+  let stops: TabStop[] = []
+  if (typeof line.tabStops === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(line.tabStops)
+      if (Array.isArray(parsed)) stops = parsed as TabStop[]
+    } catch {
+      /* malformed attr: default grid */
+    }
+  }
+  const left = ind?.leftTwips ?? (typeof line.indentLeft === 'number' ? line.indentLeft : 0)
+  const next = stops
+    .filter((s) => s.val !== 'clear' && s.val !== 'bar' && !s.rel && s.pos > left)
+    .map((s) => s.pos)
+    .sort((a, b) => a - b)[0]
+  return `white-space:pre-wrap;tab-size:${((next ?? left + 720) - left) / 20}pt`
+}
+
 export function anchorLineSpec(line: Record<string, unknown>): DomSpec {
   const attrs = blockAttrs({
     attrs: { ...line, docxIndex: null, pageBreakBefore: false },
@@ -1809,6 +3117,11 @@ export function anchorLineSpec(line: Record<string, unknown>): DomSpec {
   })
   delete attrs['data-para']
   attrs.class = `${attrs.class ? `${attrs.class} ` : ''}doc-anchor-line`
+  // w:br w:clear: the paragraph's line resumes below the floats on that side
+  if (line.clear) {
+    const clear = line.clear === 'all' ? 'both' : String(line.clear)
+    attrs.style = `${attrs.style ? `${attrs.style};` : ''}clear:${clear}`
+  }
   return ['p', attrs, ['br']]
 }
 
@@ -1846,7 +3159,19 @@ export const AnchorLineExtension = Extension.create({
       new Plugin({
         state: {
           init: (_, state) => build(state.doc),
-          apply: (tr, old) => (tr.docChanged ? build(tr.doc) : old),
+          apply: (tr, old) => {
+            if (!tr.docChanged) return old
+            // a local edit outside every anchored textbox block keeps the widgets
+            const touched = localEditBlocks(tr)
+            if (!touched) return build(tr.doc)
+            const mapped = old.map(tr.mapping, tr.doc)
+            // anchored textbox blocks also live inside table cells
+            return touchedNeedsRecompute(tr, touched, mapped, (node) =>
+              containsNode(node, (n) => n.type.name === 'docProtected'),
+            )
+              ? build(tr.doc)
+              : mapped
+          },
         },
         props: {
           decorations(state) {
@@ -1871,9 +3196,13 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
       const nodes: Array<{ pos: number; node: PmNode }> = []
       doc.descendants((node, pos) => {
         if (node.type.name === 'docListItem') {
+          const deleted =
+            !!node.attrs.paraMarkDel ||
+            (node.attrs.blockRevision as { kind?: string } | null)?.kind === 'del'
           refs.push({
             numId: (node.attrs.numId as string | null) ?? null,
             ilvl: Number(node.attrs.ilvl) || 0,
+            ...(deleted ? { deleted: true } : {}),
           })
           nodes.push({ pos, node })
           return false
@@ -1896,74 +3225,174 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
         if (marker === null) return
         const styles: string[] = []
         let text = marker.text
+        // drawn glyph when it differs from the measured one
+        let shown: string | null = null
         if (marker.symbolFont && marker.symbolChar) {
           if (symbolFontCovers(marker.symbolFont, marker.symbolChar)) {
             text = marker.symbolChar
             styles.push(`--li-marker-font:"${marker.symbolFont}"`)
-          } else styles.push(...substituteMarkerStyles(text))
+          } else {
+            const sub = substituteMarker(text)
+            shown = sub.text
+            styles.push(...sub.styles)
+          }
         }
         // a protected node's decoration lands on the wrapper, out of attr()'s reach for
         // the inner stray line: the marker travels as an inherited custom property
         const stray = nodes[i].node.type.name === 'docProtected'
         const attrs: Record<string, string> = stray
           ? { 'data-stray-marker': '' }
-          : { 'data-marker': text }
-        if (stray) styles.push(`--li-marker:${cssString(text)}`)
+          : { 'data-marker': shown ?? text }
+        if (stray) styles.push(`--li-marker:${cssString(shown ?? text)}`)
+        if (marker.picBulletSrc) {
+          attrs['data-marker-pic'] = ''
+          styles.push(`--li-marker-pic:url("${marker.picBulletSrc}")`)
+        }
         // geometry fallback: when the paragraph has no w:ind of its own, use the numbering.xml level's indent;
-        // marker font size comes from the level's rPr, else follows the item's first text run (Word rule)
+        // marker font size comes from the level's rPr, else from the paragraph mark, else the
+        // paragraph style (Word draws the number with the mark's run properties, never the first
+        // text run's, whose size the paragraph strut inherits here)
         const def = refs[i].numId !== null ? storage.defs.get(refs[i].numId as string) : undefined
         const level = def?.levels[Math.max(0, refs[i].ilvl)]
         if (level) {
           const nodeAttrs = stray ? strayGeometryAttrs(nodes[i].node) : nodes[i].node.attrs
           // an explicit w:ind left (0 included) beats the numbering level's indent
           const leftTw =
-            nodeAttrs.indentLeft != null ? Number(nodeAttrs.indentLeft) : level.indentLeft || 0
-          if (nodeAttrs.indentLeft == null && level.indentLeft) {
+            nodeAttrs.indentLeft != null ? Number(nodeAttrs.indentLeft) : (level.indentLeft ?? 0)
+          if (nodeAttrs.indentLeft == null && level.indentLeft !== undefined) {
             styles.push(`--li-left:${level.indentLeft / 20}pt`)
+          }
+          if (nodeAttrs.indentRight == null && level.indentRight !== undefined) {
+            styles.push(`margin-inline-end:${level.indentRight / 20}pt`)
           }
           const ownFirst =
             nodeAttrs.indentFirstLine == null ? null : Number(nodeAttrs.indentFirstLine)
-          const firstTw = specialIndentTw(nodeAttrs, level)
-          if (ownFirst == null && firstTw != null && firstTw < 0) {
-            styles.push(`--li-hang:${-firstTw / 20}pt`)
-          }
-          // no hanging area: the marker sits at the first-line position instead of
-          // hanging the CSS default before it; its tab then runs to the next default stop
-          if (firstTw != null && firstTw >= 0) {
-            styles.push('--li-hang:0pt')
-            if (ownFirst == null && firstTw > 0) styles.push(`text-indent:${firstTw / 20}pt`)
-          }
-          const szHalf =
-            level.szHalfPoints ??
+          const firstTw = specialIndentTw(nodeAttrs, level, storage)
+          const runSizeHalf =
             (stray
               ? (nodes[i].node.attrs.strayRuns as Run[] | null)?.[0]?.sizeHalfPoints
-              : firstRunSizeHalfPoints(nodes[i].node)) ??
-            undefined
+              : firstRunSizeHalfPoints(nodes[i].node)) ?? undefined
+          const para = markerParagraphFont(nodeAttrs.styleId, storage)
+          const markSizeHalf = stray
+            ? runSizeHalf
+            : ((nodes[i].node.attrs.markSize as number | null) ?? undefined)
+          const szHalf = level.szHalfPoints ?? markSizeHalf ?? para.sizeHalf
           if (szHalf) styles.push(`--li-marker-size:${szHalf / 2}pt`)
+          // a text-font marker draws in the level's face, else the paragraph mark's; a
+          // glyph that face lacks falls back to Segoe UI Symbol, whose ascent lifts the line
+          const markerFace = marker.symbolFont ? null : (marker.font ?? para.family)
+          const fallbackFace =
+            markerFace && !marker.picBulletSrc ? markerFallbackFace(text, markerFace) : null
+          const liftFace =
+            marker.symbolFont ??
+            fallbackFace ??
+            (markerFace && SEGOE_UI_SYMBOL_RE.test(markerFace.trim().toLowerCase())
+              ? markerFace
+              : null)
+          if (fallbackFace) {
+            styles.push(`--li-marker-font:'Segoe UI Symbol GO',${cssFontFamily(markerFace!)}`)
+          } else if (marker.font) {
+            // its own face without letting that face's leading stretch the line
+            // (an oversized w:sz below overrides the 0)
+            styles.push(`--li-marker-font:${cssString(marker.font)}`)
+            if (!liftFace) styles.push('--li-marker-lh:0')
+          }
+          const exact = effectiveLineRule(nodeAttrs, storage) === 'exact'
+          const lifted = liftFace && !exact
+          const textHalf = runSizeHalf ?? para.sizeHalf
+          const extraPt =
+            szHalf && !fallbackFace && !exact
+              ? oversizedMarkerExtraPt(markerFace ?? para.family, szHalf / 2, textHalf / 2)
+              : null
+          if (lifted) {
+            // Word's line is the tallest ascent plus the tallest descent on it:
+            // a Symbol bullet's ascent tops every Latin text face, so the box
+            // (bottom-aligned, the glyph stays on the baseline) sets that height
+            const textPt = (runSizeHalf ?? para.sizeHalf) / 2
+            const linePt = symbolBulletLinePt(
+              liftFace,
+              (szHalf ?? para.sizeHalf) / 2,
+              (stray ? null : firstRunFontAscii(nodes[i].node)) ?? para.family,
+              textPt,
+            )
+            if (linePt) {
+              styles.push(
+                `--li-marker-lh:calc(${linePt}pt * var(--doc-line-mult,1))`,
+                '--li-marker-va:bottom',
+              )
+            } else {
+              // the text face is as tall: the marker's own (substitute) face
+              // must not grow the line either
+              styles.push('--li-marker-lh:0')
+            }
+          } else if (extraPt) {
+            // a level or mark w:sz above the text size grows the first line by the marker's
+            // extra ascent only, outside the line multiple (Word); the box stays on the
+            // baseline so the growth splits around it but totals the Word value
+            styles.push(
+              `--li-marker-lh:calc(var(--doc-line-factor,1.2) * ${textHalf / 2}pt * var(--doc-line-mult,1) + ${extraPt}pt)`,
+            )
+          }
+          if (level.color) {
+            styles.push(
+              `--li-marker-color:#${level.color}`,
+              `--dk-li-mc:${darkPageColor(level.color)}`,
+            )
+          }
           if (level.suff === 'space' || level.suff === 'nothing') attrs['data-suff'] = level.suff
-          if (markerClippedByCell(doc, nodes[i].pos, nodeAttrs, level, szHalf ?? 20))
+          if (markerClippedByCell(doc, nodes[i].pos, nodeAttrs, level, szHalf ?? 20, storage))
             attrs['data-marker-clip'] = ''
 
           // Word's default tab after the marker: a marker that escapes the hanging
           // area (or one with no hanging area at all) pushes first-line text to
-          // the next default tab stop, not right up against the marker
+          // the next tab stop, not right up against the marker
+          const tabSuff = level.suff === undefined || level.suff === 'tab'
+          let widthTw: number | null = null
           if (
-            (level.suff === undefined || level.suff === 'tab') &&
             text &&
             firstTw != null &&
-            (firstTw >= 0 || leftTw > 0)
+            (level.lvlJc !== undefined ||
+              (tabSuff && (firstTw >= 0 || leftTw > 0 || storage.indentNotTabStop)))
           ) {
-            // no level/run size -> the marker renders at the li's 1em; family always
-            // inherits from the li (level.font only applies to symbol bullets)
-            const para = markerParagraphFont(nodeAttrs.styleId, storage)
-            const widthTw = measureMarkerTwips(
+            // no level/run size -> the marker renders at the li's 1em; family
+            // inherits from the li unless the level declares a text font
+            widthTw = measureMarkerTwips(
               text,
-              para.family,
+              marker.font ?? para.family,
               (szHalf ?? para.sizeHalf) / 2,
               para.bold,
             )
-            const adv =
-              widthTw !== null ? markerTabAdvance(leftTw + firstTw, widthTw, leftTw) : null
+          }
+          // lvlJc right/center: the marker's end/middle sits at the marker position,
+          // so its box starts earlier by the glyph width (or half of it)
+          const shift =
+            widthTw === null || !level.lvlJc
+              ? 0
+              : level.lvlJc === 'right'
+                ? widthTw
+                : Math.round(widthTw / 2)
+          if (firstTw != null && firstTw < 0 && (ownFirst == null || shift > 0)) {
+            styles.push(`--li-hang:${(-firstTw + shift) / 20}pt`)
+          }
+          // no hanging area: the marker sits at the first-line position instead of
+          // hanging the CSS default before it; its tab then runs to the next stop
+          if (firstTw != null && firstTw >= 0) {
+            styles.push(`--li-hang:${shift / 20}pt`)
+            if (ownFirst == null && firstTw > 0) styles.push(`text-indent:${firstTw / 20}pt`)
+          }
+          if (tabSuff && widthTw !== null && firstTw != null) {
+            const boxStart = leftTw + firstTw - shift
+            // without a hanging area nothing can "fit": the tab always runs to a stop
+            const hangStop = firstTw < 0 && !storage.indentNotTabStop
+            const stops = paragraphTabStops(nodeAttrs, storage)
+            if (level.tabStop !== undefined) stops.push(level.tabStop)
+            const adv = markerTabAdvance(
+              boxStart,
+              widthTw,
+              hangStop ? leftTw : boxStart,
+              storage.defaultTabTwips ?? 720,
+              stops,
+            )
             if (adv !== null) styles.push(`--li-tab:${adv / 20}pt`)
           }
         }
@@ -1985,9 +3414,22 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
           init: (_config, state) => ({ defs: storage.defs, decos: compute(state.doc) }),
           apply(tr, old) {
             // defs is replaced (never mutated) on open/reparse and marker overlay
-            if (tr.docChanged || old.defs !== storage.defs)
-              return { defs: storage.defs, decos: compute(tr.doc) }
-            return old.decos ? { defs: old.defs, decos: old.decos.map(tr.mapping, tr.doc) } : old
+            if (old.defs !== storage.defs) return { defs: storage.defs, decos: compute(tr.doc) }
+            if (!tr.docChanged) return old
+            // markers depend on the sequence of list items: a local edit that
+            // touches no list item (and adds/removes no block) cannot move one
+            const touched = localEditBlocks(tr)
+            if (touched && old.decos) {
+              const mapped = old.decos.map(tr.mapping, tr.doc)
+              // list items inside a touched table count too (a cell can hold a list)
+              const isListNode = (n: PmNode) =>
+                n.type.name === 'docListItem' ||
+                (n.type.name === 'docProtected' && !!n.attrs.strayList)
+              const hasList = (node: PmNode) => containsNode(node, isListNode)
+              if (!touchedNeedsRecompute(tr, touched, mapped, hasList))
+                return { defs: old.defs, decos: mapped }
+            }
+            return { defs: storage.defs, decos: compute(tr.doc) }
           },
         },
         props: {
@@ -2007,7 +3449,15 @@ const tableCellAttrs = {
   /** tcPr w:cellIns/w:cellDel cell revision ({kind, author, ...} | null) */
   cellRevision: { default: null as Record<string, string> | null },
   cellMar: { default: null as Record<string, number> | null },
+  /** display-only: drawn px of the collapsed left/right lines incl. a neighbour's (convert.ts) */
+  collapsedBw: { default: null as Record<string, number> | null },
   textDirection: { default: null as string | null },
+  /** w:noWrap (tri-state: null = as parsed) */
+  noWrap: { default: null as boolean | null },
+  /** textDirection / cellMar / noWrap were edited: save writes them from the attrs */
+  tcPrEdited: { default: false },
+  /** w:hideMark (display-only; the bytes round-trip through rawTcPr) */
+  hideMark: { default: false },
   /** inner clip-box height (twips) when the row is hRule="exact" (computed in convert.ts) */
   clipHeightTwips: { default: null as number | null },
   /** display placeholder for the row's w:gridBefore/w:gridAfter columns (borderless, not saved as w:tc) */
@@ -2021,29 +3471,19 @@ const tableCellAttrs = {
   align: { default: null as string | null },
 }
 
-export function borderWidthPx(b: { style: string; szEighths?: number } | undefined | null): number {
-  if (!b || b.style === 'none' || b.style === 'nil') return 0
-  return Math.max(1, Math.round(((b.szEighths ?? 4) / 8 / 72) * 96))
+export function borderWidthPx(b: BorderLine): number {
+  return borderDrawnPx(b)
 }
 
-/** true border width (sz/8 pt) minus the whole px we draw. Word lays rows out
+/** true drawn thickness (border-metrics.ts) minus the whole px we draw. Word lays rows out
  *  with the true width (probe 2026-09-04: 0.5pt adds 0.667px per row, 1pt 1.333px);
  *  the td::before spacer in styles.css gives this back to the row height */
-export function borderSnapDeltaPx(
-  b: { style: string; szEighths?: number } | undefined | null,
-): number {
-  if (!b || b.style === 'none' || b.style === 'nil') return 0
-  return ((b.szEighths ?? 4) / 8 / 72) * 96 - borderWidthPx(b)
+export function borderSnapDeltaPx(b: BorderLine): number {
+  return borderTruePx(b) - borderDrawnPx(b)
 }
 
-export const bdDeltaCss = (
-  side: 'top' | 'bottom',
-  b: { style: string; szEighths?: number } | undefined | null,
-): string => `--cell-bd-${side === 'top' ? 't' : 'b'}:${borderSnapDeltaPx(b).toFixed(3)}px`
-
-type BorderLine = { style: string; szEighths?: number } | undefined | null
-const trueBorderPx = (b: BorderLine): number =>
-  !b || b.style === 'none' || b.style === 'nil' ? 0 : ((b.szEighths ?? 4) / 8 / 72) * 96
+export const bdDeltaCss = (side: 'top' | 'bottom', b: BorderLine): string =>
+  `--cell-bd-${side === 'top' ? 't' : 'b'}:${borderSnapDeltaPx(b).toFixed(3)}px`
 
 /** Word advances a declared-height row by trHeight PLUS the true gridline width
  *  (CSS collapsed borders fit inside the tr height): the table emits --doc-row-eat
@@ -2053,28 +3493,81 @@ export function tableRowEatCss(borders: TableBordersAttr | null, cellSpacing: bo
   if (cellSpacing) return ['--doc-row-grid:0']
   const insideH = borders?.insideH
   if (!insideH || insideH.style === 'none' || insideH.style === 'nil') return []
-  return [`--doc-row-eat:${trueBorderPx(insideH).toFixed(2)}px`]
+  return [`--doc-row-eat:${borderTruePx(insideH).toFixed(2)}px`]
+}
+
+export type CellMarTwips = { top?: number; bottom?: number } | null | undefined
+
+/** An atLeast w:trHeight floors the cell CONTENT; the vertical cell margins sit on
+ *  top of it (Word probe 2026-09-23, Calibri 11 single-line row, trHeight 440 with
+ *  tcMar 0/100/200 twips -> 23.04/33.12/42.96pt). CSS `height` on a tr includes the
+ *  cell padding, so the declared height has to carry the margins itself. Cells with
+ *  no w:tcMar fall back to the table's --doc-cell-pad-*. hRule=exact rows advance by
+ *  the declared height plus the BOTTOM margin only: the top margin sits inside the
+ *  declared height and the gridline never adds (probe 2026-10-22, trHeight 440 with
+ *  tcMar top/bottom 100/0 -> 22.0pt, 0/100 -> 27.0, 200/100 -> 27.0; borders sz 4/8/24
+ *  all 74.0 for trHeight 1480). */
+function rowPadExpr(cellMars: CellMarTwips[]): string {
+  return `${rowPadSideExpr(cellMars, 'top')} + ${rowPadSideExpr(cellMars, 'bottom')}`
+}
+
+/** Word pads every cell of a row with the row's LARGEST top and largest bottom
+ *  cell margin (probe 2026-10-13: a 2-line cell with tcMar 100 next to a 1-line
+ *  cell with tcMar 240 makes a 43.92pt row = 24 + 19.5 + border, the 2-line
+ *  text starting 12pt under the rule; 240/100 split gives 12 + 5). Cells without
+ *  a w:tcMar side count with the table default. */
+export function rowPadSideExpr(cellMars: CellMarTwips[], side: 'top' | 'bottom'): string {
+  const fallback = `var(--doc-cell-pad-${side === 'top' ? 't' : 'b'},0px)`
+  let explicit = -1
+  let inherits = cellMars.length === 0
+  for (const m of cellMars) {
+    const v = m?.[side]
+    if (v === undefined) inherits = true
+    else explicit = Math.max(explicit, v)
+  }
+  if (explicit < 0) return fallback
+  const px = `${(explicit / 15).toFixed(2)}px`
+  return inherits ? `max(${px}, ${fallback})` : px
+}
+
+/** `--doc-row-pad-t/b` on a tr: the row-wide vertical cell padding (see rowPadSideExpr);
+ *  absent when no cell declares the side, so the table default applies directly */
+export function rowPadVarsCss(cellMars: CellMarTwips[]): string[] {
+  const out: string[] = []
+  for (const side of ['top', 'bottom'] as const) {
+    if (!cellMars.some((m) => m?.[side] !== undefined)) continue
+    out.push(`--doc-row-pad-${side === 'top' ? 't' : 'b'}:${rowPadSideExpr(cellMars, side)}`)
+  }
+  return out
 }
 
 /** cells: gridBefore/gridAfter placeholders must be filtered out by the caller */
 export function rowHeightCss(
   heightTwips: number,
   cellBorders: Array<{ top?: BorderLine; bottom?: BorderLine } | null | undefined>,
+  cellMars: CellMarTwips[] = [],
+  heightRule: 'atLeast' | 'exact' | null = null,
 ): string {
+  // exact: the gridline fits inside the declared height (Word probe 2026-10-22), so
+  // no --doc-row-eat; sub-px precision matters, a 0.1px bias stacks over 12 rows a page
+  if (heightRule === 'exact') {
+    return `height:calc(${cellPadPx(heightTwips)} + ${rowPadSideExpr(cellMars, 'bottom')})`
+  }
   let explicit = 0
   let inherits = false
   for (const b of cellBorders) {
     if (!b?.top || !b?.bottom) inherits = true
-    explicit = Math.max(explicit, trueBorderPx(b?.top), trueBorderPx(b?.bottom))
+    explicit = Math.max(explicit, borderTruePx(b?.top), borderTruePx(b?.bottom))
   }
-  const fixed = ((heightTwips / 1440) * 96).toFixed(1)
+  const fixed = `${((heightTwips / 1440) * 96).toFixed(1)}px + ${rowPadExpr(cellMars)}`
   if (explicit > 0) {
     const line = inherits
       ? `max(${explicit.toFixed(2)}px, var(--doc-row-eat,0px))`
       : `${explicit.toFixed(2)}px`
-    return `height:calc(${fixed}px + ${line} * var(--doc-row-grid,1))`
+    return `height:calc(${fixed} + ${line} * var(--doc-row-grid,1))`
   }
-  return inherits ? `height:calc(${fixed}px + var(--doc-row-eat,0px))` : `height:${fixed}px`
+  if (inherits) return `height:calc(${fixed} + var(--doc-row-eat,0px))`
+  return `height:calc(${fixed})`
 }
 
 function tableCellHtml(node: PmNode): Record<string, string> {
@@ -2092,16 +3585,33 @@ function tableCellHtml(node: PmNode): Record<string, string> {
     string,
     { style: string; szEighths?: number; color?: string }
   > | null
+  // collapsed line width per vertical side (convert.ts, neighbour-aware): a nil own
+  // side still has the neighbour's line inside its box, and the text inset must absorb it
+  const collapsedBw = node.attrs.collapsedBw as { l?: number; r?: number } | null
+  const collapsedOf = (side: 'left' | 'right') => collapsedBw?.[side === 'left' ? 'l' : 'r']
+  const bwCss = (side: 'left' | 'right'): string => {
+    const w = collapsedOf(side) ?? borderWidthPx(cellBorders?.[side])
+    return `--cell-bw-${DK_SIDE[side]}:${w}px`
+  }
   const borderCss = (side: 'top' | 'right' | 'bottom' | 'left'): string => {
     const v = borderLineCss(cellBorders?.[side])
-    if (!v) return ''
+    if (!v) {
+      return (side === 'left' || side === 'right') && collapsedOf(side) !== undefined
+        ? bwCss(side)
+        : ''
+    }
     const css = `border-${side}:${v};${dkBorder(DK_SIDE[side], v)}`
     // the text inset rule (styles.css) needs the overriding side's width
     return side === 'left' || side === 'right'
-      ? `${css};--cell-bw-${DK_SIDE[side]}:${borderWidthPx(cellBorders?.[side])}px`
+      ? `${css};${bwCss(side)}`
       : `${css};${bdDeltaCss(side, cellBorders?.[side])}`
   }
   const mar = node.attrs.cellMar as Record<string, number> | null
+  // w:tl2br / w:tr2bl cross the whole cell, so they paint as background layers
+  // over the fill rather than through the border box
+  const diagonalLayers = (['tl2br', 'tr2bl'] as const)
+    .map((side) => cellDiagonalCss(cellBorders?.[side], side))
+    .filter((v): v is string => v !== null)
   const styles = [
     // gridBefore/gridAfter placeholder: bare grid space (inline border beats the --doc-b-* cell rules)
     node.attrs.gridGap ? 'border:none;background:none' : '',
@@ -2119,6 +3629,9 @@ function tableCellHtml(node: PmNode): Record<string, string> {
       ? `background-color:#${node.attrs.fill};${dkBackground(`#${node.attrs.fill}`)}`
       : '',
     node.attrs.align ? `text-align:${node.attrs.align}` : '',
+    // a fixed-layout table (w:tblLayout fixed) sets the fallback to normal: Word
+    // ignores w:noWrap there and wraps inside the grid column
+    node.attrs.noWrap ? 'white-space:var(--doc-cell-nowrap,nowrap)' : '',
     node.attrs.vAlign && node.attrs.vAlign !== 'top'
       ? `vertical-align:${node.attrs.vAlign === 'center' ? 'middle' : 'bottom'}`
       : '',
@@ -2126,11 +3639,13 @@ function tableCellHtml(node: PmNode): Record<string, string> {
     borderCss('left'),
     borderCss('bottom'),
     borderCss('right'),
-    // tcMar only overrides declared sides; the rest inherit the table-level --doc-cell-pad-*
-    ...(['top', 'left', 'bottom', 'right'] as const).map((side) =>
-      mar?.[side] !== undefined
-        ? `--doc-cell-pad-${DK_SIDE[side]}:${(mar[side] / 15).toFixed(1)}px`
-        : '',
+    diagonalLayers.length
+      ? `background-image:${diagonalLayers.join(',')};${dkBackgroundImage(diagonalLayers.join(','))}`
+      : '',
+    // tcMar only overrides declared sides; the rest inherit the table-level
+    // --doc-cell-pad-*. Top/bottom are row-wide (tr --doc-row-pad-*, rowPadVarsCss)
+    ...(['left', 'right'] as const).map((side) =>
+      mar?.[side] !== undefined ? `--doc-cell-pad-${DK_SIDE[side]}:${cellPadPx(mar[side])}` : '',
     ),
     Array.isArray(node.attrs.colwidth)
       ? `width:${(node.attrs.colwidth as number[]).reduce((sum, width) => sum + width, 0)}px`
@@ -2141,6 +3656,7 @@ function tableCellHtml(node: PmNode): Record<string, string> {
     const ink = fillInk(node.attrs.fill)
     if (ink) attrs['data-ink'] = ink
   }
+  if (node.attrs.hideMark) attrs['data-hide-mark'] = '1'
   const cellRev = node.attrs.cellRevision as { kind?: string; author?: string } | null
   if (cellRev?.kind) {
     attrs.class = `cell-rev-${cellRev.kind}`
@@ -2243,9 +3759,94 @@ export function tableBordersCss(b: TableBordersAttr | null): string[] {
   return styles.concat(dkTableBorders(styles))
 }
 
-/** half of the outer left+right borders: the collapsed table box spans them on top of the grid width */
-export function outerBorderPx(b: TableBordersAttr | null): number {
-  return b ? (borderWidthPx(b.left) + borderWidthPx(b.right)) / 2 : 0
+/** half of the outer left+right borders: the collapsed table box spans them on top of
+ *  the grid width; edge cells' own w:tcBorders straddle the outer gridlines the same way */
+export function outerBorderPx(
+  b: TableBordersAttr | null,
+  edges?: { left: BorderLine[]; right: BorderLine[] },
+): number {
+  const side = (line: BorderLine, cells: BorderLine[] = []) =>
+    Math.max(borderWidthPx(line), ...cells.map((c) => borderWidthPx(c)))
+  return (side(b?.left, edges?.left) + side(b?.right, edges?.right)) / 2
+}
+
+type GridCell = {
+  start: number
+  end: number
+  borders?: { left?: BorderLine; right?: BorderLine } | null
+}
+
+/** left border of the cells starting in grid column 0, right border of those ending in
+ *  the last one; a row whose edge column is covered by a vertical span from above
+ *  contributes nothing there (the spanning cell already did) */
+function edgeBorders(rows: GridCell[][]): { left: BorderLine[]; right: BorderLine[] } {
+  const cols = Math.max(0, ...rows.flatMap((r) => r.map((c) => c.end)))
+  return {
+    left: rows.flatMap((r) => r.filter((c) => c.start === 0).map((c) => c.borders?.left)),
+    right: rows.flatMap((r) => r.filter((c) => c.end === cols).map((c) => c.borders?.right)),
+  }
+}
+
+/** grid columns spanned by the first row */
+/** left margin of a suppressed float (inline flow) that keeps its w:tblpX position */
+export function suppressedFloatLeftCss(attrs: Record<string, unknown>): string | null {
+  if (!attrs.tblFloatSuppressed || attrs.tblFloatXSpec || attrs.tblFloatXTwips == null) return null
+  const x = (Number(attrs.tblFloatXTwips) || 0) / 15
+  // margin / text (the default when w:horzAnchor is omitted) both start at the column edge
+  if (attrs.tblFloatHorzAnchor !== 'page') return x > 0 ? `${x.toFixed(1)}px` : null
+  return `calc(${x.toFixed(1)}px - var(--doc-margin-left,0px))`
+}
+
+function tableColCount(node: PmNode): number {
+  let cols = 0
+  node.firstChild?.forEach((cell) => {
+    cols += Number(cell.attrs.colspan) || 1
+  })
+  return Math.max(1, cols)
+}
+
+/** per-column drawn border px of a w:tblCellSpacing table (see cellSpacingBorderPx) */
+function spacingBorderPx(node: PmNode, cols: number): number[] {
+  return cellSpacingBorderPx(cols, (node.attrs.borders as TableBordersAttr | null) ?? undefined)
+}
+
+/** edge borders of a PM table; grid columns follow colspan/rowspan since convert.ts
+ *  drops vMerge continuation cells from the row */
+export function tableEdgeBorders(node: PmNode): { left: BorderLine[]; right: BorderLine[] } {
+  const rows: GridCell[][] = []
+  const busyUntil: number[] = []
+  node.forEach((row, _offset, r) => {
+    const cells: GridCell[] = []
+    let col = 0
+    row.forEach((cell) => {
+      while ((busyUntil[col] ?? 0) > r) col++
+      const span = Number(cell.attrs.colspan) || 1
+      const rowspan = Number(cell.attrs.rowspan) || 1
+      for (let c = col; c < col + span; c++) busyUntil[c] = r + rowspan
+      cells.push({
+        start: col,
+        end: col + span,
+        borders: cell.attrs.borders as GridCell['borders'],
+      })
+      col += span
+    })
+    rows.push(cells)
+  })
+  return edgeBorders(rows)
+}
+
+/** edge borders of a parsed table model (read-only render) under the same grid rule */
+export function modelEdgeBorders(model: TableModel): { left: BorderLine[]; right: BorderLine[] } {
+  return edgeBorders(
+    model.rows.map((row) => {
+      let col = 0
+      return row.flatMap((cell) => {
+        const start = col
+        col += cell.colSpan ?? 1
+        return cell.vMerge === 'continue' ? [] : [{ start, end: col, borders: cell.borders }]
+      })
+    }),
+  )
 }
 
 /** Table-level w:tblCellMar → per-side --doc-cell-pad-* declarations; undeclared sides use Word defaults (0 top/bottom, 108 twips left/right) */
@@ -2253,12 +3854,12 @@ export function cellPadCss(
   mar: { top?: number; right?: number; bottom?: number; left?: number } | null,
 ): string[] {
   if (!mar) return []
-  const px = (v: number | undefined, dflt: number) => ((v ?? dflt) / 15).toFixed(1)
+  const px = (v: number | undefined, dflt: number) => cellPadPx(v ?? dflt)
   return [
-    `--doc-cell-pad-t:${px(mar.top, 0)}px`,
-    `--doc-cell-pad-r:${px(mar.right, 108)}px`,
-    `--doc-cell-pad-b:${px(mar.bottom, 0)}px`,
-    `--doc-cell-pad-l:${px(mar.left, 108)}px`,
+    `--doc-cell-pad-t:${px(mar.top, 0)}`,
+    `--doc-cell-pad-r:${px(mar.right, 108)}`,
+    `--doc-cell-pad-b:${px(mar.bottom, 0)}`,
+    `--doc-cell-pad-l:${px(mar.left, 108)}`,
   ]
 }
 
@@ -2302,6 +3903,8 @@ export const DocTable = Node.create({
       tblFloatYTwips: { default: null as number | null },
       tblFloatHorzAnchor: { default: null as string | null },
       tblFloatVertAnchor: { default: null as string | null },
+      tblFloatXSpec: { default: null as string | null },
+      tblFloatYSpec: { default: null as string | null },
       tblFloatDistance: { default: null as Record<string, number> | null },
       /** display-only measured width used to place right AutoFit floats */
       tblFloatWidthPx: { default: null as number | null },
@@ -2310,6 +3913,8 @@ export const DocTable = Node.create({
       tblAutoFitEdited: { default: false },
       /** literal w:tblLayout fixed: declared widths hold, no fit-to-page narrowing */
       tblFixedLayout: { default: false },
+      /** explicit dxa w:tblW: a left-aligned table holds its declared width like a fixed layout */
+      tblDxaWidth: { default: false },
       indentTwips: { default: null as number | null },
       tblStyleId: { default: null as string | null },
       tblLook: { default: null as Record<string, boolean> | null },
@@ -2318,6 +3923,10 @@ export const DocTable = Node.create({
       sdtShell: { default: null as string | null },
       /** RTL table (tblPr w:bidiVisual): columns right to left */
       bidiVisual: { default: false },
+      /** alt text (tblPr w:tblCaption / w:tblDescription) */
+      tblCaption: { default: null as string | null },
+      tblDescription: { default: null as string | null },
+      tblAltEdited: { default: false },
       originalStructure: { default: null as string | null },
       originalFormatting: { default: null as string | null },
       blockRevision: { default: null as Record<string, string> | null },
@@ -2342,6 +3951,7 @@ export const DocTable = Node.create({
     if (tblFloated) attrs.class += ` doc-table-float-${node.attrs.tblFloat}`
     if (node.attrs.bidiVisual) attrs.dir = 'rtl'
     const styles: string[] = []
+    if (node.attrs.tblFixedLayout === true) styles.push('--doc-cell-nowrap:normal')
     let centerMargin: string | null = null
     // --doc-content-w: per-block section content width (differing-width sections); defaults to the page content box
     const contentW = 'var(--doc-content-w,100%)'
@@ -2353,6 +3963,15 @@ export const DocTable = Node.create({
       node.attrs.tblAlign !== 'center' &&
       node.attrs.tblAlign !== 'right'
     const spillMargin = rtlStart ? 'var(--doc-margin-left,0px)' : 'var(--doc-margin-right,0px)'
+    // w:tblpXSpec="center" keeps w:tblW and centres the table on the margin box,
+    // overhanging both margins when wider than the column (floated or flowed inline)
+    const tblpCentered =
+      !!node.attrs.tblFloatSource &&
+      node.attrs.tblFloatXSpec === 'center' &&
+      node.attrs.tblFloatHorzAnchor !== 'page'
+    // a float flowed inline for lack of side room still starts at its w:tblpX:
+    // Word keeps the horizontal position, only the text no longer wraps beside it
+    const suppressedFloatX = suppressedFloatLeftCss(node.attrs)
     let widthExpr: string | null = null
     if (displayAutoFit === 'contents') styles.push('width:auto')
     // 'window' (w:tblLayout autofit with a full-width grid) and w:tblW type="pct"
@@ -2377,26 +3996,37 @@ export const DocTable = Node.create({
       const widthPx =
         Number(node.attrs.widthPx) +
         (node.attrs.cellSpacingTwips
-          ? 0
-          : outerBorderPx(node.attrs.borders as TableBordersAttr | null))
+          ? spacingBorderPx(node, tableColCount(node)).reduce((sum, w) => sum + w, 0)
+          : outerBorderPx(node.attrs.borders as TableBordersAttr | null, tableEdgeBorders(node)))
       // w:tblLayout fixed holds the declared widths even past the paper edge (Word
-      // clips there); narrowing to fit would rewrap every column (prod100 sas 045)
-      const holdWidth = node.attrs.tblFixedLayout === true
+      // clips there); narrowing to fit would rewrap every column.
+      // So does a left-aligned explicit dxa w:tblW (see holdsDeclaredWidth)
+      const holdWidth =
+        node.attrs.tblFixedLayout === true ||
+        (node.attrs.tblDxaWidth === true &&
+          node.attrs.tblAutoFit === 'fixed' &&
+          !node.attrs.tblFloatSource &&
+          !rtlStart &&
+          node.attrs.tblAlign !== 'center' &&
+          node.attrs.tblAlign !== 'right')
       if (holdWidth) {
         widthExpr = `${widthPx}px`
         styles.push(`width:${widthExpr}`, 'max-width:none')
-        if (node.attrs.tblAlign === 'center' && !tblFloated)
+        if ((node.attrs.tblAlign === 'center' && !tblFloated) || tblpCentered)
           centerMargin = `margin-left:calc((${contentW} - ${widthPx}px)/2)`
-      } else if (node.attrs.tblAlign === 'center' && !tblFloated) {
+      } else if ((node.attrs.tblAlign === 'center' && !tblFloated) || tblpCentered) {
         const paper = `calc(${contentW} + var(--doc-margin-left,var(--doc-margin-right,0px)) + var(--doc-margin-right,0px))`
         styles.push(`width:min(${widthPx}px,${paper})`)
         centerMargin = `margin-left:calc((${contentW} - min(${widthPx}px,${paper}))/2)`
       } else {
+        // a negative w:tblInd moves the box into the left margin, so the same
+        // amount is added back to the right-hand spill allowance
         const indented =
-          !tblFloated && node.attrs.tblAlign !== 'right' && Number(node.attrs.indentTwips) > 0
+          !tblFloated && node.attrs.tblAlign !== 'right' && Number(node.attrs.indentTwips)
         const indentPx = indented ? Number(node.attrs.indentTwips) / 15 : 0
+        const shift = indentPx < 0 ? `+ ${(-indentPx).toFixed(1)}px` : `- ${indentPx.toFixed(1)}px`
         const spill = indentPx
-          ? `calc(${contentW} + ${spillMargin} - ${indentPx.toFixed(1)}px)`
+          ? `calc(${contentW} + ${spillMargin} ${shift})`
           : `calc(${contentW} + ${spillMargin})`
         widthExpr = `min(${widthPx}px,${spill})`
         styles.push(`width:${widthExpr}`)
@@ -2441,36 +4071,73 @@ export const DocTable = Node.create({
       // is text-relative). The pagination engine resolves the page-relative
       // target and applies the shift via --tblp-dy; flow CSS gets no margin.
       const vAnchor = node.attrs.tblFloatVertAnchor
+      const ySpec = node.attrs.tblFloatYSpec as string | null
+      const vSpec =
+        ySpec === 'top' || ySpec === 'inside'
+          ? 'top'
+          : ySpec === 'bottom' || ySpec === 'outside'
+            ? 'bottom'
+            : ySpec === 'center'
+              ? 'center'
+              : null
       const pageRelV =
-        (vAnchor === 'page' || vAnchor === 'margin') && node.attrs.tblFloatYTwips != null
+        (vAnchor === 'page' || vAnchor === 'margin') &&
+        (node.attrs.tblFloatYTwips != null || vSpec !== null)
       if (pageRelV) {
-        attrs['data-tblp-vy'] = y.toFixed(1)
+        attrs['data-tblp-vy'] = (vSpec ? 0 : y).toFixed(1)
         attrs['data-tblp-vanchor'] = String(vAnchor)
+        if (vSpec) attrs['data-tblp-vspec'] = vSpec
         styles.push('margin-top:var(--tblp-dy,0px)')
+        // the band above the shifted table hosts the anchor paragraph's lines
+        // (Word lays body text from the page top around a page-anchored
+        // table); without the shape the float excludes its whole margin box
+        styles.push('shape-outside:inset(var(--tblp-dy,0px) 0 0 0)')
       }
       const top = pageRelV ? 0 : y + Math.max(0, px(distance.top))
       const bottom = Math.max(0, px(distance.bottom))
       const left = Math.max(0, px(distance.left))
       const right = Math.max(0, px(distance.right))
       if (top) styles.push(`margin-top:${top.toFixed(1)}px`)
+      // Word lays the anchor paragraph's lines in the w:tblpY band above the
+      // table at full width; a float excludes its whole margin box unless shaped
+      // (a band under one 12pt line hosts nothing and keeps the plain margin)
+      if (!pageRelV && y >= 16) styles.push(`shape-outside:inset(${y.toFixed(1)}px 0 0 0)`)
       if (bottom) styles.push(`margin-bottom:${bottom.toFixed(1)}px`)
       // w:tblpX with horzAnchor="page" measures from the PAGE edge, not the
       // content box — subtract the left margin. And the offset is CLAMPED so
       // the table never hangs past the right content edge: unclamped
-      // page-anchored deal-doc captables rendered half off-page (alpha
-      // ledger, #genoffice-feedback task #6). Word keeps floats on the page.
+      // page-anchored captables rendered half off-page. Word keeps floats on
+      // the page.
       const fromPageEdge = node.attrs.tblFloatHorzAnchor === 'page'
       const tblWidth = Number(node.attrs.widthPx) || Number(node.attrs.tblFloatWidthPx) || 0
+      const xSpec = node.attrs.tblFloatXSpec as string | null
       const xExpr = fromPageEdge
         ? `calc(${x.toFixed(1)}px - var(--doc-margin-left,0px))`
         : `${x.toFixed(1)}px`
       if (node.attrs.tblFloat === 'left') {
-        if (x) {
+        if (xSpec === 'center' && centerMargin) {
+          styles.push(centerMargin)
+        } else if (xSpec === 'center' && tblWidth > 0 && !node.attrs.widthPct) {
+          styles.push(
+            `margin-left:max(0px,calc((var(--doc-content-w,100%) - ${tblWidth.toFixed(1)}px) / 2))`,
+          )
+        } else if (xSpec === null && (x || fromPageEdge)) {
+          // the right-edge cap never pulls a too-wide table left of the content box
           const capped =
             tblWidth > 0
-              ? `min(${xExpr},calc(var(--doc-content-w,100%) - ${tblWidth.toFixed(1)}px))`
+              ? `min(${xExpr},max(0px,calc(var(--doc-content-w,100%) - ${tblWidth.toFixed(1)}px)))`
               : xExpr
-          styles.push(`margin-left:max(0px,${capped})`)
+          // a page-anchored X may reach into the left margin (Word draws cover
+          // blocks flush with the paper edge); margin anchors stop at the content edge
+          const floor = fromPageEdge ? 'calc(0px - var(--doc-margin-left,0px))' : '0px'
+          styles.push(`margin-left:max(${floor},${capped})`)
+        } else if (
+          xSpec === null &&
+          node.attrs.tblFloatHorzAnchor === 'margin' &&
+          Number(node.attrs.indentTwips) < 0
+        ) {
+          // legacy cell-margin hang of a margin-anchored float (legacyIndentTable)
+          styles.push(`margin-left:${(Number(node.attrs.indentTwips) / 15).toFixed(1)}px`)
         }
         if (right) styles.push(`margin-right:${right.toFixed(1)}px`)
       } else {
@@ -2481,7 +4148,9 @@ export const DocTable = Node.create({
           )
         }
       }
-    } else if (node.attrs.tblAlign === 'center') {
+    } else if (suppressedFloatX !== null) {
+      styles.push(`margin-left:${suppressedFloatX}`)
+    } else if (node.attrs.tblAlign === 'center' || tblpCentered) {
       if (centerMargin) styles.push(centerMargin)
       else styles.push('margin-left:auto', 'margin-right:auto')
     } else if (node.attrs.tblAlign === 'right') styles.push('margin-left:auto')
@@ -2493,17 +4162,32 @@ export const DocTable = Node.create({
     // a suppressed text-anchored float with a negative w:tblpY still hangs that far
     // above its anchor paragraph in Word (cover logo strips reach into the top
     // margin), so the inline table keeps the lift as a negative top margin
-    const liftTwips =
-      node.attrs.tblFloatSuppressed &&
-      (node.attrs.tblFloatVertAnchor ?? 'text') === 'text' &&
-      Number(node.attrs.tblFloatYTwips) < 0
-        ? -Number(node.attrs.tblFloatYTwips)
+    const suppressedTextY =
+      node.attrs.tblFloatSuppressed && (node.attrs.tblFloatVertAnchor ?? 'text') === 'text'
+        ? Number(node.attrs.tblFloatYTwips) || 0
         : 0
+    const liftTwips = suppressedTextY < 0 ? -suppressedTextY : 0
     if (liftTwips > 0) {
       const lift = (liftTwips / 15).toFixed(1)
       styles.push(`margin-top:-${lift}px`)
       attrs['data-tblp-lift'] = lift
+    } else if (suppressedTextY > 0) {
+      // ... and a positive one keeps the table that far below its anchor
+      styles.push(`margin-top:${(suppressedTextY / 15).toFixed(1)}px`)
     }
+    // Word moves a text-anchored floating table that does not fit the rest of
+    // its page to the next page whole, floated or flowed inline (the engine
+    // then splits it at row boundaries from there, see pagination-slices) --
+    // but only when the table keeps a positive w:topFromText gap (probe
+    // 2026-10-13: 180 or 20 twips turn the page, 0 or absent splits in place)
+    const floatDistance = node.attrs.tblFloatDistance as Record<string, number> | null
+    if (
+      node.attrs.tblFloatSource &&
+      (node.attrs.tblFloatVertAnchor ?? 'text') === 'text' &&
+      (Number(node.attrs.tblFloatYTwips) || 0) >= 0 &&
+      (Number(floatDistance?.top) || 0) > 0
+    )
+      attrs['data-tblp-push'] = '1'
     if (styles.length > 0) attrs.style = styles.join(';')
     // A colgroup with normalized percentages defines the column grid whenever the
     // pct list matches the grid, so a table clamped to the content box compresses
@@ -2517,10 +4201,20 @@ export const DocTable = Node.create({
       // zero-width grid slots get a small floor, short grids pad with the average —
       // dropping the whole colgroup falls back to fixed-layout even splitting, which
       // is always worse than an approximate grid
-      const pct = rawPct.map((w) => (w > 0 ? w : 0.5))
+      let pct = rawPct.map((w) => (w > 0 ? w : 0.5))
       const avg = pct.reduce((sum, w) => sum + w, 0) / pct.length
       while (pct.length < firstRowCols) pct.push(avg)
-      const total = pct.reduce((sum, w) => sum + w, 0) || 100
+      let total = pct.reduce((sum, w) => sum + w, 0) || 100
+      // percentages resolve against the table less its border-spacing, so the
+      // gaps come out of the columns the way Word's saved grid holds them
+      const spacing = Number(node.attrs.cellSpacingTwips)
+      const widthTwips = Number(node.attrs.widthPx) * 15
+      if (spacing > 0 && widthTwips > 0) {
+        const shares = cellSpacingGridSharesTwips(pct.length, spacing)
+        const borders = spacingBorderPx(node, pct.length)
+        pct = pct.map((w, i) => Math.max(1, (w / total) * widthTwips - shares[i] + borders[i] * 15))
+        total = pct.reduce((sum, w) => sum + w, 0)
+      }
       return [
         'table',
         attrs,
@@ -2534,7 +4228,35 @@ export const DocTable = Node.create({
         ['tbody', 0],
       ]
     }
-    return ['table', attrs, ['tbody', 0]]
+    // the resize plugin previews drag widths on the table's first child, so a
+    // table without a percentage grid still needs a (bare) colgroup there
+    return ['table', attrs, ['colgroup', {}], ['tbody', 0]]
+  },
+  addNodeView() {
+    return ({ node }) => {
+      let current = node
+      const { dom, contentDOM } = DOMSerializer.renderSpec(document, node.type.spec.toDOM!(node))
+      const table = dom as HTMLElement
+      return {
+        dom,
+        contentDOM,
+        update: (next) => {
+          if (!next.sameMarkup(current)) return false
+          current = next
+          return true
+        },
+        // prosemirror-tables previews a column drag by writing px widths onto the
+        // colgroup and table; without this ProseMirror treats that as foreign DOM
+        // and redraws the table from the model on every mousemove (genoffice#1156)
+        ignoreMutation: (mutation) => {
+          if (mutation.type === 'selection') return false
+          const { target } = mutation
+          if (target === table) return mutation.type === 'attributes'
+          const colgroup = table.firstElementChild
+          return colgroup?.tagName === 'COLGROUP' && colgroup.contains(target)
+        },
+      }
+    }
   },
 })
 
@@ -2547,6 +4269,9 @@ export const DocTableRow = Node.create({
       heightRule: { default: null as 'atLeast' | 'exact' | null },
       repeatHeader: { default: false },
       repeatHeaderEdited: { default: false },
+      /** w:cantSplit (the row may not break across pages) */
+      cantSplit: { default: false },
+      cantSplitEdited: { default: false },
       rawTrPr: { default: null as string | null },
       /** trPr w:ins/w:del row-level revision ({kind, author, ...} | null) */
       rowRevision: { default: null as Record<string, string> | null },
@@ -2560,16 +4285,23 @@ export const DocTableRow = Node.create({
     const rev = node.attrs.rowRevision as { kind?: string; author?: string } | null
     const attrs: Record<string, string> = {}
     const classes: string[] = []
+    const cellBorders: Array<Record<string, BorderLine> | null> = []
+    const cellMars: CellMarTwips[] = []
+    node.forEach((cell) => {
+      if (cell.attrs.gridGap) return
+      cellBorders.push(cell.attrs.borders as Record<string, BorderLine> | null)
+      cellMars.push(cell.attrs.cellMar as CellMarTwips)
+    })
+    const styles = rowPadVarsCss(cellMars)
     if (h) {
-      const cellBorders: Array<Record<string, BorderLine> | null> = []
-      node.forEach((cell) => {
-        if (!cell.attrs.gridGap)
-          cellBorders.push(cell.attrs.borders as Record<string, BorderLine> | null)
-      })
-      attrs.style = rowHeightCss(h, cellBorders)
+      styles.push(
+        rowHeightCss(h, cellBorders, cellMars, node.attrs.heightRule as 'atLeast' | 'exact' | null),
+      )
       if (node.attrs.heightRule === 'exact') classes.push('row-h-exact')
     }
+    if (styles.length > 0) attrs.style = styles.join(';')
     attrs['data-repeat-header'] = node.attrs.repeatHeader ? '1' : '0'
+    attrs['data-cant-split'] = node.attrs.cantSplit ? '1' : '0'
     if (rev?.kind) {
       classes.push(`row-rev-${rev.kind}`)
       if (rev.author) attrs.title = rev.author
@@ -2623,38 +4355,7 @@ export const DocCellBoxes = Node.create({
     return []
   },
   renderHTML({ node }) {
-    const boxes = (node.attrs.boxes as TextboxDisplay[] | null) ?? []
-    if (boxes.length === 0) return ['div', { class: 'doc-cell-boxes' }]
-    let bottom = 0
-    for (const b of boxes) {
-      bottom = Math.max(
-        bottom,
-        (b.offsetYEmu ?? 0) / EMU_PER_PX + (b.heightPx ?? b.minHeightPx ?? 0),
-      )
-    }
-    return [
-      'div',
-      {
-        class: 'doc-cell-boxes',
-        contenteditable: 'false',
-        // zero-width leading float: the cell (a BFC) grows to max(text, boxes)
-        // like Word, without displacing the cell's own text
-        style: bottom > 0 ? `height:${bottom.toFixed(1)}px` : '',
-      },
-      // floating boxes self-position from their anchor offsets; in-flow boxes get
-      // the same offsets via a positioned wrapper (Word places both in the cell)
-      ...boxes.map((b): DomSpec => {
-        const spec = renderTextboxSpec(b)
-        if (b.floating) return spec
-        const left = (b.offsetXEmu ?? 0) / EMU_PER_PX
-        const top = (b.offsetYEmu ?? 0) / EMU_PER_PX
-        return [
-          'div',
-          { style: `position:absolute;left:${left.toFixed(1)}px;top:${top.toFixed(1)}px` },
-          spec,
-        ]
-      }),
-    ]
+    return cellBoxesSpec((node.attrs.boxes as TextboxDisplay[] | null) ?? [])
   },
 })
 
@@ -2797,32 +4498,12 @@ export const DocNestedTable = Node.create({
   },
 })
 
-function emptyTopLevelTableAtCursor(state: EditorState): { from: number; to: number } | null {
-  const { selection } = state
-  if (!(selection instanceof TextSelection) || !selection.empty) return null
-  const table = selection.$from.node(1)
-  if (table.type.name !== 'docTable') return null
-  let hasLeaf = false
-  table.descendants((node) => {
-    if (node.isLeaf) hasLeaf = true
-    return !hasLeaf
-  })
-  if (hasLeaf) return null
-  const from = selection.$from.before(1)
-  return { from, to: from + table.nodeSize }
-}
-
-/** Delete a selected table, or a completely empty table under a text cursor. */
+/** Delete only an explicitly selected whole table; leave cursors and partial cell selections alone. */
 export function deleteSelectedWholeTable(
   state: EditorState,
   dispatch?: (transaction: Transaction) => void,
 ): boolean {
   const { selection } = state
-  const emptyTable = emptyTopLevelTableAtCursor(state)
-  if (emptyTable) {
-    dispatch?.(state.tr.delete(emptyTable.from, emptyTable.to).scrollIntoView())
-    return true
-  }
   if (selection instanceof NodeSelection) {
     if (selection.node.type.spec.tableRole !== 'table') return false
     dispatch?.(state.tr.delete(selection.from, selection.to).scrollIntoView())
@@ -2893,6 +4574,8 @@ export const NativeTableSupport = Extension.create({
           },
         },
       }),
+      tableColumnDrag(),
+      tableRowDrag(),
       columnResizing({ View: null, cellMinWidth: 40, lastColumnResizable: true }),
       tableEditing({ allowTableNodeSelection: true }),
       // Word never ends a body with a table: without a paragraph below it the
@@ -2924,10 +4607,76 @@ export const NativeTableSupport = Extension.create({
  * main process writes image + <img> html; in-document paste rebuilds the
  * picture through DocProtected's img parse rule.
  */
-/** formats pmDocToSavePlan can rebuild into the docx (see imageFromProtectedAttrs) */
-const PERSISTABLE_IMAGE_URL = /^data:image\/(?:png|jpeg|gif);base64,/
+
+let lazyMediaHashes = new Set<string>()
+/** pictures served lazily from the open document persist by part reference */
+export function setLazyMediaHashes(hashes: Iterable<string>): void {
+  lazyMediaHashes = new Set(hashes)
+}
+const isLazyImage = (src: string): boolean => {
+  const hash = parseLazyMediaUrl(src)?.hash
+  return hash !== undefined && lazyMediaHashes.has(hash)
+}
+const persistableImage = (src: string): boolean =>
+  PERSISTABLE_IMAGE_URL.test(src) || isLazyImage(src)
 
 /** display attrs a copied picture needs to round-trip through clipboard HTML */
+/**
+ * CSS filter pair for the affine map y = slope * (x + offset - 0.5) + 0.5.
+ * contrast() pivots at 0.5 and brightness() at 0, so the two compose to any
+ * such line; the order is chosen so the intermediate value never clips.
+ */
+function affineFilterCss(slope: number, offset: number): string[] {
+  if (offset >= 0) {
+    const m = 1 + 2 * slope * offset
+    return [`contrast(${(slope / m).toFixed(4)})`, `brightness(${m.toFixed(4)})`]
+  }
+  const k = slope * (1 - 2 * offset)
+  return [`brightness(${(1 / (1 - 2 * offset)).toFixed(4)})`, `contrast(${k.toFixed(4)})`]
+}
+
+/** a:lum / a:grayscl / a:biLevel → `filter:` declaration ('' when none) */
+export function pictureFilterCss(fx: ImageEffects | null | undefined): string {
+  if (!fx) return ''
+  const fns: string[] = []
+  if (fx.grayscale || fx.biLevelThresh !== undefined) fns.push('grayscale(1)')
+  if (fx.bright || fx.contrast) {
+    // Word: contrast scales about mid-grey by (1 + c), brightness then adds b
+    // (measured against Word's rendering of bright/contrast +40%)
+    const slope = Math.max(0.01, 1 + Math.max(-1, Math.min(1, fx.contrast ?? 0)))
+    const bright = Math.max(-1, Math.min(1, fx.bright ?? 0))
+    fns.push(...affineFilterCss(slope, bright / slope))
+  }
+  if (fx.biLevelThresh !== undefined) {
+    fns.push(...affineFilterCss(1000, 0.5 - Math.max(0, Math.min(1, fx.biLevelThresh))))
+  }
+  return fns.length ? `filter:${fns.join(' ')}` : ''
+}
+
+/** w:framePr box: the paragraph lays out at the frame size, floating beside the text when it wraps */
+function frameBoxCss(json: string): string[] {
+  let box: ParaFrameBox
+  try {
+    box = JSON.parse(json) as ParaFrameBox
+  } catch {
+    return []
+  }
+  const px = (twips: number): string => `${(twips / 15).toFixed(1)}px`
+  const out: string[] = []
+  if (box.wTwips) out.push(`width:${px(box.wTwips)}`, 'box-sizing:border-box')
+  if (box.hTwips) {
+    if (box.hRule === 'exact') out.push(`height:${px(box.hTwips)}`, 'overflow:hidden')
+    else out.push(`min-height:${px(box.hTwips)}`)
+  }
+  if (box.floatSide) {
+    out.push(`float:${box.floatSide}`)
+    if (box.hSpaceTwips)
+      out.push(`margin-${box.floatSide === 'left' ? 'right' : 'left'}:${px(box.hSpaceTwips)}`)
+    if (box.vSpaceTwips) out.push(`margin-bottom:${px(box.vSpaceTwips)}`)
+  }
+  return out
+}
+
 const imageMetaJson = (attrs: Record<string, unknown>): string =>
   JSON.stringify({
     imageWidthPx: attrs.imageWidthPx ?? null,
@@ -2945,12 +4694,17 @@ export const ImageCopyExtension = Extension.create({
       const node = sel.node
       if (node.type.name !== 'docProtected' || node.attrs.blockType !== 'image') return false
       let dataUrl = node.attrs.imageDataUrl
-      if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return false
+      if (typeof dataUrl !== 'string') return false
+      if (!dataUrl.startsWith('data:image/') && !isLazyImage(dataUrl)) return false
+      const lazyPart = parseLazyMediaUrl(dataUrl)?.partPath
+      const directlyCopyable = lazyPart
+        ? /\.(?:png|jpe?g|gif)$/i.test(lazyPart)
+        : PERSISTABLE_IMAGE_URL.test(dataUrl)
       // the save pipeline persists only png/jpeg/gif; display-only formats
       // (bmp/webp/svg/tiff...) are transcoded to PNG from the already-decoded
       // DOM img so the copy stays saveable — undecodable ones keep the
-      // default HTML copy
-      if (!PERSISTABLE_IMAGE_URL.test(dataUrl)) {
+      // default HTML copy (a lazy picture is read from the file by the main process)
+      if (!directlyCopyable) {
         const dom = view.nodeDOM(sel.from) as HTMLElement | null
         const img = dom?.querySelector?.('img.doc-protected-img') as HTMLImageElement | null
         if (!img || !img.naturalWidth || !img.naturalHeight) return false
@@ -3010,6 +4764,8 @@ export const DocProtected = Node.create({
       blockType: { default: 'passthrough' },
       /** w:pStyle of field/TOC paragraphs: doc style CSS (spacing/line-height) targets data-style */
       styleId: { default: null as string | null },
+      /** w:pageBreakBefore of the swallowed anchor paragraph */
+      pageBreakBefore: { default: false },
       label: { default: '' },
       previewText: { default: '' },
       imageDataUrl: { default: null as string | null },
@@ -3019,6 +4775,8 @@ export const DocProtected = Node.create({
       imageHeightPx: { default: null as number | null },
       /** source crop (a:srcRect) fractions, display-only */
       imageCrop: { default: null as { l: number; t: number; r: number; b: number } | null },
+      /** a:lum / a:grayscl / a:biLevel recolor, display-only */
+      imageEffects: { default: null as ImageEffects | null },
       /** fill placement (a:fillRect) fractions (negative = bleed), display-only */
       imageFillRect: { default: null as { l: number; t: number; r: number; b: number } | null },
       imageLeadingText: { default: null as string | null },
@@ -3028,8 +4786,21 @@ export const DocProtected = Node.create({
       imageParagraphIndentLeft: { default: null as number | null },
       imageParagraphIndentRight: { default: null as number | null },
       imageParagraphIndentFirstLine: { default: null as number | null },
+      imageParagraphSpaceBefore: { default: null as number | null },
+      imageParagraphSpaceAfter: { default: null as number | null },
+      imageParagraphSpaceBeforeAuto: { default: null as boolean | null },
+      imageParagraphSpaceAfterAuto: { default: null as boolean | null },
+      imageParagraphAdditiveSpacing: { default: null as boolean | null },
+      imageParagraphLineTwips: { default: null as number | null },
+      imageParagraphLineRule: { default: null as 'auto' | 'atLeast' | 'exact' | null },
+      imageMarkFont: { default: null as string | null },
+      imageMarkFontEastAsia: { default: null as string | null },
+      imageMarkSizeHalfPoints: { default: null as number | null },
+      imageEffectExtentTopPx: { default: null as number | null },
+      imageEffectExtentBottomPx: { default: null as number | null },
       /** paragraph alignment of the image (w:jc) */
       imageAlign: { default: null as string | null },
+      imageIndentLeftTwips: { default: null as number | null },
       imageWrap: { default: null as string | null },
       /** side wrap with no room for text beside (floating table): band at the offset */
       imageBand: { default: false },
@@ -3055,6 +4826,8 @@ export const DocProtected = Node.create({
       imagePosH: { default: null as string | null },
       imagePosV: { default: null as string | null },
       imageOffsetYEmu: { default: null as number | null },
+      imageRelV: { default: null as string | null },
+      imageRelH: { default: null as string | null },
       /** display-only table structure (blockType === 'table') */
       table: { default: null as TableModel | null },
       /** display-only rendering for field passthrough paragraphs */
@@ -3115,7 +4888,7 @@ export const DocProtected = Node.create({
       const src = img?.getAttribute('src') ?? ''
       // persistable formats only: a bmp/webp/svg picture would display and
       // then silently vanish on save — the placeholder shell is honest
-      if (!PERSISTABLE_IMAGE_URL.test(src)) return null
+      if (!persistableImage(src)) return null
       let meta: Record<string, unknown> = {}
       try {
         meta = JSON.parse(el.getAttribute('data-image-meta') ?? '{}') as Record<string, unknown>
@@ -3147,7 +4920,7 @@ export const DocProtected = Node.create({
         getAttrs: (el) => {
           const img = el as HTMLImageElement
           const src = img.getAttribute('src') ?? ''
-          if (!PERSISTABLE_IMAGE_URL.test(src)) return false
+          if (!persistableImage(src)) return false
           let meta: Record<string, unknown> = {}
           try {
             meta = JSON.parse(img.getAttribute('data-image-meta') ?? '{}') as Record<
@@ -3438,6 +5211,10 @@ function protectedDomSpec(node: PmNode): DomSpec {
   // field/TOC paragraphs keep their paragraph style so document CSS
   // (TOC1 spacing etc.) reaches the wrapper like any styled paragraph
   if (node.attrs.styleId) attrs['data-style'] = String(node.attrs.styleId)
+  if (node.attrs.pageBreakBefore) {
+    attrs.class += ' page-break-before'
+    attrs['data-page-break-label'] = t('editorPageBreak')
+  }
   if (node.attrs.invisibleMarker) {
     if (node.attrs.anchorLine) {
       attrs.class += ' doc-protected-anchor-line'
@@ -3455,6 +5232,20 @@ function protectedDomSpec(node: PmNode): DomSpec {
     if (ruleThicknessPx) style += `height:${Number(ruleThicknessPx)}px;`
     if (ruleWidthPx) style += `width:${Number(ruleWidthPx)}px;max-width:100%;`
     const lineAttrs: Record<string, string> = { class: 'doc-rule-line' }
+    // floating rule: the paragraph keeps its own empty line (Word), the stroke
+    // overlays it at the anchor's paragraph offset
+    if (node.attrs.anchorLine) {
+      attrs.class += ' doc-protected-rule-anchored'
+      const offY = Number(node.attrs.imageOffsetYEmu ?? 0)
+      if (offY) style += `top:${Math.round((offY / 12700) * 100) / 100}pt;`
+      if (style) lineAttrs.style = style
+      return [
+        'div',
+        attrs,
+        anchorLineSpec(node.attrs.anchorLine as Record<string, unknown>),
+        ['span', lineAttrs],
+      ]
+    }
     if (style) lineAttrs.style = style
     return ['div', attrs, ['span', lineAttrs]]
   }
@@ -3478,6 +5269,12 @@ function protectedDomSpec(node: PmNode): DomSpec {
     const strayRuns = node.attrs.strayRuns as Run[] | null
     let strayStyle = ''
     const sideBox = boxes.length === 1 && !diagram && boxes[0].wrapSide ? boxes[0] : null
+    // an inline text box starts at its paragraph's left indent like Word
+    // (floating boxes measure their own offset from the column instead)
+    const indentTwips = node.attrs.imageIndentLeftTwips as number | null
+    if (!anyFloating && indentTwips && boxAlign !== 'center' && boxAlign !== 'right') {
+      attrs.style = `margin-left:${indentTwips / 20}pt`
+    }
     if (anyFloating) {
       attrs.class += ' doc-protected-floating'
       // behindDoc anchors paint under the body text (Word z-order); mirrors
@@ -3535,7 +5332,7 @@ function protectedDomSpec(node: PmNode): DomSpec {
       if (offsetX != null || offsetY != null) {
         const dx = Number(offsetX ?? 0) / EMU_PER_PX
         const dy = Number(offsetY ?? 0) / EMU_PER_PX
-        attrs.style = `transform:translate(${dx}px,${dy}px)`
+        attrs.style = `${attrs.style ? `${attrs.style};` : ''}transform:translate(${dx}px,${dy}px)`
         // the translate paints the block off its flow slot; pagination measures the slot
         attrs['data-anchor-dy'] = String(dy)
         // the drawing offset moves the boxes only; stray text stays put
@@ -3544,7 +5341,7 @@ function protectedDomSpec(node: PmNode): DomSpec {
     }
     const children: DomSpec[] = sideBox
       ? [sideWrappedBoxSpec(sideBox)]
-      : boxes.map(renderTextboxSpec)
+      : boxes.map((b) => renderTextboxSpec(b))
     // the anchor paragraph's own text (e.g. a heading sharing its paragraph
     // with a sidebar box) renders as a display-only line before the boxes
     if (strayRuns?.length) {
@@ -3571,10 +5368,23 @@ function protectedDomSpec(node: PmNode): DomSpec {
         : ''
       const align = node.attrs.strayAlign as string | null
       const alignCss = align === 'center' || align === 'right' ? `text-align:${align}` : ''
-      const strayCss = [strayStyle, indCss, alignCss].filter(Boolean).join(';')
+      const line = node.attrs.anchorLine as Record<string, unknown> | null
+      let lineCss = line ? strayLineCss(anchorLineSpec(line), strayAttrs) : ''
+      // space-after lives on the wrapper: inside the flow-root it cannot
+      // collapse with the next block's space-before (Word takes the max)
+      const lineDecls = lineCss.split(';').filter(Boolean)
+      const mbAt = lineDecls.findIndex((d) => d.trim().startsWith('margin-bottom:'))
+      if (mbAt >= 0) {
+        const [mb] = lineDecls.splice(mbAt, 1)
+        lineCss = lineDecls.join(';')
+        attrs.style = attrs.style ? `${attrs.style};${mb}` : mb
+      }
+      const tabCss =
+        line && strayRuns.some((r) => r.text.includes('\t')) ? strayTabCss(line, ind) : ''
+      const strayCss = [lineCss, tabCss, strayStyle, indCss, alignCss].filter(Boolean).join(';')
       if (strayCss) strayAttrs.style = strayCss
       if (node.attrs.strayStyleId) strayAttrs['data-style'] = String(node.attrs.strayStyleId)
-      const stray: DomSpec = ['div', strayAttrs, ...strayRuns.flatMap((run) => runSpanSpecs(run))]
+      const stray: DomSpec = ['div', strayAttrs, ...strayRuns.flatMap((run) => strayRunSpecs(run))]
       // a float shortens only the lines laid out after it
       if (sideBox) children.push(stray)
       else children.unshift(stray)
@@ -3584,8 +5394,16 @@ function protectedDomSpec(node: PmNode): DomSpec {
       (fieldDisplay as FieldDisplay | null)?.kind !== 'pageBreak'
     ) {
       // the anchor paragraph's empty line (the break-chip branch below renders
-      // its own stray line instead; a static inline drawing is its own line)
-      children.unshift(['div', { class: 'doc-anchor-strut' }, ['br']])
+      // its own stray line instead; a static inline drawing is its own line).
+      // With the paragraph's own format at hand the line carries its style,
+      // spacing and line rule like Word's empty anchor paragraph
+      const line = node.attrs.anchorLine as Record<string, unknown> | null
+      if (line) {
+        const spec = anchorLineSpec(line)
+        const lineAttrs = spec[1] as Record<string, string>
+        lineAttrs.class += ' doc-anchor-strut'
+        children.unshift(spec)
+      } else children.unshift(['div', { class: 'doc-anchor-strut' }, ['br']])
     }
     if (diagram?.shapes?.length) children.push(diagramSpecOf(diagram))
     // corner resize handle; multi-box nodes keep per-box autogrow semantics only
@@ -3645,6 +5463,9 @@ function protectedDomSpec(node: PmNode): DomSpec {
       Number(imageHeightPx) > 0
     if (banded) attrs.class += ' doc-img-float img-wrap-band'
     else if (imageWrap) attrs.class += ` img-wrap-${String(imageWrap)}`
+    // an in-line picture's paragraph spaces like a text paragraph: direct
+    // w:spacing inline, style/docDefaults spacing through the document CSS
+    else attrs.class += ' doc-img-para'
     const imageLeadingText = String(node.attrs.imageLeadingText ?? '')
     const cjkFixedLeadingSpaces =
       !imageWrap &&
@@ -3654,15 +5475,50 @@ function protectedDomSpec(node: PmNode): DomSpec {
     // paragraph indents place the picture like its (possibly empty) first line;
     // anchored pictures position from the column instead and ignore them
     if (!imageWrap) {
+      // the picture line's auto multiple (Word probe: (m - 1) x the mark's
+      // single line below the picture, styles.css pads it from these vars);
+      // a direct fixed rule or explicit single overrides an inherited multiple
+      const lineRule = node.attrs.imageParagraphLineRule as 'auto' | 'atLeast' | 'exact' | null
+      const lineTwips =
+        node.attrs.imageParagraphLineTwips != null
+          ? Number(node.attrs.imageParagraphLineTwips)
+          : null
+      const lineMult =
+        lineRule === 'exact' || lineRule === 'atLeast'
+          ? 1
+          : lineTwips
+            ? cssAutoLineMult('auto', lineTwips, undefined)
+            : undefined
+      const markFactor = pictureMarkLineFactor(
+        node.attrs.imageMarkFont ? String(node.attrs.imageMarkFont) : null,
+        node.attrs.imageMarkFontEastAsia ? String(node.attrs.imageMarkFontEastAsia) : null,
+      )
       const paragraphLayout = [
-        node.attrs.imageParagraphIndentLeft
-          ? `margin-inline-start:${Number(node.attrs.imageParagraphIndentLeft) / 20}pt`
+        // a direct rule also unpins a style-level exact/atLeast (--doc-line-fixed)
+        lineMult ? `--doc-line-mult:${lineMult};--doc-line-fixed:0` : '',
+        markFactor ? `--doc-line-factor:${markFactor}` : '',
+        node.attrs.imageMarkSizeHalfPoints
+          ? `font-size:${Number(node.attrs.imageMarkSizeHalfPoints) / 2}pt`
           : '',
-        node.attrs.imageParagraphIndentRight
-          ? `margin-inline-end:${Number(node.attrs.imageParagraphIndentRight) / 20}pt`
+        ...effectivePPrCss({
+          spaceBeforeTwips: node.attrs.imageParagraphSpaceBefore as number | null,
+          spaceAfterTwips: node.attrs.imageParagraphSpaceAfter as number | null,
+          spaceBeforeAuto: node.attrs.imageParagraphSpaceBeforeAuto as boolean | null,
+          spaceAfterAuto: node.attrs.imageParagraphSpaceAfterAuto as boolean | null,
+          additiveSpacing: node.attrs.imageParagraphAdditiveSpacing as boolean | null,
+          indentLeftTwips: (node.attrs.imageParagraphIndentLeft as number | null) || null,
+          indentRightTwips: (node.attrs.imageParagraphIndentRight as number | null) || null,
+          indentFirstLineTwips: cjkFixedLeadingSpaces
+            ? null
+            : (node.attrs.imageParagraphIndentFirstLine as number | null) || null,
+        }),
+        // effectExtent (shadow/glow room) is part of the picture line in Word;
+        // passed as vars so the typed-grid whole-cell padding rule still wins
+        node.attrs.imageEffectExtentTopPx
+          ? `--doc-pic-effect-t:${Number(node.attrs.imageEffectExtentTopPx)}px`
           : '',
-        !cjkFixedLeadingSpaces && node.attrs.imageParagraphIndentFirstLine
-          ? `text-indent:${Number(node.attrs.imageParagraphIndentFirstLine) / 20}pt`
+        node.attrs.imageEffectExtentBottomPx
+          ? `--doc-pic-effect-b:${Number(node.attrs.imageEffectExtentBottomPx)}px`
           : '',
       ].filter(Boolean)
       if (paragraphLayout.length) {
@@ -3701,10 +5557,21 @@ function protectedDomSpec(node: PmNode): DomSpec {
       ? `margin-left:calc(${Number(node.attrs.imageParagraphIndentFirstLine ?? 0) / 15 + explicitSpaceWidthPx}px + ${implicitSpaceCount * 0.5}em)`
       : ''
     let imgFloatPos = ''
+    const imgWrapData: Record<string, string> = {}
+    const relV = node.attrs.imageRelV as string | null
+    const pageRelV = relV === 'page' || relV === 'margin'
+    // positionH page: the offset measures from the paper edge, one left margin before the column
+    const pageRelH = node.attrs.imageRelH === 'page'
+    const fromPageX = (v: string): string =>
+      pageRelH ? `calc(${v} - var(--doc-margin-left,0px))` : v
     // a quarter-turned picture keeps its extent box (turned about its centre)
     // while the flow reserves the swapped bounding box, so in-flow offsets
     // shift by half the side difference
     const qt = quarterTurnInsetPx(Number(imageWidthPx), Number(imageHeightPx), imageRotDeg)
+    // in-line pictures snap to whole cells under a typed grid (doc-style-css)
+    if (!imageWrap && Number(imageHeightPx) > 0) {
+      attrs.style = `${attrs.style ? `${attrs.style};` : ''}--doc-obj-h:${(Number(imageHeightPx) + 2 * qt).toFixed(1)}px`
+    }
     // the vertical posOffset margin must not be clobbered by a wrap-distance
     // margin-top below (distT is clearance, the offset is position — position wins)
     let hasOffsetTopMargin = false
@@ -3727,28 +5594,61 @@ function protectedDomSpec(node: PmNode): DomSpec {
         node.attrs.imageOffsetXEmu != null ? Number(node.attrs.imageOffsetXEmu) / EMU_PER_PX : 0
       const ty =
         node.attrs.imageOffsetYEmu != null ? Number(node.attrs.imageOffsetYEmu) / EMU_PER_PX : 0
+      const topCss =
+        relV === 'page'
+          ? `calc(${ty.toFixed(1)}px - var(--doc-margin-top,0px))`
+          : `${ty.toFixed(1)}px`
+      if (pageRelV) {
+        imgWrapData['data-page-rel-v'] = '1'
+        if (relV === 'page') imgWrapData['data-page-rel-from'] = 'page'
+      }
+      // page/margin-relative X is absolute on the page: the column-layout
+      // counter-translate keys on this so a right-column anchor does not drag
+      // the picture one column further right (textboxes do the same)
+      if (node.attrs.imageRelH === 'page' || node.attrs.imageRelH === 'margin') {
+        imgWrapData['data-page-rel-x'] = '1'
+        if (pageRelH) imgWrapData['data-page-rel-x-from'] = 'page'
+      }
       if (posH === 'center') {
-        imgFloatPos = `left:50%;top:${ty.toFixed(1)}px${imgZIndexCss}`
+        imgFloatPos = `left:50%;top:${topCss}${imgZIndexCss}`
         imgWrapTransform = 'transform:translateX(-50%)'
       } else if (posH === 'right') {
-        imgFloatPos = `right:0;top:${ty.toFixed(1)}px${imgZIndexCss}`
+        imgFloatPos = `right:0;top:${topCss}${imgZIndexCss}`
       } else {
-        imgFloatPos = `left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px${imgZIndexCss}`
+        imgFloatPos = `left:${fromPageX(`${tx.toFixed(1)}px`)};top:${topCss}${imgZIndexCss}`
       }
     } else if (banded) {
       const tx = Number(node.attrs.imageOffsetXEmu) / EMU_PER_PX
       const ty = Number(node.attrs.imageOffsetYEmu ?? 0) / EMU_PER_PX
       const bottom =
         ty + Number(imageHeightPx) + Number(node.attrs.imageWrapDistBottomEmu ?? 0) / EMU_PER_PX
-      imgFloatPos = `left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px`
-      attrs.style = `${attrs.style ? `${attrs.style};` : ''}min-height:${Math.max(0, bottom).toFixed(1)}px`
+      // a page-top pinned band (cover art) starts above the anchor paragraph
+      const aboveAnchor = (px: number): string =>
+        relV === 'page'
+          ? `calc(${px.toFixed(1)}px - var(--doc-margin-top,0px))`
+          : `${px.toFixed(1)}px`
+      imgFloatPos = `left:${tx.toFixed(1)}px;top:${aboveAnchor(ty)}`
+      attrs.style = `${attrs.style ? `${attrs.style};` : ''}min-height:${aboveAnchor(Math.max(0, bottom))}`
     } else if (imageWrap) {
       // In-flow wraps (square/tight/through/topBottom) honor a numeric
       // posOffset so a dragged picture stays where it was dropped (Word
       // WYSIWYG): X measures from the column start, Y from the anchor
       // paragraph top — matching the saved relativeFrom column/paragraph.
       const wrapperCss: string[] = []
-      if (node.attrs.imageOffsetYEmu != null || qt) {
+      if (pageRelV && (node.attrs.imageOffsetYEmu != null || node.attrs.imagePosV === 'top')) {
+        // page position on the landing page: the engine resolves the shift like w:tblpY
+        const ty = Number(node.attrs.imageOffsetYEmu ?? 0) / EMU_PER_PX
+        attrs['data-tblp-vy'] = ty.toFixed(1)
+        attrs['data-tblp-vanchor'] = String(relV)
+        wrapperCss.push('margin-top:var(--tblp-dy,0px)')
+        if (imageWrap !== 'topBottom')
+          wrapperCss.push('shape-outside:inset(var(--tblp-dy,0px) 0 0 0)')
+        // an offset places the extent box (visual lifted by the turn inset);
+        // wp:align top pins the turned bounding box itself
+        if (qt && node.attrs.imageOffsetYEmu != null)
+          imgWrapTransform = `margin-top:${(-qt).toFixed(1)}px`
+        hasOffsetTopMargin = true
+      } else if (node.attrs.imageOffsetYEmu != null || qt) {
         // the offset places the extent box; the quarter turn about its centre
         // lifts the visual (and the text exclusion) by the inset
         const ty = Number(node.attrs.imageOffsetYEmu ?? 0) / EMU_PER_PX - qt
@@ -3771,17 +5671,17 @@ function protectedDomSpec(node: PmNode): DomSpec {
           wrapperCss.push('text-align:left')
           imgWrapTransform =
             (imgWrapTransform ? `${imgWrapTransform};` : '') +
-            `margin-left:${(tx + qt).toFixed(1)}px`
+            `margin-left:${fromPageX(`${(tx + qt).toFixed(1)}px`)}`
         } else if (String(imageWrap).endsWith('-right') && w > 0) {
           // right floats position from the right edge: colW − x − width; the
           // 60% float clamp would shift the math, and Word never shrinks a
           // freely positioned picture
           wrapperCss.push(
-            `margin-right:calc(100% - ${(tx + w - qt).toFixed(1)}px)`,
+            `margin-right:calc(100% - ${(tx + w - qt).toFixed(1)}px${pageRelH ? ' + var(--doc-margin-left,0px)' : ''})`,
             'max-width:none',
           )
         } else {
-          wrapperCss.push(`margin-left:${(tx + qt).toFixed(1)}px`, 'max-width:none')
+          wrapperCss.push(`margin-left:${fromPageX(`${(tx + qt).toFixed(1)}px`)}`, 'max-width:none')
         }
       }
       if (wrapperCss.length) {
@@ -3827,10 +5727,18 @@ function protectedDomSpec(node: PmNode): DomSpec {
       src: String(imageDataUrl),
       class: 'doc-protected-img',
     }
+    const filterCss = pictureFilterCss(node.attrs.imageEffects as ImageEffects | null)
+    // a side float capped by the wrapper's max-width scales, never squashes
+    const sideFloat = !banded && /-(?:left|right)$/.test(String(imageWrap ?? ''))
     if (imageWidthPx) {
       imgAttrs['style'] =
         `width:${Number(imageWidthPx)}px;` +
-        (imageHeightPx ? `height:${Number(imageHeightPx)}px` : 'height:auto')
+        (imageHeightPx
+          ? sideFloat
+            ? `height:auto;aspect-ratio:${Number(imageWidthPx)}/${Number(imageHeightPx)}`
+            : `height:${Number(imageHeightPx)}px`
+          : 'height:auto') +
+        (qt || (pageRelH && imageWrap) ? ';max-width:none' : '')
     }
     // picture outline (document data, not chrome): border adds outside the
     // extent, approximating Word's centered stroke
@@ -3870,7 +5778,7 @@ function protectedDomSpec(node: PmNode): DomSpec {
       }
       imgAttrs['style'] =
         `position:absolute;left:${dx.toFixed(1)}px;top:${dy.toFixed(1)}px;` +
-        `width:${sw.toFixed(1)}px;height:${sh.toFixed(1)}px;max-width:none`
+        `width:${sw.toFixed(1)}px;height:${sh.toFixed(1)}px;max-width:none${filterCss ? `;${filterCss}` : ''}`
       // the crop wrap carries the positioning margins itself, so the footprint
       // inset folds into them instead of replacing them
       const cropWrapMargins = foldQuarterTurnMargins(
@@ -3912,6 +5820,9 @@ function protectedDomSpec(node: PmNode): DomSpec {
       imgAttrs['style'] =
         `${imgAttrs['style'] ? `${imgAttrs['style']};` : ''}transform:${xf.join(' ')}`
     }
+    if (filterCss) {
+      imgAttrs['style'] = `${imgAttrs['style'] ? `${imgAttrs['style']};` : ''}${filterCss}`
+    }
     if (borderCss) {
       imgAttrs['style'] = `${imgAttrs['style'] ? `${imgAttrs['style']};` : ''}${borderCss}`
     }
@@ -3928,6 +5839,7 @@ function protectedDomSpec(node: PmNode): DomSpec {
         'span',
         {
           class: 'doc-img-wrap',
+          ...imgWrapData,
           ...(imgFloatPos || imgWrapTransform
             ? {
                 style: `${imgFloatPos ? `position:absolute;${imgFloatPos};` : ''}display:inline-block${imgWrapTransform ? `;${imgWrapTransform}` : ''}`,
@@ -3947,6 +5859,21 @@ function protectedDomSpec(node: PmNode): DomSpec {
       renderTableSpec(table as TableModel),
     ]
   }
+  if ((chartDisplay as ChartDisplay | null)?.series?.length) {
+    attrs.class += ' doc-protected-chart'
+    // caption text sharing the chart's paragraph (SEQ figure numbers) sits under the plot
+    const caption = fieldDisplay ? renderFieldSpec(fieldDisplay as FieldDisplay) : null
+    const chartH = (chartDisplay as ChartDisplay).heightPx
+    if (chartH) attrs.style = `${attrs.style ? `${attrs.style};` : ''}--doc-obj-h:${chartH}px`
+    return [
+      'div',
+      attrs,
+      moveHandleSpec(t('editorMoveChart')),
+      renderChartSpec(chartDisplay as ChartDisplay),
+      ...(caption ? [['div', { class: 'doc-chart-caption' }, caption] as DomSpec] : []),
+      ['span', { class: 'box-resize-handle', contenteditable: 'false' }],
+    ]
+  }
   if (fieldDisplay) {
     const spec = renderFieldSpec(fieldDisplay as FieldDisplay)
     if (spec) {
@@ -3954,27 +5881,32 @@ function protectedDomSpec(node: PmNode): DomSpec {
       const field = fieldDisplay as FieldDisplay
       if (field.deleted && field.markDeleted) attrs.class += ' doc-para-del-collapse'
       if (field.kind === 'text') attrs.class += ' doc-protected-field-text'
+      if (field.kind === 'tocLine') attrs.class += ' doc-protected-field-toc'
+      // direct paragraph geometry beats the document default the wrapper inherits;
+      // a toc line carries its indent on the title cell: the right tab stays on the column edge
+      const styles = effectivePPrCss(
+        field.kind === 'tocLine'
+          ? { ...field, indentLeftTwips: null, indentRightTwips: null, indentFirstLineTwips: null }
+          : field,
+      )
+      if (styles.length > 0) attrs.style = styles.join(';')
       return ['div', attrs, spec]
     }
   }
   if ((formulaDisplay as FormulaDisplay | null)?.tokens?.length) {
     attrs.class += ' doc-protected-formula'
-    if ((formulaDisplay as FormulaDisplay).mathml) attrs.class += ' doc-protected-formula-display'
+    const formula = formulaDisplay as FormulaDisplay
+    if (formula.mathml) attrs.class += ' doc-protected-formula-display'
+    const styles: string[] = []
+    if (formula.align)
+      styles.push(`text-align:${formula.align === 'centerGroup' ? 'center' : formula.align}`)
+    styles.push(...effectivePPrCss(formula))
+    if (styles.length > 0) attrs.style = styles.join(';')
     return [
       'div',
       attrs,
       moveHandleSpec(t('editorMoveEquation')),
       renderFormulaSpec(formulaDisplay as FormulaDisplay),
-    ]
-  }
-  if ((chartDisplay as ChartDisplay | null)?.series?.length) {
-    attrs.class += ' doc-protected-chart'
-    return [
-      'div',
-      attrs,
-      moveHandleSpec(t('editorMoveChart')),
-      renderChartSpec(chartDisplay as ChartDisplay),
-      ['span', { class: 'box-resize-handle', contenteditable: 'false' }],
     ]
   }
   // SmartArt with a precomputed drawing part: absolutely positioned shapes
@@ -4112,6 +6044,9 @@ export function buildProtectedDom(node: PmNode): HTMLElement {
   const mathml = (node.attrs.formulaDisplay as FormulaDisplay | null)?.mathml
   const mathHost = el.querySelector?.('.doc-formula-math')
   if (mathml && mathHost) mathHost.innerHTML = mathml
+  el.querySelectorAll?.('.doc-field-math').forEach((host) => {
+    host.innerHTML = inlineMathML(host.getAttribute('data-omml') ?? '')
+  })
   return el
 }
 
@@ -4307,7 +6242,8 @@ function wireFieldEditing(
   view: EditorView,
 ): (ProtectedContentEditor & { cleanup(): void }) | null {
   const field = getNode().attrs.fieldDisplay as FieldDisplay | null
-  if (!field || field.kind === 'pageBreak') return null
+  // a chart caption is display-only: its field commit would rebuild the paragraph text
+  if (!field || field.kind === 'pageBreak' || getNode().attrs.chartDisplay) return null
   const targets = Array.from(
     dom.querySelectorAll<HTMLElement>('.doc-toc-title, .doc-toc-page, .doc-field-text'),
   )
@@ -4488,6 +6424,8 @@ function textboxDocJson(box: TextboxDisplay): Record<string, unknown> {
       spaceBeforeAuto: para.spaceBeforeAuto ?? null,
       spaceAfterAuto: para.spaceAfterAuto ?? null,
       shadingFill: para.shadingFill ?? null,
+      shadingDisplay: para.shadingDisplay ?? null,
+      shadingClear: para.shadingClear ?? null,
       borders: para.borders ?? null,
       listMarker: para.listMarker ?? null,
     },
@@ -4522,6 +6460,8 @@ function subEditorParas(sub: Editor): TextboxPara[] {
       'spaceBeforeAuto',
       'spaceAfterAuto',
       'shadingFill',
+      'shadingDisplay',
+      'shadingClear',
       'borders',
       'listMarker',
     ] as const
@@ -4711,6 +6651,94 @@ function mountTextboxEditors(
 }
 
 /** drag the corner handle of a selected image to resize it */
+/** editor-only wrapper of an inline run picture: the selection handles hang off it */
+const INLINE_PIC_CLASS = 'doc-inline-pic'
+
+/** Word-style handle drag on an inline run picture (table cells, header /
+ *  footer cells, textboxes): corners keep the aspect ratio, edges free one side */
+function inlinePictureResizePlugin(): Plugin {
+  return new Plugin({
+    props: {
+      handleDOMEvents: {
+        mousedown: (view, event) => {
+          const target = event.target as HTMLElement
+          const handle = target.closest?.('.img-resize-handle') as HTMLElement | null
+          const wrapper = handle?.closest(`.${INLINE_PIC_CLASS}`) as HTMLElement | null
+          const direction = handle?.dataset.resizeHandle as ImageResizeHandle | undefined
+          if (!handle || !wrapper || !direction || !IMAGE_RESIZE_HANDLES.includes(direction))
+            return false
+          const img = wrapper.querySelector('img') as HTMLImageElement | null
+          if (!img) return false
+          let pos = -1
+          view.state.doc.descendants((node, p) => {
+            if (pos !== -1) return false
+            if (node.type.name === 'docInlineImage' && view.nodeDOM(p) === wrapper) pos = p
+            return pos === -1
+          })
+          if (pos === -1) return false
+          event.preventDefault()
+          event.stopPropagation()
+          view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)))
+          view.focus()
+
+          const zoomEl = wrapper.closest('.doc-zoom') as HTMLElement | null
+          const zoom = zoomEl ? parseFloat(getComputedStyle(zoomEl).zoom || '1') || 1 : 1
+          const attrs = view.state.doc.nodeAt(pos)?.attrs ?? {}
+          const startW = Number(attrs.widthPx) > 0 ? Number(attrs.widthPx) : img.offsetWidth
+          const startH = Number(attrs.heightPx) > 0 ? Number(attrs.heightPx) : img.offsetHeight
+          if (!(startW > 0) || !(startH > 0)) return false
+          const startX = event.clientX
+          const startY = event.clientY
+          const west = direction.includes('w')
+          const east = direction.includes('e')
+          const north = direction.includes('n')
+          const south = direction.includes('s')
+          const sizeAt = (e: MouseEvent) => {
+            const dx = (e.clientX - startX) / zoom
+            const dy = (e.clientY - startY) / zoom
+            if ((west || east) && (north || south)) {
+              const delta =
+                (dx * (west ? -1 : 1) * startW + dy * (north ? -1 : 1) * startH) /
+                Math.max(1, startW * startW + startH * startH)
+              const scale = Math.max(Math.max(12 / startW, 12 / startH), 1 + delta)
+              return { w: startW * scale, h: startH * scale }
+            }
+            if (west || east) return { w: Math.max(12, startW + (west ? -dx : dx)), h: startH }
+            return { w: startW, h: Math.max(12, startH + (north ? -dy : dy)) }
+          }
+          const priorStyle = img.getAttribute('style')
+          const onMove = (e: MouseEvent) => {
+            const { w, h } = sizeAt(e)
+            img.style.width = `${w}px`
+            img.style.height = `${h}px`
+            img.style.maxWidth = 'none'
+          }
+          const onUp = (e: MouseEvent) => {
+            window.removeEventListener('mousemove', onMove)
+            window.removeEventListener('mouseup', onUp)
+            if (priorStyle == null) img.removeAttribute('style')
+            else img.setAttribute('style', priorStyle)
+            const { w, h } = sizeAt(e)
+            const node = view.state.doc.nodeAt(pos)
+            if (!node || node.type.name !== 'docInlineImage') return
+            const next = {
+              widthPx: Math.max(1, Math.round(w)),
+              heightPx: Math.max(1, Math.round(h)),
+            }
+            if (next.widthPx === Math.round(startW) && next.heightPx === Math.round(startH)) return
+            // the picture stays selected (handles and the Picture tab) after the resize
+            const tr = view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...next })
+            view.dispatch(tr.setSelection(NodeSelection.create(tr.doc, pos)))
+          }
+          window.addEventListener('mousemove', onMove)
+          window.addEventListener('mouseup', onUp)
+          return true
+        },
+      },
+    },
+  })
+}
+
 function imageResizePlugin(): Plugin {
   return new Plugin({
     props: {
@@ -4782,8 +6810,7 @@ function imageResizePlugin(): Plugin {
                       ...display,
                       widthPx: Math.round(w),
                       // the handle measures the plot SVG; heightPx spans title row + plot
-                      heightPx:
-                        Math.round(h) + (display.title !== undefined ? CHART_TITLE_ROW_PX : 0),
+                      heightPx: Math.round(h) + chartTitleRowPx(display),
                     },
                   }),
                 )
@@ -5240,7 +7267,10 @@ function floatingObjectDragPlugin(): Plugin {
               view.dispatch(
                 view.state.tr.setNodeMarkup(pos, undefined, {
                   ...currentNode.attrs,
-                  imageWrap: currentNode.attrs.imageWrap ?? 'square-left',
+                  imageWrap:
+                    currentNode.attrs.imageWrap && currentNode.attrs.imageWrap !== SHAPE_INLINE_WRAP
+                      ? currentNode.attrs.imageWrap
+                      : 'square-left',
                   imageOffsetXEmu: newX,
                   imageOffsetYEmu: newY,
                   imagePosH: null,
@@ -5308,7 +7338,7 @@ export type DomSpec = [string, Record<string, string>, ...unknown[]]
  * ribbon paragraph commands (updateAttributes('docParagraph', ...)) work
  * unchanged whether they target the main editor or a textbox.
  */
-const TextboxParagraph = Node.create({
+export const TextboxParagraph = Node.create({
   name: 'docParagraph',
   group: 'block',
   content: 'inline*',
@@ -5328,6 +7358,8 @@ const TextboxParagraph = Node.create({
       spaceBeforeAuto: { default: null as boolean | null },
       spaceAfterAuto: { default: null as boolean | null },
       shadingFill: { default: null as string | null },
+      shadingDisplay: { default: null as string | null },
+      shadingClear: { default: null as boolean | null },
       borders: { default: null as string | null },
       listMarker: { default: null as TextboxListMarker | null },
     }
@@ -5353,40 +7385,54 @@ const TextboxParagraph = Node.create({
     const attrs: Record<string, string> = { class: classes.join(' ') }
     if (node.attrs.styleId) attrs['data-style'] = String(node.attrs.styleId)
     const fontStyles: string[] = []
-    if (node.textContent) {
+    if (node.textContent && !isSpaceOnlyParagraph(node)) {
       fontStyles.push(`--doc-line-factor:${paraLineFactor(node)}`)
+      if (textHasCjk(node.textContent)) fontStyles.push('--doc-lead-gap:0px')
       const fam = paraDeclaredFontFamily(node)
-      if (fam) fontStyles.push(`font-family:${fam}`)
+      if (fam) fontStyles.push(`font-family:${fam}`, ...fontBoxCss(fam))
+      for (const extra of [paraCsMixedClass(node), paraCutAdjustedClass(node)])
+        if (extra) attrs.class += ` ${extra}`
       const strut = explicitStrutHalfPoints(node)
       if (strut) fontStyles.push(...strutFontCss(strut))
+    } else if (node.textContent) {
+      // space-only: the mark sizes the line with the Latin factor, never the space run
+      fontStyles.push('--doc-line-factor:var(--doc-line-factor-latin,1.2)')
     }
     const mult = cssAutoLineMult(lineRule, lineRawTwips, lineSpacing)
-    if (marker) attrs['data-marker'] = marker.text
+    const leadTop = cssLeadTop(lineRule, lineRawTwips, lineSpacing)
+    if (marker)
+      attrs['data-marker'] = marker.symbol ? substituteMarker(marker.text).text : marker.text
+    if (marker?.picBulletSrc) attrs['data-marker-pic'] = ''
     // Word precedence: the paragraph's own w:ind (an explicit 0 included), else the numbering
     // level's, else the style's
     const indentLeft = (node.attrs.indentLeft as number | null) ?? marker?.indentLeft ?? null
+    const indentRight = (node.attrs.indentRight as number | null) ?? marker?.indentRight ?? null
     const ownFirstLine = node.attrs.indentFirstLine as number | null
     const firstLine = Number(ownFirstLine ?? marker?.firstLine ?? -(marker?.hanging ?? 0))
     const hanging = marker && firstLine < 0 ? -firstLine : 0
     // no hanging area at all: Word runs the marker to the next default tab stop (0.5in)
     const markerTab = marker && !hanging && firstLine <= 0 ? ';--li-tab:36pt' : ''
+    const shdBg = (node.attrs.shadingDisplay ?? node.attrs.shadingFill) as string | null
     const styles = [
-      node.attrs.align
-        ? `text-align:${node.attrs.align === 'distribute' ? 'justify' : node.attrs.align}`
-        : '',
+      node.attrs.align ? textAlignDecl(String(node.attrs.align)) : '',
       ...fontStyles,
       cssLineHeight(lineRule, lineRawTwips, lineSpacing)
         ? `line-height:${cssLineHeight(lineRule, lineRawTwips, lineSpacing)}`
         : '',
+      cssExactLineCap(lineRule, lineRawTwips)
+        ? `--doc-lh-cap:${cssExactLineCap(lineRule, lineRawTwips)}`
+        : lineRule === 'atLeast'
+          ? '--doc-lh-cap:initial'
+          : '',
       // explicit single (mult 1) still overrides an inherited style/doc multiple
       mult ? `--doc-line-mult:${mult}` : '',
+      leadTop ? `--doc-lead-top:${leadTop}` : '',
       node.attrs.snapToGrid === false ? '--doc-grid-pitch:0.0001px' : '',
-      // logical sides: w:ind left/right swap in bidi paragraphs (Word), and the marker box hangs
-      // on the inline-start side
-      indentLeft != null ? `margin-inline-start:${indentLeft / 20}pt` : '',
-      node.attrs.indentRight != null
-        ? `margin-inline-end:${Number(node.attrs.indentRight) / 20}pt`
-        : '',
+      // the marker box hangs on the inline-start side of the resolved indent
+      ...effectivePPrCss(
+        { indentLeftTwips: indentLeft, indentRightTwips: indentRight },
+        { snap: false },
+      ),
       // a list marker owns the hanging area (a positive first line instead puts the marker at
       // the first-line position); the style's first-line indent must not shift the text
       marker
@@ -5395,26 +7441,29 @@ const TextboxParagraph = Node.create({
           ? `text-indent:${Number(ownFirstLine) / 20}pt`
           : '',
       marker?.szHalfPoints ? `--li-marker-size:${marker.szHalfPoints / 2}pt` : '',
-      ...(marker?.symbol ? substituteMarkerStyles(marker.text) : []),
-      node.attrs.spaceBeforeAuto
-        ? `margin-top:${WORD_AUTO_SPACING_PT}pt`
-        : node.attrs.spaceBefore != null
-          ? `margin-top:${Number(node.attrs.spaceBefore) / 20}pt`
+      marker?.picBulletSrc ? `--li-marker-pic:url("${marker.picBulletSrc}")` : '',
+      ...(marker?.symbol ? substituteMarker(marker.text).styles : []),
+      marker?.oversized ? MARKER_NATURAL_LINE_HEIGHT : '',
+      ...effectivePPrCss(
+        {
+          spaceBeforeTwips: node.attrs.spaceBefore as number | null,
+          spaceAfterTwips: node.attrs.spaceAfter as number | null,
+          spaceBeforeAuto: node.attrs.spaceBeforeAuto as boolean | null,
+          spaceAfterAuto: node.attrs.spaceAfterAuto as boolean | null,
+        },
+        { snap: false },
+      ),
+      shdBg
+        ? `background-color:#${shdBg};${dkBackground(`#${shdBg}`)}`
+        : node.attrs.shadingClear
+          ? 'background-color:transparent'
           : '',
-      node.attrs.spaceAfterAuto
-        ? `margin-bottom:${WORD_AUTO_SPACING_PT}pt`
-        : node.attrs.spaceAfter != null
-          ? `margin-bottom:${Number(node.attrs.spaceAfter) / 20}pt`
-          : '',
-      node.attrs.shadingFill
-        ? `background-color:#${node.attrs.shadingFill};${dkBackground(`#${node.attrs.shadingFill}`)}`
-        : '',
     ]
       .filter(Boolean)
       .join(';')
     if (styles) attrs.style = styles
     {
-      const ink = fillInk(node.attrs.shadingFill)
+      const ink = fillInk(shdBg)
       if (ink) attrs['data-ink'] = ink
     }
     return ['div', attrs, 0]
@@ -5422,7 +7471,7 @@ const TextboxParagraph = Node.create({
 })
 
 /** shared with the main editor: same mark names, so ribbon commands route 1:1 */
-const textboxSubExtensions = [
+export const textboxSubExtensions = [
   Node.create({ name: 'doc', topNode: true, content: 'block+' }),
   DocText,
   DocHardBreak,
@@ -5441,7 +7490,11 @@ const textboxSubExtensions = [
   // without these marks the whole box fails to load into the sub-editor
   RefFieldMark,
   InstrFieldMark,
+  SymMark,
+  CtrlCheckboxMark,
+  CheckboxToggleExtension,
   TextStyleMark,
+  FormatOffClearExtension,
   CommentMark,
   UndoRedo,
 ]
@@ -5454,7 +7507,7 @@ export interface SearchHighlight {
 }
 
 /**
- * Word's AutoFormat-as-you-type for links (alpha ledger r151): a URL followed
+ * Word's AutoFormat-as-you-type for links: a URL followed
  * by a space or Enter turns into a hyperlink. Runs on keydown BEFORE the key
  * itself applies (marks the URL, then lets the key proceed), matching Word's
  * behavior of linkifying the word just completed. Trailing punctuation stays
@@ -5502,6 +7555,8 @@ export const AutoLinkOnDelimiter = Extension.create({
 })
 
 export const editorExtensions = [
+  StreamingTailGuardExtension,
+  ScriptFonts,
   DocDocument,
   DocText,
   DocHardBreak,
@@ -5527,15 +7582,21 @@ export const editorExtensions = [
   LinkMark,
   RefFieldMark,
   InstrFieldMark,
+  SymMark,
+  CtrlCheckboxMark,
   RprChangeMark,
   TextStyleMark,
+  DocRedaction,
+  FormatOffClearExtension,
   CommentMark,
   InsMark,
   DelMark,
   UndoRedo,
+  MultiSelect,
   SearchHighlightExtension,
   PendingCommentHighlightExtension,
   ResolvedCommentsExtension,
+  FieldCodesExtension,
   NativeTableSupport,
   TableHandle,
   TrackChangesExtension,
@@ -5545,17 +7606,23 @@ export const editorExtensions = [
   PaginationGapsExtension,
   RowFillsExtension,
   FloatVShiftsExtension,
+  FloatTableSpacingExtension,
   InactiveSelectionExtension,
   AiQueueAnchorsExtension,
+  CheckboxToggleExtension,
   PageGapNavExtension,
   TrailingTableExitExtension,
   Gapcursor,
   ImageCopyExtension,
   EnterReplacesSelection,
+  HeadingEnterNextStyle,
+  WordSelectAllDelete,
   AutoLinkOnDelimiter,
+  AutoCorrectExtension,
   WordEditorShortcuts,
   CaretMarksMemory,
   ColumnLayoutExtension,
+  WrapObstaclesExtension,
   TabStopExtension,
   JustifyShrinkExtension,
   CjkPunctShrinkExtension,

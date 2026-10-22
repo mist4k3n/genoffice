@@ -3,7 +3,7 @@ import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState 
 import { App } from '../../../apps/sheets/src/renderer/App'
 import { HostApiProvider } from '../../../apps/sheets/src/renderer/host-api'
 import { LocaleProvider, setModuleLang } from '../../../apps/sheets/src/renderer/i18n/locale'
-import { htmlLang, normalizeLang } from '../../../packages/i18n/src/index'
+import { htmlDir, htmlLang, normalizeLang } from '../../../packages/i18n/src/index'
 import type { SheetsEditorProps, SheetsExport, SheetsHandle, SheetsSelection } from './host-api'
 import { HostTransportError } from '../host/transport'
 import { observeSelection, type UniverApiLike } from './selection'
@@ -280,6 +280,12 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
       // Drives CSS :lang() and Chromium's per-language font fallback, which
       // upstream gets from <html lang>. Scoped for the same reason.
       lang={htmlLang(lang)}
+      // Same bargain for direction: upstream stamps `dir` on <html> (Arabic and
+      // Hebrew arrived upstream in 2026-10), and the host owns that element, so
+      // the attribute rides on this container. Direction inherits through
+      // `display: contents`, and the grid itself stays LTR -- upstream's own
+      // rule in styles.css, which Univer reads through `ctx.direction`.
+      dir={htmlDir(lang)}
       // `display: contents` keeps the element in the tree -- which is what
       // makes the two attributes above reachable by selectors and closest() --
       // while removing its box, so it cannot disturb the host's layout.

@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   CELL_FONT_ALIASES,
+  registerCellFontAliases,
+  registerTextDingbatsFace,
   rewriteScopedFamilies,
   withSansSerifFallback,
+  richRunFamilies,
+  workbookFontFamilies,
 } from '../src/renderer/cell-font-fallback'
 
 const EMOJI = '"Cell Text Dingbats", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"'
@@ -385,6 +389,131 @@ describe('CELL_FONT_ALIASES', () => {
     expect(gill?.bold?.[0]).toBe('Gill Sans MT Bold')
   })
 
+  const find = (family: string) => CELL_FONT_ALIASES.find((a) => a.family === family)
+
+  it('resolves the bundled Carlito through the shared package asset, not a dead relative path', () => {
+    for (const family of ['Dosis', 'Aptos Narrow']) {
+      const alias = find(family)
+      const urls = [...alias!.regular, ...alias!.bold!].filter((s) => s.startsWith('url('))
+      expect(urls, family).toHaveLength(2)
+      for (const url of urls) {
+        expect(url, family).toMatch(/Carlito-(Regular|Bold)[^)]*\.ttf\)$/)
+        expect(url, family).not.toContain('./fonts/')
+      }
+    }
+  })
+
+  it('renames the localized BIZ UD spellings onto the installed English family', () => {
+    const gothic = find('BIZ UD\u30b4\u30b7\u30c3\u30af')
+    expect(gothic?.regular[0]).toBe('BIZ UDGothic')
+    expect(gothic?.regular).toContain('Hiragino Sans')
+    expect(gothic?.bold?.[0]).toBe('BIZ UDGothic Bold')
+    expect(gothic?.sizeAdjust).toBeUndefined()
+    // The proportional twin falls to the fixed-pitch design before Hiragino.
+    const pGothic = find('BIZ UDP\u30b4\u30b7\u30c3\u30af')
+    expect(pGothic?.regular.slice(0, 3)).toEqual([
+      'BIZ UDPGothic',
+      'BIZUDPGothic-Regular',
+      'BIZ UDGothic',
+    ])
+    for (const family of ['BIZ UD\u660e\u671d', 'BIZ UDP\u660e\u671d']) {
+      expect(find(family)?.regular, family).toContain('Hiragino Mincho ProN')
+      expect(withSansSerifFallback(`11pt "${family}"`)).toBe(`11pt "${family}", serif, ${EMOJI}`)
+    }
+    expect(withSansSerifFallback('11pt "BIZ UD\u30b4\u30b7\u30c3\u30af"')).toBe(
+      `11pt "BIZ UD\u30b4\u30b7\u30c3\u30af", sans-serif, ${EMOJI}`,
+    )
+  })
+
+  it('draws the heavy-by-name HG faces from a heavy weight even without <b/>', () => {
+    const soeiUB = '\u5275\u82f1\u89d2\uff7a\uff9e\uff7c\uff6f\uff78UB'
+    for (const prefix of ['HGP', 'HGS', 'HG']) {
+      const alias = find(`${prefix}${soeiUB}`)
+      expect(alias?.regular[0], prefix).toMatch(/SoeiKakugothicUB$/)
+      expect(alias?.regular[1], prefix).toBe('Hiragino Sans W8')
+      expect(alias?.regular, prefix).toContain('HiraginoSans-W6')
+      expect(alias?.bold?.[0], prefix).toBe('Hiragino Sans W9')
+    }
+    const gothicE = find('HG\uff7a\uff9e\uff7c\uff6f\uff78E')
+    expect(gothicE?.regular.slice(0, 2)).toEqual(['HGGothicE', 'Hiragino Sans W7'])
+    const minchoE = find('HG\u660e\u671dE')
+    expect(minchoE?.regular).toEqual(['HGMinchoE', 'HiraMinProN-W6', 'Hiragino Mincho ProN W6'])
+    expect(minchoE?.bold).toBeUndefined()
+    expect(withSansSerifFallback('12pt "HG\u660e\u671dE"')).toBe(
+      `12pt "HG\u660e\u671dE", serif, ${EMOJI}`,
+    )
+    const maru = find('HG\u4e38\uff7a\uff9e\uff7c\uff6f\uff78M-PRO')
+    expect(maru?.regular.slice(0, 2)).toEqual(['HGMaruGothicMPRO', 'Hiragino Maru Gothic ProN'])
+  })
+
+  it('pins the Korean fixed-pitch twins to half-width Latin over an exact-hangul base', () => {
+    for (const [family, genuine] of [
+      ['GulimChe', 'GulimChe'],
+      ['\uad74\ub9bc\uccb4', 'GulimChe'],
+      ['DotumChe', 'DotumChe'],
+      ['\ub3cb\uc6c0\uccb4', 'DotumChe'],
+    ]) {
+      const alias = find(family!)
+      expect(alias?.regular[0], family).toBe('AppleGothic')
+      expect(alias?.sizeAdjust, family).toBeUndefined()
+      // 0.5em digits over Helvetica Neue's 0.556em, as for MS Gothic.
+      expect(pct(alias?.latin?.sizeAdjust), family).toBeCloseTo(89.9, 5)
+      expect(alias?.bold?.[0], family).toBe('Apple SD Gothic Neo Bold')
+      expect(alias?.skipIfLocal, family).toEqual([genuine])
+      expect(alias?.whenGenuine?.regular, family).toEqual([genuine])
+      expect(withSansSerifFallback(`10pt "${family}"`)).toBe(
+        `10pt "${family}", sans-serif, ${EMOJI}`,
+      )
+    }
+    for (const family of ['BatangChe', '\ubc14\ud0d5\uccb4']) {
+      const alias = find(family)
+      expect(alias?.regular, family).toContain('AppleMyungjo')
+      // Times New Roman digits are exactly 0.5em — no size-adjust needed.
+      expect(alias?.latin?.regular, family).toEqual(['Times New Roman'])
+      expect(alias?.latin?.sizeAdjust, family).toBeUndefined()
+      expect(alias?.skipIfLocal, family).toEqual(['BatangChe'])
+      expect(withSansSerifFallback(`10pt "${family}"`)).toBe(`10pt "${family}", serif, ${EMOJI}`)
+    }
+  })
+
+  it('keeps serif intent for the cloud-only Google serif faces', () => {
+    const expectations: Record<string, string> = {
+      'Playfair Display': 'Didot',
+      'EB Garamond': 'Garamond',
+      Merriweather: 'Georgia',
+      Lora: 'Georgia',
+      'Libre Baskerville': 'Baskerville',
+    }
+    for (const [family, standIn] of Object.entries(expectations)) {
+      const alias = find(family)
+      expect(alias?.regular[0], family).toBe(family)
+      expect(alias?.regular[1], family).toBe(standIn)
+      expect(alias?.bold?.[0], family).toBe(`${family} Bold`)
+      expect(withSansSerifFallback(`bold 11pt "${family}"`)).toBe(
+        `bold 11pt "${family}", serif, ${EMOJI}`,
+      )
+    }
+  })
+
+  it('treats the Adobe Kozuka Mincho PostScript names as mincho', () => {
+    for (const base of ['KozMinPro', 'KozMinPr6N']) {
+      for (const weight of ['Regular', 'Medium']) {
+        const family = `${base}-${weight}`
+        const alias = find(family)
+        expect(alias?.regular, family).toEqual([family, 'Hiragino Mincho ProN', 'HiraMinProN-W3'])
+        expect(alias?.bold?.[0], family).toBe('HiraMinProN-W6')
+        expect(withSansSerifFallback(`10pt ${family}`)).toBe(`10pt ${family}, serif, ${EMOJI}`)
+      }
+      const bold = find(`${base}-Bold`)
+      expect(bold?.regular.slice(0, 2)).toEqual([`${base}-Bold`, 'HiraMinProN-W6'])
+      expect(bold?.bold).toBeUndefined()
+    }
+    // Unrecognized gothic siblings keep Excel's sans substitution.
+    expect(withSansSerifFallback('10pt KozGoPro-Regular')).toBe(
+      `10pt KozGoPro-Regular, sans-serif, ${EMOJI}`,
+    )
+  })
+
   it('keeps serif intent for mincho/song/ming/batang names', () => {
     const serifFaces =
       /Mincho|Song|Myungjo|Myeongjo|LiSung|Times|Georgia|Palatino|Antiqua|PMingLiU|MingLiU/
@@ -396,5 +525,110 @@ describe('CELL_FONT_ALIASES', () => {
         family,
       ).toBe(true)
     }
+  })
+})
+
+describe('registerCellFontAliases', () => {
+  /// FontFace and document.fonts as the renderer sees them; records each face's sources.
+  function stubFontFaces(): string[] {
+    const sources: string[] = []
+    vi.stubGlobal(
+      'FontFace',
+      class {
+        constructor(_family: string, source: string) {
+          sources.push(source)
+        }
+        load() {
+          return Promise.reject(new Error('not installed'))
+        }
+      },
+    )
+    vi.stubGlobal('document', { fonts: { add() {} } })
+    return sources
+  }
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('looks up the faces of the families named, once each, and no other', async () => {
+    const sources = stubFontFaces()
+    await registerCellFontAliases(['Cambria', 'cambria', 'Not An Office Font'])
+    await registerCellFontAliases(['Cambria'])
+    const cambria = CELL_FONT_ALIASES.find((alias) => alias.family === 'Cambria')!
+    expect(sources.join()).toContain(`local('${cambria.regular[0]}')`)
+    expect(sources.join()).not.toMatch(/Yu Mincho|YuMincho|PingFang|Kaiti/)
+    const lookedUp = sources.length
+    await registerCellFontAliases(['Cambria'])
+    expect(sources).toHaveLength(lookedUp)
+  })
+
+  it('a second caller waits for the load the first one started', async () => {
+    let settle!: () => void
+    const pending = new Promise<void>((resolve) => (settle = resolve))
+    vi.stubGlobal(
+      'FontFace',
+      class {
+        load() {
+          return pending
+        }
+      },
+    )
+    vi.stubGlobal('document', { fonts: { add() {} } })
+    const first = registerCellFontAliases(['Garamond'])
+    let secondDone = false
+    const second = registerCellFontAliases(['Garamond']).then(() => (secondDone = true))
+    await Promise.resolve()
+    expect(secondDone).toBe(false)
+    settle()
+    await Promise.all([first, second])
+    expect(secondDone).toBe(true)
+  })
+
+  it('starts with the dingbats face only: no system font is looked up for nothing', async () => {
+    const sources = stubFontFaces()
+    await registerTextDingbatsFace()
+    expect(sources).toHaveLength(1)
+    expect(sources[0]).toContain("local('Segoe UI Symbol')")
+  })
+
+  it('loads a family the workbook names, even one macOS installs on demand', async () => {
+    const sources = stubFontFaces()
+    await registerCellFontAliases(['Yu Mincho'])
+    expect(sources.some((source) => source.includes('Yu Mincho'))).toBe(true)
+  })
+})
+
+describe('workbookFontFamilies', () => {
+  it('lists the cell, theme and Normal fonts a workbook names', () => {
+    const families = workbookFontFamilies({
+      styles: [{ fontFamily: 'Yu Mincho' }, { fontFamily: 'Calibri' }, {}],
+      themeFonts: { major: 'Calibri Light', minor: 'Calibri', minorEa: '游ゴシック' },
+      normalFontName: 'ＭＳ Ｐゴシック',
+    } as unknown as Parameters<typeof workbookFontFamilies>[0])
+    expect([...families]).toEqual([
+      'Yu Mincho',
+      'Calibri',
+      'Calibri Light',
+      '游ゴシック',
+      'ＭＳ Ｐゴシック',
+    ])
+  })
+
+  it('splits comma lists, strips quotes and includes conditional-format fonts', () => {
+    const families = workbookFontFamilies({
+      styles: [{ fontFamily: '"Yu Mincho", Meiryo' }, { fontFamily: ' Calibri ,Calibri' }],
+      dxfStyles: [{ fontFamily: 'Segoe UI' }, {}],
+    } as unknown as Parameters<typeof workbookFontFamilies>[0])
+    expect([...families]).toEqual(['Yu Mincho', 'Meiryo', 'Calibri', 'Segoe UI'])
+  })
+})
+
+describe('richRunFamilies', () => {
+  it('collects the families rich-text runs name, split like cell fonts', () => {
+    const families = richRunFamilies([
+      { rich: [{ family: 'Yu Mincho' }, { family: '"Segoe UI",Arial' }, {}] },
+      {},
+      { rich: [{ family: 'Yu Mincho' }] },
+    ])
+    expect([...families]).toEqual(['Yu Mincho', 'Segoe UI', 'Arial'])
   })
 })

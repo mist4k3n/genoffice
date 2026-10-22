@@ -23,6 +23,12 @@ type ClipboardCell = ICellData & { displayV?: string }
 /// CSV-style quoting when the text carries tabs/newlines/quotes.
 export function clipboardField(cell: ClipboardCell | null | undefined): string {
   if (!cell) return ''
+  if (
+    cell.t === CellValueType.BOOLEAN &&
+    (cell.v === null || cell.v === undefined || cell.v === '')
+  ) {
+    return ''
+  }
   const text =
     cell.t === CellValueType.BOOLEAN
       ? Number(cell.v) === 0
@@ -34,7 +40,7 @@ export function clipboardField(cell: ClipboardCell | null | undefined): string {
         (typeof cell.v === 'string' ? cell.v : extractPureTextFromCell(cell)))
   // Only normalize line endings: trailing newlines are significant cell
   // content and must survive (quoted) instead of being stripped.
-  const normalized = text.replace(/\r\n|\r+/g, '\n')
+  const normalized = text.replace(/\r\n|\r/g, '\n')
   return /[\t\n"]/.test(normalized) ? `"${normalized.replace(/"/g, '""')}"` : normalized
 }
 

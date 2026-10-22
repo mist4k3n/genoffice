@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { AgentToolDef } from '@genoffice/agent-core'
+import { MAX_STREAM_TOOL_CALLS, MAX_TOOL_JSON_CHARS } from '../src/protocols/shared'
 import {
   activePermissionProfileId,
   buildCodexAppServerPrompt,
@@ -188,6 +189,34 @@ describe('Codex app-server bridge', () => {
     ).toThrow('no content')
   })
 
+  it('rejects a turn over the per-turn tool call and argument budgets', () => {
+    const call = (i: number) => ({ id: `c${i}`, name: 'replace_text', inputJson: '{"a":1}' })
+    expect(() =>
+      parseCodexAppServerTurn(
+        JSON.stringify({
+          text: 'working on it',
+          toolCalls: Array.from({ length: MAX_STREAM_TOOL_CALLS + 1 }, (_, i) => call(i)),
+        }),
+        tools,
+      ),
+    ).toThrow(/Too many streamed tool calls/)
+    expect(() =>
+      parseCodexAppServerTurn(
+        JSON.stringify({
+          text: 'working on it',
+          toolCalls: [
+            {
+              id: 'c1',
+              name: 'replace_text',
+              inputJson: `"${'a'.repeat(MAX_TOOL_JSON_CHARS + 1)}"`,
+            },
+          ],
+        }),
+        tools,
+      ),
+    ).toThrow(/Tool call arguments exceeded the codex-app-server buffer limit/)
+  })
+
   it('keeps waiting through transient stream errors Codex retries itself', async () => {
     const transport = fakeTransport([
       {
@@ -217,6 +246,38 @@ describe('Codex app-server bridge', () => {
         noopCallbacks,
       ),
     ).resolves.toBe('done')
+  })
+
+  it('interrupts the server turn when the abort lands before the turn id is known (genoffice#1110)', async () => {
+    const calls: { method: string; params: unknown }[] = []
+    let releaseStart: (() => void) | undefined
+    const transport: CodexTurnTransport = {
+      request: async (method, params) => {
+        calls.push({ method, params })
+        if (method === 'turn/start') {
+          await new Promise<void>((r) => (releaseStart = r))
+          return { turn: { id: 't1' } }
+        }
+        return {}
+      },
+      onNotification: () => () => undefined,
+    }
+    const controller = new AbortController()
+    const pending = waitForTurn(
+      transport,
+      'th',
+      () => transport.request('turn/start', {}),
+      controller.signal,
+      { ...noopCallbacks, signal: controller.signal },
+    )
+    await Promise.resolve()
+    controller.abort()
+    await expect(pending).rejects.toThrow()
+    expect(calls.map((c) => c.method)).toEqual(['turn/start'])
+    releaseStart?.()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(calls.map((c) => c.method)).toEqual(['turn/start', 'turn/interrupt'])
+    expect(calls[1]!.params).toEqual({ threadId: 'th', turnId: 't1' })
   })
 
   it('fails the turn on a non-retried error notification', async () => {

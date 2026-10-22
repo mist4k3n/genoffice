@@ -1,15 +1,34 @@
+import {
+  aiPanelWidthAtPointer,
+  AiPanelSideButton,
+  AiModelPicker,
+  type AiModelPickerBridge,
+} from '@genoffice/ui'
 import React, { useEffect, useRef, useState } from 'react'
-import { AiComposer, AiScopeQuote, AiTypingIndicator, type AiScopeQuoteData } from '@genoffice/ui'
+import {
+  AiComposer,
+  AiQueueStrip,
+  AI_QUEUE_LABELS,
+  AiScopeQuote,
+  AiTypingIndicator,
+  AiUsageChip,
+  type AiScopeQuoteData,
+  type AiTokenUsageView,
+  useChatRunQueue,
+} from '@genoffice/ui'
 import { GensparkMark } from '../ribbon-icons'
-import type { ChangePlan } from '../../domain/workbook.types'
-import { ATTACHMENT_IMAGE_EXTS, type AttachmentMeta } from '../../shared/desktop-api'
+import type { ChangePlan } from '@genoffice/xlsx-gateway/domain/workbook.types'
+import {
+  ATTACHMENT_IMAGE_EXTS,
+  type AttachmentMeta,
+  type DesktopApi,
+} from '../../shared/desktop-api'
 import { useI18n, type TFunc } from '../i18n/locale'
-import { Markdown } from '@genoffice/ui'
+import { AiSkillChips, AiSkillsMenu, createFileNav, Markdown } from '@genoffice/ui'
 import { SHEET_NAV_SCHEME } from './sheet-nav'
 import sendEnterOn from '../assets/send-enter-on.png'
 import sendEnterOff from '../assets/send-enter-off.png'
 import sendStop from '../assets/send-stop.png'
-import attachIcon from '../assets/attach-icon.png'
 import filePdfIcon from '../assets/file-pdf.png'
 import fileWordIcon from '../assets/file-word.png'
 import fileExcelIcon from '../assets/file-excel.png'
@@ -205,24 +224,44 @@ export interface AiChatMessage {
   readonly autoApplied?: { readonly opCount: number; readonly undoSteps: number } | undefined
   /** attachments consumed from the composer by this user message (read-only echo chips) */
   readonly attachments?: readonly AttachmentMeta[] | undefined
+  /** skills the user attached to this message from the composer menu */
+  readonly skills?: readonly string[] | undefined
   /** the range this user message targeted, frozen at send */
   readonly scope?: AiScopeQuoteData | undefined
+  /** tokens the provider billed for this reply, summed across its turns (absent when unreported) */
+  readonly usage?: AiTokenUsageView | undefined
 }
+
+/// Built per editor rather than once per module: the picker reads and writes
+/// AI settings through the host bridge, and one page can hold several editors
+/// (UPSTREAM-CHANGES.md, Change 1).
+const modelBridge = (api: DesktopApi): AiModelPickerBridge => ({
+  getSettings: () => api.getAiSettings(),
+  setSettings: (settings) => api.setAiSettings(settings),
+  onSettingsChanged: (handler) => api.onAiSettingsChanged(handler),
+  gskLoggedIn: () => api.aiGskStatus().then((s) => !!s?.loggedIn),
+  openModelSettings: () => api.openAiModelSettings().catch(() => {}),
+})
 
 export function AiChatPanel({
   isOpen,
+  hideRail = false,
   hasContent,
   chat,
   historicChat = [],
   attachments,
+  attachedSkills,
+  onToggleSkill,
   attachNotice,
   onPickAttachments,
   onAddAttachmentPaths,
   onAddPastedImage,
   onRemoveAttachment,
+  onSendQueued,
   prompt,
   preview,
   aiBusy,
+  sessionUsage,
   onPromptChange,
   onSend,
   onStop,
@@ -237,6 +276,8 @@ export function AiChatPanel({
   onCollapse,
 }: {
   readonly isOpen: boolean
+  /** true suppresses even the collapsed rail (the "show the AI sidebar" setting is off) */
+  readonly hideRail?: boolean
   /** the workbook has cells with content — empty workbooks get "build me a sheet" copy instead */
   readonly hasContent: boolean
   readonly chat: readonly AiChatMessage[]
@@ -244,6 +285,9 @@ export function AiChatPanel({
   /// Chat attachments (chips + 📎 button + drag onto the panel), same structure
   /// as the docs/slides AI panels.
   readonly attachments: readonly AttachmentMeta[]
+  /// skills picked from the composer menu for the next message
+  readonly attachedSkills: readonly string[]
+  readonly onToggleSkill: (name: string) => void
   readonly attachNotice: string | null
   readonly onPickAttachments: () => void
   readonly onAddAttachmentPaths: (paths: readonly string[]) => void
@@ -254,6 +298,8 @@ export function AiChatPanel({
   readonly prompt: string
   readonly preview: ChangePlan | null
   readonly aiBusy: boolean
+  /** tokens billed across the session, shown beside the composer */
+  readonly sessionUsage?: AiTokenUsageView | undefined
   readonly onPromptChange: (prompt: string) => void
   /** Send the composer text, or the given instruction when provided (used by the
    *  failed-run Retry, which also resends the message's original attachments;
@@ -263,6 +309,8 @@ export function AiChatPanel({
     attachments?: readonly AttachmentMeta[],
     retryIndex?: number,
   ) => void
+  /** a queued message is ready to run: return false to keep it queued (panel busy some other way) */
+  readonly onSendQueued?: (instruction: string, attachments: readonly AttachmentMeta[]) => boolean
   readonly onStop: () => void
   readonly onNewChat: () => void
   readonly onUndo: (steps: number) => void
@@ -284,6 +332,11 @@ export function AiChatPanel({
 }): React.JSX.Element {
   const hostApi = useHostApi()
   const { t, lang } = useI18n()
+  /** messages queued while a reply runs; the pump re-sends them through onSend on settle */
+  const msgQueue = useChatRunQueue<readonly AttachmentMeta[]>({
+    busy: aiBusy,
+    submit: (text, atts) => onSendQueued?.(text, atts) ?? false,
+  })
   // Panel chrome follows the UI language; message text follows its own content (dir=auto below)
   const isRtl = lang === 'ar' || lang === 'he'
   const chatRef = useRef<HTMLDivElement | null>(null)
@@ -391,7 +444,7 @@ export function AiChatPanel({
   const resizeCleanupRef = useRef<(() => void) | null>(null)
   useEffect(() => () => resizeCleanupRef.current?.(), [])
 
-  /** Drag the right edge to resize: the panel is flush with the window's left edge, so width = clientX; the grid transition is disabled while dragging */
+  /** Drag the inner panel edge to resize from the selected window side. */
   const startResize = (e: React.PointerEvent<HTMLDivElement>): void => {
     e.preventDefault()
     const area = asideRef.current?.closest('.sheet-body') as HTMLElement | null
@@ -403,7 +456,7 @@ export function AiChatPanel({
     document.body.style.userSelect = 'none'
     let width = 0
     const onMove = (ev: PointerEvent): void => {
-      width = clampPanelWidth(ev.clientX)
+      width = clampPanelWidth(aiPanelWidthAtPointer(ev.clientX))
       preferredWidthRef.current = width
       area.style.setProperty('--copilot-width', `${width}px`)
     }
@@ -438,6 +491,8 @@ export function AiChatPanel({
   }
 
   if (!isOpen) {
+    // the sidebar setting is off: nothing to show until an explicit AI action opens the panel
+    if (hideRail) return <></>
     return (
       <aside className="copilot collapsed">
         <button
@@ -456,11 +511,29 @@ export function AiChatPanel({
 
   /** [B12](sheetnav://B12) links in answers jump the grid to the cited range */
   const citationNav = { scheme: SHEET_NAV_SCHEME, onNavigate: onCitation }
+  // [name](filenav:///abs/path) citations open the cited file in its own app
+  const fileNav = createFileNav((path) => {
+    void hostApi.openSourcePath(path)
+  })
+
+  const listSkillsForMenu = async () =>
+    (await hostApi.skillsList()).map(({ name, description }) => ({ name, description }))
 
   const send = (): void => {
     if (!canSend) return
     stickToBottomRef.current = true
     onSend()
+  }
+
+  /** Enter while a reply runs: the draft joins the queue above the composer */
+  const enqueueDraft = (): void => {
+    const text = prompt.trim()
+    if (!text) return
+    // the queued message owns the composer attachments; the pump hands them to onSend
+    const atts = attachments
+    for (const a of atts) onRemoveAttachment(a.path)
+    msgQueue.enqueue(text, atts)
+    onPromptChange('')
   }
 
   const onDrop = (e: React.DragEvent): void => {
@@ -511,7 +584,7 @@ export function AiChatPanel({
         onPointerDown={startResize}
         role="separator"
         aria-orientation="vertical"
-        aria-label="Genspark"
+        aria-label={t('aiGensparkAccount')}
       />
       <header className="ai-panel-header">
         <span className="ai-panel-title">
@@ -519,10 +592,14 @@ export function AiChatPanel({
           Genspark
         </span>
         <div className="ai-panel-header-actions">
+          <AiPanelSideButton lang={lang} onMove={(side) => hostApi.setAiPanelPrefs({ side })} />
           {(chat.length > 0 || historicChat.length > 0) && (
             <button
               className="ai-header-btn"
-              onClick={onNewChat}
+              onClick={() => {
+                msgQueue.clear()
+                onNewChat()
+              }}
               data-tip={t('aiNewChat')}
               aria-label={t('aiNewChat')}
             >
@@ -530,7 +607,7 @@ export function AiChatPanel({
             </button>
           )}
           <button
-            className="ai-header-btn"
+            className="ai-header-btn ai-panel-collapse"
             onClick={onCollapse}
             data-tip={t('aiCollapsePanel')}
             aria-label={t('aiCollapsePanel')}
@@ -550,10 +627,13 @@ export function AiChatPanel({
                 {entry.role === 'user' && entry.attachments && entry.attachments.length > 0 && (
                   <SentAttachments atts={entry.attachments} previews={attachmentPreviews} />
                 )}
+                {entry.role === 'user' && entry.skills && (
+                  <AiSkillChips lang={lang} names={entry.skills} />
+                )}
                 {entry.tools.length > 0 && <ToolChipList tools={entry.tools} />}
                 {entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={citationNav} />
+                    <Markdown text={entry.text} navs={[citationNav, fileNav]} />
                   </div>
                 )}
               </div>
@@ -582,6 +662,7 @@ export function AiChatPanel({
                 {entry.attachments && entry.attachments.length > 0 && (
                   <SentAttachments atts={entry.attachments} previews={attachmentPreviews} />
                 )}
+                {entry.skills && <AiSkillChips lang={lang} names={entry.skills} />}
                 <span dir="auto">{entry.text}</span>
                 {entry.undelivered && (
                   <div className="ai-msg-undelivered">
@@ -600,9 +681,14 @@ export function AiChatPanel({
             ) : (
               <>
                 {entry.tools.length > 0 && <ToolChipList tools={entry.tools} />}
+                {entry.usage && (
+                  <div className="ai-message-usage">
+                    <AiUsageChip usage={entry.usage} lang={lang} />
+                  </div>
+                )}
                 {entry.text ? (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={citationNav} />
+                    <Markdown text={entry.text} navs={[citationNav, fileNav]} />
                   </div>
                 ) : (
                   entry.streaming && (
@@ -633,10 +719,7 @@ export function AiChatPanel({
                   </div>
                 )}
                 {entry.loginRequired && (
-                  <button
-                    className="ai-login-btn"
-                    onClick={() => void hostApi.aiGskLogin()}
-                  >
+                  <button className="ai-login-btn" onClick={() => void hostApi.aiGskLogin()}>
                     {t('aiGskLoginBtn')}
                   </button>
                 )}
@@ -697,6 +780,20 @@ export function AiChatPanel({
       <div className="ai-composer">
         {attachNotice && <div className="ai-attach-notice">{attachNotice}</div>}
         <AiComposer
+          queueStrip={
+            <AiQueueStrip
+              items={msgQueue.queued}
+              labels={AI_QUEUE_LABELS[lang]}
+              onUpdate={msgQueue.update}
+              onRemove={msgQueue.remove}
+              onClear={msgQueue.clear}
+              paused={msgQueue.paused}
+              onTogglePause={msgQueue.togglePaused}
+              onMove={msgQueue.move}
+            />
+          }
+          onQueue={enqueueDraft}
+          queuePlaceholder={AI_QUEUE_LABELS[lang].queuePlaceholder}
           header={
             <>
               {/* Only a deliberate multi-cell selection shows here: it tells the
@@ -729,6 +826,7 @@ export function AiChatPanel({
                   </span>
                 </div>
               )}
+              <AiSkillChips lang={lang} names={attachedSkills} onRemove={onToggleSkill} />
               {attachments.length > 0 && (
                 <div className="ai-attachments" onScroll={onAttachmentsScroll}>
                   {attachments.map((attachment) =>
@@ -814,19 +912,26 @@ export function AiChatPanel({
           sendIconDisabled={<img src={sendEnterOff} alt="" aria-hidden />}
           stopIcon={<img src={sendStop} alt="" aria-hidden />}
           footerStart={
-            <button
-              className="ai-attach-btn"
-              onClick={onPickAttachments}
-              data-tip={t('aiAttachTitle')}
-              aria-label={t('aiAttachTitle')}
-            >
-              <img src={attachIcon} alt="" aria-hidden />
-            </button>
+            <>
+              <AiModelPicker bridge={modelBridge(hostApi)} lang={lang} />
+              {sessionUsage && <AiUsageChip usage={sessionUsage} session lang={lang} />}
+              <AiSkillsMenu
+                lang={lang}
+                listSkills={listSkillsForMenu}
+                selected={attachedSkills}
+                onToggle={onToggleSkill}
+                onAddFile={onPickAttachments}
+                onManage={() => void hostApi.openSkillsSettings?.().catch(() => {})}
+              />
+            </>
           }
           textareaRef={inputRef}
           onChange={onPromptChange}
           onSend={send}
-          onStop={onStop}
+          onStop={() => {
+            msgQueue.hold()
+            onStop()
+          }}
           onPasteFiles={onPasteFiles}
         />
       </div>

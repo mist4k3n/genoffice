@@ -5,20 +5,34 @@
  * ReviewContext built fresh per call so state never goes stale.
  */
 import type { Editor } from '@tiptap/core'
+import { TextSelection } from '@tiptap/pm/state'
 import { nextNoteId, parseDocx, type CommentInfo, type NoteInfo } from '@genoffice/docx-engine'
 import type { Dispatch, SetStateAction } from 'react'
+import { authorName } from './author-name'
+import { fetchDocBytes } from './doc-bytes'
 import type { DocState } from './doc-state'
 import {
+  addCommentToRange,
   addCommentToSelection,
   addReplyToCommentRange,
+  commentAnchors,
+  commentIdsAt,
   nextCommentId,
   removeCommentFromDoc,
+  removeCommentsFromDoc,
   wordRangeAtCaret,
 } from './editor/comments'
-import { blockTexts, compareParagraphs, type CompareEntry } from './editor/compare'
+import {
+  blockTexts,
+  compareParagraphs,
+  editorBlockTexts,
+  type CompareEntry,
+} from './editor/compare'
 import { pendingCommentPluginKey } from './editor/extensions'
 import type { InkAnnotation } from './editor/ink'
+import { renumber } from './ai/note-ops'
 import {
+  TRACK_IGNORE,
   acceptAllRevisions,
   acceptCurrentRevision,
   rejectAllRevisions,
@@ -50,6 +64,8 @@ export interface ReviewContext {
   setCommentsDirty: (dirty: boolean) => void
   setCommentComposing: (composing: boolean) => void
   setShowComments: (show: boolean) => void
+  /** highlight one thread in the comments pane (Previous / Next) */
+  setCommentFocus: (focus: { id: string; nonce: number } | null) => void
   setInkAnnotations: Dispatch<SetStateAction<InkAnnotation[]>>
   setInksDirty: (dirty: boolean) => void
   setCompareResult: (value: { otherName: string; entries: CompareEntry[] } | null) => void
@@ -76,6 +92,12 @@ export function submitNote(ctx: ReviewContext, text: string): void {
         attrs: { kind, id: newId, num: list.length + 1 },
       } as never)
       .run()
+    // the mark lands at the caret, which can be above marks that are already
+    // in the body, so the `num` it was given is only the append order: rewrite
+    // every mark of this kind in document order before anything reads it
+    const tr = ctx.editor.state.tr
+    renumber(tr, kind)
+    if (tr.docChanged) ctx.editor.view.dispatch(tr)
   }
   ctx.setNotesDirty(true)
 }
@@ -94,14 +116,13 @@ export function deleteNote(ctx: ReviewContext, kind: 'footnote' | 'endnote', id:
     if (node.type.name !== 'docNoteRef' || node.attrs.kind !== kind) return
     if (String(node.attrs.id) === id) {
       removals.push({ pos, size: node.nodeSize })
-    } else {
-      const num = next.findIndex((n) => n.id === String(node.attrs.id)) + 1
-      if (num > 0 && num !== node.attrs.num) {
-        tr.setNodeMarkup(pos, undefined, { ...node.attrs, num })
-      }
     }
   })
   for (const { pos, size } of removals.reverse()) tr.delete(pos, pos + size)
+  // number the survivors by where they sit in the body, the order submitNote
+  // uses; the list order is not the document order once a note has been
+  // inserted above one that was already there
+  renumber(tr, kind)
   if (tr.docChanged) editor.view.dispatch(tr)
 }
 
@@ -150,11 +171,33 @@ export function submitNewComment(ctx: ReviewContext, text: string): void {
     return
   }
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-  ctx.setComments((prev) => [...prev, { id, author: 'User', date: now, text }])
+  ctx.setComments((prev) => [...prev, { id, author: authorName(), date: now, text }])
   ctx.setCommentsDirty(true)
   ctx.setCommentComposing(false)
   ctx.dirtyRef.current = true
   ctx.setStatus(t('appCommentAdded'))
+}
+
+/** New thread on an explicit range (AI add_comment); the new id, null when the range holds no text */
+export function addCommentAt(
+  ctx: ReviewContext,
+  range: { from: number; to: number },
+  text: string,
+  author: string,
+  initials?: string,
+): string | null {
+  if (!ctx.editor) return null
+  const id = nextCommentId(ctx.comments)
+  if (!addCommentToRange(ctx.editor, range.from, range.to, id)) return null
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+  ctx.setComments((prev) => [
+    ...prev,
+    { id, author, date: now, text, ...(initials ? { initials } : {}) },
+  ])
+  ctx.setCommentsDirty(true)
+  ctx.dirtyRef.current = true
+  ctx.setStatus(t('appCommentAdded'))
+  return id
 }
 
 /** Reply to a comment: the new entry carries parentId; the anchor shares the parent comment's range */
@@ -162,7 +205,7 @@ export function replyToComment(
   ctx: ReviewContext,
   parentId: string,
   text: string,
-  author = 'User',
+  author = authorName(),
 ): boolean {
   if (!ctx.editor) return false
   const id = nextCommentId(ctx.comments)
@@ -204,6 +247,63 @@ export function deleteComment(ctx: ReviewContext, id: string): void {
   ctx.setComments((prev) => prev.filter((c) => !victims.includes(c.id)))
   ctx.setCommentsDirty(true)
   ctx.dirtyRef.current = true
+}
+
+/** the thread under the caret (a reply resolves to its parent) */
+export function commentThreadAtCaret(ctx: ReviewContext): string | null {
+  if (!ctx.editor) return null
+  const ids = commentIdsAt(ctx.editor.state, ctx.editor.state.selection.from)
+  for (const id of ids) {
+    const info = ctx.comments.find((c) => c.id === id)
+    if (info) return info.parentId ?? info.id
+  }
+  return null
+}
+
+export function deleteCommentAtCaret(ctx: ReviewContext): void {
+  const id = commentThreadAtCaret(ctx)
+  if (id) deleteComment(ctx, id)
+}
+
+/** Delete All Comments in Document / Delete All Resolved Comments */
+export function deleteAllComments(ctx: ReviewContext, resolvedOnly: boolean): void {
+  if (!ctx.editor) return
+  // replies never carry done themselves: a resolved thread goes with all of its replies
+  const doneThreads = new Set(ctx.comments.filter((c) => c.done && !c.parentId).map((c) => c.id))
+  const victims = ctx.comments
+    .filter((c) => !resolvedOnly || c.done || (c.parentId && doneThreads.has(c.parentId)))
+    .map((c) => c.id)
+  if (victims.length === 0) return
+  removeCommentsFromDoc(ctx.editor, victims)
+  const gone = new Set(victims)
+  ctx.setComments((prev) => prev.filter((c) => !gone.has(c.id)))
+  ctx.setCommentsDirty(true)
+  ctx.dirtyRef.current = true
+}
+
+/** Previous / Next Comment: select the thread's anchor and light it up in the pane; open threads only */
+export function gotoComment(ctx: ReviewContext, dir: 1 | -1): boolean {
+  const editor = ctx.editor
+  if (!editor) return false
+  const open = new Set(ctx.comments.filter((c) => !c.parentId && !c.done).map((c) => c.id))
+  const anchors = commentAnchors(editor.state.doc).filter((a) => open.has(a.id))
+  if (anchors.length === 0) return false
+  // the thread under the caret is never a stop in either direction
+  const { from } = editor.state.selection
+  const target =
+    dir === 1
+      ? (anchors.find((a) => a.from > from) ?? anchors[0])
+      : ([...anchors].reverse().find((a) => a.to <= from && a.from < from) ??
+        anchors[anchors.length - 1])
+  const tr = editor.state.tr
+  tr.setSelection(TextSelection.between(tr.doc.resolve(target.from), tr.doc.resolve(target.to)))
+  tr.scrollIntoView()
+  tr.setMeta(TRACK_IGNORE, true)
+  editor.view.dispatch(tr)
+  editor.view.focus()
+  ctx.setShowComments(true)
+  ctx.setCommentFocus({ id: target.id, nonce: Date.now() })
+  return true
 }
 
 export function handleRevision(
@@ -257,9 +357,11 @@ export async function compareWithFile(ctx: ReviewContext): Promise<void> {
     return
   }
   try {
-    const otherParsed = await parseDocx(new Uint8Array(other.data))
+    const otherParsed = await parseDocx(await fetchDocBytes(other.dataUrl))
     const entries = compareParagraphs(
-      blockTexts(ctx.doc.parsed.blocks),
+      ctx.editor
+        ? editorBlockTexts(ctx.editor.getJSON(), ctx.doc.parsed.blocks)
+        : blockTexts(ctx.doc.parsed.blocks),
       blockTexts(otherParsed.blocks),
     )
     ctx.setCompareResult({ otherName: other.name, entries })

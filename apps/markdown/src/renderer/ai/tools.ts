@@ -1,3 +1,4 @@
+import { modelTextOf, redactJson, redactTextBetween } from '../editor/redact'
 import type { Editor, JSONContent } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { AgentToolCall, AgentToolDef, ToolExecution } from '@genoffice/agent-core'
@@ -6,6 +7,7 @@ import {
   blockIndexRange,
   buildOpsGuide,
   isBlankDoc,
+  parseMarkdownToNodes,
   runOps,
   usesBlockIndexes,
   validateOps,
@@ -13,6 +15,13 @@ import {
   type MdOp,
 } from '../editor/ops'
 import { t } from '../i18n/locale'
+import { MIND_MAP_LIMITS, MIND_MAP_TOOL, parseMindMapTree } from './mind-map'
+import {
+  DraftLanding,
+  type AiDocWriter,
+  type DocWriteResult,
+  type WritePosition,
+} from './doc-writer'
 
 export type { FrontmatterAccess } from '../editor/ops'
 export { blockIndexRange } from '../editor/ops'
@@ -43,28 +52,45 @@ function editedExternally(editor: Editor): boolean {
 // ── document skeleton / serialization helpers ──
 
 function blockPreview(node: PmNode): string {
-  const text = node.textContent.replace(/\s+/g, ' ').trim()
+  // modelTextOf, not textContent: a withheld span must not reach the preview
+  const text = modelTextOf(node.toJSON() as never)
+    .replace(/\s+/g, ' ')
+    .trim()
   return text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text
 }
 
 function blockLabel(node: PmNode): string {
   if (node.type.name === 'heading') return `h${node.attrs.level}`
+  // a paragraph holding only a picture reads better as the picture
+  if (node.isTextblock && !node.textContent && node.childCount === 1 && node.firstChild?.isAtom) {
+    return node.firstChild.type.name
+  }
   return node.type.name
 }
 
-/** Serialize a range of top-level blocks back to markdown */
+/**
+ * Serialize a range of top-level blocks back to markdown, as the model sees it.
+ *
+ * Withheld spans are replaced by their markers here, on the way out, so the
+ * text under them is never serialized at all — the only place documents are
+ * turned into something that leaves the machine. Saving does not come through
+ * here; it renders the real text.
+ */
 function serializeBlocks(editor: Editor, from: number, to: number): string {
   const content: JSONContent[] = []
   editor.state.doc.forEach((node, _offset, index) => {
     if (index >= from && index <= to) content.push(node.toJSON() as JSONContent)
   })
-  return editor.markdown?.serialize({ type: 'doc', content }) ?? ''
+  return editor.markdown?.serialize(redactJson({ type: 'doc', content })) ?? ''
 }
 
 function selectionMarkdown(editor: Editor): string {
   const { from, to } = editor.state.selection
   if (from === to) return ''
-  const text = editor.state.doc.textBetween(from, to, '\n')
+  // same reason as blockPreview — the selection is document text going out —
+  // and the offsets are ProseMirror's: a flat string sliced with them
+  // misquotes every selection after the first block
+  const text = redactTextBetween(editor.getJSON() as never, from, to)
   return text.length > SELECTION_MAX_CHARS ? `${text.slice(0, SELECTION_MAX_CHARS)}…` : text
 }
 
@@ -144,6 +170,37 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     },
   },
   {
+    name: 'write_document',
+    description:
+      '[For long new content: a whole document, a chapter, a full report, article or translation] Hands the writing to the system writer, which streams markdown straight into the document while the user watches; you never write the text yourself. Give a concrete plan (title, section outline with the key points of each, tone, target length) and put every fact, figure, name and quote the text must use into context — the writer sees only the plan and context, not the conversation. Omit afterIndex on a blank document; on a document with content, pass afterIndex to insert after that block, or replaceDocument=true when the user asked to rewrite everything. Short additions (a paragraph or two) use apply_ops insertContent instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        plan: {
+          type: 'string',
+          description: 'title, section outline with key points per section, tone, target length',
+        },
+        title: { type: 'string', description: 'document/chapter title, when there is one' },
+        context: {
+          type: 'string',
+          description:
+            'reference material: facts, figures, quotes, sources gathered from the conversation and web_search',
+        },
+        afterIndex: {
+          type: 'integer',
+          description:
+            'insert after this block index (-1 = document start); omitted = whole document',
+        },
+        replaceDocument: {
+          type: 'boolean',
+          description:
+            'true replaces all existing content (only when the user asked for a rewrite)',
+        },
+      },
+      required: ['plan'],
+    },
+  },
+  {
     name: 'image_search',
     description:
       'Search for images. Returns a list of imageUrl entries; after picking one, insert it into the document with insert_image.',
@@ -205,6 +262,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
       'Read the document properties: the raw YAML frontmatter block at the top of the file (title, tags, date, …), without the --- fences. Write it back with the setFrontmatter op.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
+  MIND_MAP_TOOL,
 ]
 
 // ── executor ──
@@ -316,16 +374,100 @@ async function insertImageFromUrl(
   }
 }
 
+async function writeDocument(
+  editor: Editor,
+  call: AgentToolCall,
+  signal: AbortSignal | undefined,
+  writer: AiDocWriter | undefined,
+): Promise<ToolExecution> {
+  const label = t('aiToolWriteDoc')
+  const plan = String(call.input.plan ?? '').trim()
+  if (!plan) return fail('plan must not be empty', label)
+  if (!writer) return fail('document writing is not available here', label)
+  if (editedExternally(editor)) return fail(STALE_DOC_ERROR, label)
+  const doc = editor.state.doc
+  const afterRaw = call.input.afterIndex
+  let position: WritePosition
+  if (afterRaw !== undefined && afterRaw !== null) {
+    if (!Number.isInteger(afterRaw) || Number(afterRaw) < -1 || Number(afterRaw) >= doc.childCount)
+      return fail(`afterIndex out of range; the document has ${doc.childCount} blocks.`, label)
+    position = { kind: 'after', index: Number(afterRaw) }
+  } else if (isBlankDoc(doc) || call.input.replaceDocument === true) {
+    position = { kind: 'whole' }
+  } else {
+    return fail(
+      'the document is not blank: pass afterIndex to insert the new content after a block, or replaceDocument=true when the user asked to rewrite the whole document',
+      label,
+    )
+  }
+  const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v))
+  const draft = new DraftLanding(editor, position)
+  let result: DocWriteResult
+  let rendered: string | null
+  try {
+    result = await writer.write(
+      { plan, title: str(call.input.title), context: str(call.input.context) },
+      (markdown) => draft.update(markdown),
+      signal,
+    )
+  } finally {
+    rendered = draft.finish()
+  }
+  if (editor.isDestroyed) return fail('the document was closed', label)
+  if (!result.ok || !result.markdown?.trim()) {
+    return fail(
+      `The writer produced nothing (${result.error ?? 'no output'}); the document is unchanged. Tell the user briefly and offer to try again.`,
+      t('aiToolWriteDocFailed'),
+    )
+  }
+  // a kept partial whose tail no longer parses lands what the user saw rendered
+  let parses: boolean
+  try {
+    parses = parseMarkdownToNodes(editor, result.markdown).length > 0
+  } catch {
+    parses = false
+  }
+  const markdown = !parses && result.truncated && rendered ? rendered : result.markdown
+  // an explicit rewrite replaces everything; text the user typed into a formerly blank
+  // document while the draft streamed is kept, the content goes into the draft's slot
+  const op: MdOp =
+    position.kind === 'whole' &&
+    !isBlankDoc(editor.state.doc) &&
+    call.input.replaceDocument === true
+      ? {
+          op: 'replaceBlocks',
+          target: { start: 0, end: editor.state.doc.childCount - 1 },
+          markdown,
+        }
+      : { op: 'insertContent', after: draft.indexBefore(), markdown }
+  const r = runOps(editor, [op], { source: 'ai' })
+  const res = r.results[0]!
+  if (!res.ok) return fail(res.error, t('aiToolWriteDocFailed'))
+  markDocSeen(editor)
+  const note = result.truncated
+    ? ' The stream ended early, so the content is INCOMPLETE (the user chose to keep it): the tail is missing. Say so and offer to finish the missing sections with write_document (afterIndex at the end) or apply_ops insertContent.'
+    : ''
+  return {
+    output: `Content written by the system (${result.markdown.length} chars). ${res.message} ${INDEX_CHANGE_NOTICE}${note}\nReply with one or two sentences describing what was written; do not paste the content.`,
+    mutated: true,
+    summary: result.truncated ? t('aiToolWriteDocPartial') : label,
+  }
+}
+
 export function executeTool(
   editor: Editor,
   call: AgentToolCall,
   signal?: AbortSignal,
   fm?: FrontmatterAccess,
+  writer?: AiDocWriter,
 ): ToolExecution | Promise<ToolExecution> {
   const doc = editor.state.doc
   const maxIndex = doc.childCount - 1
 
   switch (call.name) {
+    case 'write_document':
+      return writeDocument(editor, call, signal, writer)
+
     case 'read_frontmatter': {
       if (!fm) return fail('frontmatter is not available', t('aiToolReadFm'))
       const inner = fm.read()
@@ -425,6 +567,26 @@ export function executeTool(
             done: t('aiToolGenImageDone'),
           })
         })
+    }
+
+    case 'generate_mindmap': {
+      const summary = t('aiToolMindMap')
+      const parsed = parseMindMapTree(call.input, doc.childCount)
+      if (!parsed.ok) return fail(parsed.error, summary)
+      const focus = typeof call.input.focus === 'string' ? call.input.focus.trim() : ''
+      const trimmedNote = parsed.trimmed
+        ? ` (trimmed to the ${MIND_MAP_LIMITS.maxNodes}-node / depth-${MIND_MAP_LIMITS.maxDepth} limit)`
+        : ''
+      return {
+        output:
+          `Mind map rendered as an interactive card in the chat: ${parsed.nodeCount} nodes, depth ${parsed.depth}` +
+          `${focus ? `, focused on "${focus.slice(0, MIND_MAP_LIMITS.maxFocusChars)}"` : ''}${trimmedNote}. ` +
+          'The user can expand branches, click a node to ask about it, jump to the cited block, or export the map. ' +
+          'Do not repeat the map content; reply with one short sentence.',
+        mutated: false,
+        summary,
+        display: { kind: 'mindmap', tree: parsed.tree },
+      }
     }
 
     default:

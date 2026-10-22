@@ -9,6 +9,7 @@ import {
   PAGE_MARK,
   TOTAL_PAGES_MARK,
   type HeaderFooter,
+  type HfImage,
   type HfParagraph,
   type Run,
 } from '@genoffice/docx-engine'
@@ -17,13 +18,32 @@ export const PAGE_TOKEN = '{PAGE}'
 export const TOTAL_TOKEN = '{NUMPAGES}'
 
 /** effective paragraphs: rich paras when present, else the legacy single line */
-export function hfParasOf(value: HeaderFooter): HfParagraph[] {
+export function hfParasOf(value: HeaderFooter, images?: HfImage[] | null): HfParagraph[] {
   if (value.paras?.length) return value.paras
   const runs: Run[] = value.text ? [{ text: value.text }] : []
   if (value.pageNumber && !value.text.includes('#') && !value.text.includes(PAGE_MARK)) {
     runs.push({ text: runs.length > 0 ? ` ${PAGE_MARK}` : PAGE_MARK })
   }
+  // Word reserves exactly the picture height for a picture-only part: no text line
+  if (runs.length === 0 && images?.some((im) => !im.floating)) return []
   return [{ align: 'center', runs }]
+}
+
+/** Pictures are not editable: they leave the text runs and return to the
+ *  same side of the text they came from (a logo before the title stays first). */
+export function hfPictureRuns(runs: Run[]): { leading: Run[]; text: Run[]; trailing: Run[] } {
+  const leading: Run[] = []
+  const text: Run[] = []
+  const trailing: Run[] = []
+  for (const run of runs) {
+    if (run.image) {
+      ;(text.length > 0 ? trailing : leading).push({ ...run, text: '' })
+      if (run.text === '') continue
+    }
+    const { image: _image, ...rest } = run
+    text.push(rest)
+  }
+  return { leading, text, trailing }
 }
 
 /** editable text of the part: one line per text paragraph, field sentinels as tokens */
@@ -54,8 +74,12 @@ export function applyHfText(value: HeaderFooter | null, text: string): HeaderFoo
     textParas.length > 0 ? textParas : [{ align: 'center', runs: [] }]
   const edited: HfParagraph[] = lines.map((line, i) => {
     const template = templates[Math.min(i, templates.length - 1)]
-    const style = template.runs[0] ?? {}
-    return { ...template, runs: line === '' ? [] : [{ ...style, text: line }] }
+    const { leading, text: textRuns, trailing } = hfPictureRuns(template.runs)
+    const style = textRuns[0] ?? {}
+    return {
+      ...template,
+      runs: [...leading, ...(line === '' ? [] : [{ ...style, text: line }]), ...trailing],
+    }
   })
   const nextParas: HfParagraph[] = []
   let ei = 0

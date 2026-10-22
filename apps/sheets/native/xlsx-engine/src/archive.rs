@@ -13,6 +13,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::SidecarError;
+use crate::xml_util::copy_entry_bounded;
 
 const MAX_ENTRY_COUNT: usize = 10_000;
 /// Cap on a single decompressed entry handed to the patching layer. The
@@ -24,7 +25,7 @@ const MAX_ENTRY_COUNT: usize = 10_000;
 // 500 MiB, not 512: the host patches entries as JavaScript strings, and
 // V8's maximum string length is 536,870,888 bytes — an entry between that
 // and 512 MiB would pass a 512 MiB cap and then fail to materialize.
-const MAX_EXTRACTED_ENTRY_BYTES: u64 = 500 * 1024 * 1024;
+pub(crate) const MAX_EXTRACTED_ENTRY_BYTES: u64 = 500 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +74,9 @@ pub fn scan_entries_for_text(
     needle: &str,
 ) -> Result<Vec<String>, SidecarError> {
     if needle.is_empty() {
-        return Err(SidecarError::InvalidRequest("Scan needle must not be empty.".into()));
+        return Err(SidecarError::InvalidRequest(
+            "Scan needle must not be empty.".into(),
+        ));
     }
     let mut archive = open_validated(path)?;
     let mut matches = Vec::new();
@@ -87,10 +90,7 @@ pub fn scan_entries_for_text(
     Ok(matches)
 }
 
-fn entry_text_contains(
-    entry: impl std::io::Read,
-    needle: &str,
-) -> Result<bool, SidecarError> {
+fn entry_text_contains(entry: impl std::io::Read, needle: &str) -> Result<bool, SidecarError> {
     use quick_xml::events::Event;
     // Text runs are searched when the element closes; the tail keeps needle
     // matches alive across the accumulation cap.
@@ -148,18 +148,17 @@ pub fn read_entries_to_dir(
     let mut archive = open_validated(path)?;
     let mut extracted = Vec::with_capacity(names.len());
     for (index, name) in names.iter().enumerate() {
-        let mut entry = crate::zip_entry(&mut archive, name).map_err(|_| {
-            SidecarError::Workbook(format!("Workbook is missing {name}."))
-        })?;
-        if entry.size() > MAX_EXTRACTED_ENTRY_BYTES {
+        let mut entry = crate::zip_entry(&mut archive, name)
+            .map_err(|_| SidecarError::Workbook(format!("Workbook is missing {name}.")))?;
+        let declared = entry.size();
+        if declared > MAX_EXTRACTED_ENTRY_BYTES {
             return Err(SidecarError::Workbook(format!(
-                "Entry {name} is {} bytes uncompressed, above the {MAX_EXTRACTED_ENTRY_BYTES} byte patch limit.",
-                entry.size()
+                "Entry {name} is {declared} bytes uncompressed, above the {MAX_EXTRACTED_ENTRY_BYTES} byte patch limit."
             )));
         }
         let output_path = output_dir.join(format!("entry-{index}.bin"));
         let mut output = BufWriter::new(File::create(&output_path)?);
-        std::io::copy(&mut entry, &mut output)?;
+        copy_entry_bounded(&mut entry, declared, MAX_EXTRACTED_ENTRY_BYTES, &mut output)?;
         output.flush()?;
         extracted.push(ExtractedEntry {
             name: name.clone(),
@@ -176,15 +175,17 @@ pub fn save_archive(
     removals: &[String],
     additions: &[EntryContent],
 ) -> Result<SaveArchiveResult, SidecarError> {
-    if source_path.canonicalize()? == target_path.canonicalize().unwrap_or_default() {
+    if crate::canonicalize(source_path)? == crate::canonicalize(target_path).unwrap_or_default() {
         return Err(SidecarError::InvalidRequest(
             "Save target must differ from the source archive.".into(),
         ));
     }
     let mut archive = open_validated(source_path)?;
     let before_entries = manifest_of(&mut archive)?;
-    let source_names: HashSet<&str> =
-        before_entries.iter().map(|entry| entry.name.as_str()).collect();
+    let source_names: HashSet<&str> = before_entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
     validate_edit_sets(&source_names, replacements, removals, additions)?;
 
     let replacement_by_name: std::collections::HashMap<&str, &EntryContent> = replacements
@@ -292,6 +293,77 @@ fn is_safe_entry_name(name: &str) -> bool {
     !name.is_empty() && canonical_entry_name(name).as_deref() == Some(name)
 }
 
+pub(crate) fn resolve_relationship_target(
+    source_path: &str,
+    target: &str,
+) -> Result<String, SidecarError> {
+    let target = target.trim();
+    let target = target
+        .split_once('#')
+        .map(|(path, _)| path)
+        .unwrap_or(target);
+    let decoded = crate::xml_util::decode_uri_path(target)?;
+    if decoded.is_empty()
+        || decoded.contains('\0')
+        || decoded.starts_with("//")
+        || decoded.starts_with('\\')
+        || has_uri_scheme(&decoded)
+    {
+        return Err(SidecarError::Workbook(
+            "OOXML relationship target is malformed or unsafe.".into(),
+        ));
+    }
+    let source = source_path.replace('\\', "/");
+    let mut parts: Vec<String> = if decoded.starts_with('/') {
+        Vec::new()
+    } else {
+        let mut source_parts: Vec<&str> = source
+            .split('/')
+            .filter(|segment| !segment.is_empty() && *segment != ".")
+            .collect();
+        source_parts.pop();
+        source_parts.into_iter().map(str::to_owned).collect()
+    };
+    for segment in decoded.replace('\\', "/").split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(SidecarError::Workbook(
+                        "OOXML relationship escapes the package.".into(),
+                    ));
+                }
+            }
+            value => parts.push(value.to_owned()),
+        }
+    }
+    if parts.is_empty() {
+        return Err(SidecarError::Workbook(
+            "OOXML relationship target is malformed or unsafe.".into(),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+fn has_uri_scheme(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    for character in characters {
+        if character == ':' {
+            return true;
+        }
+        if !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')) {
+            return false;
+        }
+    }
+    false
+}
+
 /// The package-relative form of a ZIP entry name: '\' separators, a leading
 /// '/', `./` and empty segments are producer quirks Excel tolerates
 /// (genoffice#196 shipped `/xl/workbook.xml`). None only when the name
@@ -356,7 +428,9 @@ fn manifest_of(archive: &mut ZipArchive<File>) -> Result<Vec<ArchiveEntry>, Side
     let names = canonical_names(archive);
     let mut entries = Vec::with_capacity(archive.len());
     for (index, name) in names.into_iter().enumerate() {
-        let Some(name) = name.filter(|name| !name.ends_with('/')) else { continue };
+        let Some(name) = name.filter(|name| !name.ends_with('/')) else {
+            continue;
+        };
         let entry = archive.by_index_raw(index)?;
         entries.push(ArchiveEntry {
             name,
@@ -401,10 +475,22 @@ mod tests {
 
     #[test]
     fn canonical_entry_name_folds_producer_quirks_and_rejects_escapes() {
-        assert_eq!(canonical_entry_name("xl/workbook.xml").as_deref(), Some("xl/workbook.xml"));
-        assert_eq!(canonical_entry_name("/xl/workbook.xml").as_deref(), Some("xl/workbook.xml"));
-        assert_eq!(canonical_entry_name(r"xl\workbook.xml").as_deref(), Some("xl/workbook.xml"));
-        assert_eq!(canonical_entry_name("./xl//a/../workbook.xml").as_deref(), Some("xl/workbook.xml"));
+        assert_eq!(
+            canonical_entry_name("xl/workbook.xml").as_deref(),
+            Some("xl/workbook.xml")
+        );
+        assert_eq!(
+            canonical_entry_name("/xl/workbook.xml").as_deref(),
+            Some("xl/workbook.xml")
+        );
+        assert_eq!(
+            canonical_entry_name(r"xl\workbook.xml").as_deref(),
+            Some("xl/workbook.xml")
+        );
+        assert_eq!(
+            canonical_entry_name("./xl//a/../workbook.xml").as_deref(),
+            Some("xl/workbook.xml")
+        );
         assert_eq!(canonical_entry_name("xl/").as_deref(), Some("xl/"));
         assert_eq!(canonical_entry_name("/").as_deref(), Some(""));
         assert_eq!(canonical_entry_name("../evil.xml"), None);
@@ -431,15 +517,32 @@ mod tests {
 
         let result = save_archive(&source, &target, &[replacement], &[], &[]).unwrap();
 
-        let before: Vec<&str> = result.before_entries.iter().map(|e| e.name.as_str()).collect();
+        let before: Vec<&str> = result
+            .before_entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(before, ["keep/a.xml", "replace/b.xml"]);
-        let after: Vec<&str> = result.after_entries.iter().map(|e| e.name.as_str()).collect();
+        let after: Vec<&str> = result
+            .after_entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(after, ["keep/a.xml", "replace/b.xml"]);
         let mut saved = ZipArchive::new(File::open(&target).unwrap()).unwrap();
         let mut content = String::new();
-        saved.by_name("replace/b.xml").unwrap().read_to_string(&mut content).unwrap();
+        saved
+            .by_name("replace/b.xml")
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         assert_eq!(content, "<b>new</b>");
-        assert_eq!(read_entries_to_dir(&target, &["keep/a.xml".into()], &dir).unwrap().len(), 1);
+        assert_eq!(
+            read_entries_to_dir(&target, &["keep/a.xml".into()], &dir)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -461,9 +564,17 @@ mod tests {
         )
         .unwrap();
 
-        let before: Vec<&str> = result.before_entries.iter().map(|e| e.name.as_str()).collect();
+        let before: Vec<&str> = result
+            .before_entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(before, ["keep/a.xml", "remove/c.xml", "replace/b.xml"]);
-        let after: Vec<&str> = result.after_entries.iter().map(|e| e.name.as_str()).collect();
+        let after: Vec<&str> = result
+            .after_entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
         assert_eq!(after, ["added/d.xml", "keep/a.xml", "replace/b.xml"]);
 
         let untouched_before = result
@@ -497,9 +608,14 @@ mod tests {
 
         let mut duplicate = write_content(&dir, "dup.xml", "<b/>");
         duplicate.name = "replace/b.xml".into();
-        let error =
-            save_archive(&source, &target, &[duplicate], &["replace/b.xml".into()], &[])
-                .unwrap_err();
+        let error = save_archive(
+            &source,
+            &target,
+            &[duplicate],
+            &["replace/b.xml".into()],
+            &[],
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("more than one edit set"));
 
         let mut existing = write_content(&dir, "a.xml", "<a/>");
@@ -553,7 +669,10 @@ mod tests {
         let extracted =
             read_entries_to_dir(&source, &["replace/b.xml".into()], &output_dir).unwrap();
         assert_eq!(extracted.len(), 1);
-        assert_eq!(fs::read_to_string(&extracted[0].path).unwrap(), "<b>old</b>");
+        assert_eq!(
+            fs::read_to_string(&extracted[0].path).unwrap(),
+            "<b>old</b>"
+        );
 
         let error = read_entries_to_dir(&source, &["missing.xml".into()], &output_dir).unwrap_err();
         assert!(error.to_string().contains("missing"));

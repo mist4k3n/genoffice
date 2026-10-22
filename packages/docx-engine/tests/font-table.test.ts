@@ -24,10 +24,16 @@ const FONT_TABLE_PART = {
 }
 
 describe('parseFontTable', () => {
-  it('reads name / altName / panose / family / pitch per entry', () => {
+  it('reads name / altName / panose / charset / family / pitch per entry', () => {
     const entries = parseFontTable(FONT_TABLE_XML)
     expect(entries).toEqual([
-      { name: '원신한 Light', panose: '020B0303000000000000', family: 'modern', pitch: 'variable' },
+      {
+        name: '원신한 Light',
+        panose: '020B0303000000000000',
+        charset: '81',
+        family: 'modern',
+        pitch: 'variable',
+      },
       {
         name: '汉仪旗黑-50简',
         altName: '黑体',
@@ -120,6 +126,26 @@ describe('empty EA slot resolution priority', () => {
     expect(doc.blocks[0].runs![0].font).toBe('맑은 고딕')
   })
 
+  it('Latin slots pointing at the empty EA slot take the same language-default face', async () => {
+    const JPAN_SCRIPT = '<a:font script="Jpan" typeface="\uFF2D\uFF33 \u660E\u671D"/>'
+    const para =
+      '<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorEastAsia" w:eastAsiaTheme="minorEastAsia" w:hAnsiTheme="minorEastAsia"/></w:rPr>' +
+      '<w:t>\u65E5\u6642\uFF1A2026/09/07</w:t></w:r></w:p>'
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml: para,
+        extraParts: [themePart(JPAN_SCRIPT), settingsPart('ja-JP')],
+      }),
+    )
+    const run = doc.blocks[0].runs![0]
+    expect(run.font).toBe('\uFF2D\uFF33 \u660E\u671D')
+    expect(run.fontAscii).toBe('\uFF2D\uFF33 \u660E\u671D')
+    expect(run.themeRFonts).toEqual({
+      font: '\uFF2D\uFF33 \u660E\u671D',
+      fontAscii: '\uFF2D\uFF33 \u660E\u671D',
+    })
+  })
+
   it('themeFontLang outranks a stale docDefaults w:lang backfill', async () => {
     const doc = await withDocDefaults(`${RFONTS}<w:lang w:val="en-US" w:eastAsia="zh-CN"/>`, [
       themePart(HANG_SCRIPT),
@@ -143,6 +169,17 @@ describe('empty EA slot resolution priority', () => {
     ])
     expect(doc.docDefaults?.eastAsiaFont).toBe('SimSun')
     expect(doc.docDefaults?.eaFromLang).toBe(true)
+  })
+
+  it('a theme EA slot reference is flagged even when it stays unresolved', async () => {
+    const doc = await withDocDefaults(`${RFONTS}<w:lang w:val="en-US" w:eastAsia="en-US"/>`, [
+      themePart(''),
+      settingsPart('ja-JP'),
+    ])
+    expect(doc.docDefaults?.eastAsiaFont).toBeUndefined()
+    expect(doc.docDefaults?.eaThemeSlot).toBe(true)
+    const literal = await withDocDefaults('<w:rFonts w:eastAsia="Noto Sans CJK KR"/>', [])
+    expect(literal.docDefaults?.eaThemeSlot).toBeUndefined()
   })
 
   it('a literal declared EA face is not flagged as a lang backfill', async () => {

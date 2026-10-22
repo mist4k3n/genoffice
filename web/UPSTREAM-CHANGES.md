@@ -17,7 +17,11 @@ has to write down, which is the point.
 
 ## Change 1 — the host bridge is per editor instance
 
-**Files:** 23 (one new, 22 modified), all under `apps/sheets/src/renderer/`.
+**Files:** 34 (one new, 33 modified), all under `apps/sheets/src/renderer/`.
+Eleven of those arrived with the 2026-10 upstream merge, which added six new
+modules that read the global (`workbook-media.ts`, `mcp-bridge.ts`,
+`sidecar-find.ts`, `outline-actions.ts`, `cell-context-menu.ts`,
+`visual-arrange-actions.ts`) and new call sites in five we already carried.
 **Baseline:** upstream `d2b898f`.
 
 ### Why
@@ -45,7 +49,7 @@ Three approaches were tried before changing upstream:
 2. **Serialise editor start-up so each owns the global while initialising.**
    Helps mounting, does nothing for the calls that matter, which all happen
    afterwards.
-3. **An iframe per editor.** This *does* work — verified — because a frame has
+3. **An iframe per editor.** This _does_ work — verified — because a frame has
    its own realm and therefore its own globals. It was rejected in favour of the
    in-page component: Papan embeds editors as React components, its SPA ships
    `frame-ancestors 'none'`, and each frame would carry another copy of the
@@ -77,18 +81,18 @@ then fixed by handing each editor its own runtime.
 **The 80 call sites resolve the bridge three ways**, matching how the renderer is
 already written — no new plumbing was invented:
 
-| Where | How | Files |
-| --- | --- | --- |
-| Inside `App` | `hostApi`, a local const | 1 |
-| Modules given per-instance state | `state.api` on `LazyWorkbookState` | 9 |
-| React components | `useHostApi()` | 5 |
-| Context objects | `deps.api`, `ctx.api` | 4 |
-| AI skill factories | an `api` first parameter | 4 |
+| Where                            | How                                | Files |
+| -------------------------------- | ---------------------------------- | ----- |
+| Inside `App`                     | `hostApi`, a local const           | 1     |
+| Modules given per-instance state | `state.api` on `LazyWorkbookState` | 9     |
+| React components                 | `useHostApi()`                     | 5     |
+| Context objects                  | `deps.api`, `ctx.api`              | 4     |
+| AI skill factories               | an `api` first parameter           | 4     |
 
 `LazyWorkbookState` gaining one field is what kept this small: it is already
 threaded through most of the renderer, so nine files needed a one-token change.
 
-### What did *not* change
+### What did _not_ change
 
 - **No behaviour changes on the desktop.** Every entry point defaults to
   `window.desktopApi`; the Electron app takes exactly the path it took before.
@@ -114,7 +118,7 @@ neighbours do — the table above says which. **`npm run typecheck` catches a
 missed site**, because `DesktopApi` is not implicitly available anywhere it was
 threaded away.
 
-The one thing typecheck cannot catch is a *new* `window.desktopApi` read
+The one thing typecheck cannot catch is a _new_ `window.desktopApi` read
 upstream adds in a file we never touched. `npm run check:host-global` fails on
 those.
 
@@ -141,7 +145,7 @@ fine for one App. Two Apps on one page produce two elements with one id, and
 every `getElementById` returns the first — so one of the two grids is styled
 and driven through the other's container while looking completely normal.
 
-`web/src/embed/singletons.ts` used to work around this by *owning* the id:
+`web/src/embed/singletons.ts` used to work around this by _owning_ the id:
 exactly one editor held it, and it was renamed off the others as ownership
 moved. That worked, and it was a hack on live DOM that had already needed a
 second mechanism (start-up serialisation) to stop two editors claiming it in
@@ -152,7 +156,7 @@ one React commit.
 `univer-state.ts` gains `nextGridContainerId()`, a counter. `App` takes one id
 per instance and passes it to `ExcelShell`, to the Univer preset, to the
 formula-bar toggle and to shape draw. Styling and the keyboard predicate key
-off a new `data-univer-grid` attribute instead, because they want *a* grid
+off a new `data-univer-grid` attribute instead, because they want _a_ grid
 rather than a particular one — `clear-selection-keyboard.ts` keeps `#univer-container`
 in its selector group so its upstream test passes unmodified.
 
@@ -170,7 +174,7 @@ univer-doc-selection-container-__INTERNAL_EDITOR__DOCS_NORMAL ×3
 univer-sheet-main-canvas_file-<sha>                        ×3
 ```
 
-Nothing outside Univer can rename those. Several editors *mounted* with one
+Nothing outside Univer can rename those. Several editors _mounted_ with one
 visible at a time — a tab bar, which is Papan's shape — works, and is what this
 change makes structurally sound rather than a DOM trick. A genuinely
 side-by-side view needs a separate realm, which means an iframe; see
@@ -186,7 +190,7 @@ The same routine as Change 1. A conflict here is upstream adding another
 
 ## Change 3 — upstream's tests build the state the app builds
 
-**Files:** 10 under `apps/sheets/tests/`.
+**Files:** 21 under `apps/sheets/tests/`.
 
 Not a feature: these are the repairs Change 1 owed. The tests construct
 `LazyWorkbookState` with `as unknown as LazyWorkbookState`, so the host bridge
@@ -196,8 +200,17 @@ now supply `api` the way `App` does, through a getter, because several install
 their stub after building the state and some run with no `window` at all.
 
 `npm run check:upstream` compiles `apps/sheets` and runs its suite, so the next
-change to these modules cannot break them quietly. One failure is allowed and
-listed in `upstream-changes.json`: it fails at the baseline commit too.
+change to these modules cannot break them quietly. The allowance list is now
+empty: the CSV delimiter-sniffing failure it used to carry was fixed upstream
+in the 2026-10 merge, and the check fails if a listed test starts passing.
+
+That merge made the point again, and at the same scale. Upstream added eleven
+test files that build `LazyWorkbookState` by hand -- find, sidecar-session
+recovery, outline polling, the save/reopen paths -- and 34 of their assertions
+failed the moment the bridge became per instance, every one of them looking
+like a product bug. They now supply `api` through the same getter the first ten
+use. Two more (`mcp-bridge-ops`, `mcp-sheet-refs`) hand the bridge to
+`installSheetsMcpBridge`, which takes it as an argument for the same reason.
 
 ---
 
@@ -232,7 +245,7 @@ follows it, so nesting a dark editor inside a light page still resolves.
 **2. Univer's `darkMode` resolves from the grid container, not from `<html>`.**
 `App.tsx` mirrored `<html data-theme>` into Univer's own dark flag, because the
 grid is painted on canvas and cannot follow CSS tokens. Embedded, that read the
-*host's* theme: dark chrome over a light grid. `isDarkTheme()` now starts at
+_host's_ theme: dark chrome over a light grid. `isDarkTheme()` now starts at
 this instance's `gridContainerId` and walks up to the nearest `[data-theme]`
 ancestor. On the desktop that ancestor is `<html>`, so the behaviour is
 unchanged; in the browser it is the editor's own container.
@@ -241,6 +254,19 @@ unchanged; in the browser it is the editor's own container.
 A new `stampDocumentLang` prop, defaulting to `true`, so `main.tsx` is
 untouched. The embedder passes `false` and puts the tag on its own container,
 where it still drives `:lang()` and Chromium's per-language font fallback.
+
+Since the 2026-10 merge that prop also covers `<html dir>`, which upstream
+began stamping when Arabic and Hebrew arrived. Both attributes belong to the
+same element and the same bargain, so they sit behind the same switch, and the
+embed carries `dir` on its container beside `lang`. The grid itself stays LTR
+under an RTL interface — upstream's own rule, which Univer reads through
+`ctx.direction`.
+
+**The dark _page_ is scoped the same way as the theme.** `data-doc-theme`
+(Sheets' display-time remap, not a document edit) arrived upstream after this
+change landed and was read off `document.documentElement`. `isDarkTheme()` now
+resolves it from the grid container upward, exactly as it does `data-theme`, so
+two editors on one page can disagree about it.
 
 ### What this makes possible, in `web/`
 
@@ -257,7 +283,7 @@ upstream keys its dictionaries by a shorter code; `normalizeLang` — upstream's
 own function — does the mapping, so all four of Papan's locales land on a real
 dictionary and an unknown tag falls back to English instead of rendering keys.
 
-### What did *not* change
+### What did _not_ change
 
 `'dim'`. Papan's switcher offers light / dim / dark; upstream has no dim
 palette, and a dim palette is twenty-odd colour decisions belonging to whoever
@@ -265,16 +291,20 @@ owns the design, not a shade this package can derive. The embed accepts `dim`
 and resolves it to dark. If a real one lands it is a third block in
 `tokens.css` and one more case in `web/src/embed/theme.ts`.
 
-`dir`. `ar` and `he` are supported languages and nothing upstream sets
-`dir="rtl"` for them. That is upstream's gap, not one this change introduces,
-and fixing it is not a scoping question.
+`dir` was listed here as upstream's gap — `ar` and `he` were supported
+languages and nothing set `dir="rtl"` for them. Upstream closed it in 2026-10,
+so the gap is gone and the attribute is scoped like `lang`; see point 3.
 
 ### Rebasing
 
 The `tokens.css` hunk is a two-line selector and will conflict only if upstream
-restructures the file; keep `[data-theme='light']` beside `:root`. The
-`App.tsx` hunk conflicts if upstream touches `isDarkTheme`; keep the walk up
-from `gridContainerId`. The `locale.tsx` hunk is additive.
+restructures the file; keep `[data-theme='light']` beside `:root`, and let
+whatever upstream has added inside the block come with it. The `App.tsx` hunk
+conflicts whenever upstream touches `isDarkTheme` — it did in 2026-10, adding
+`data-doc-theme` — and the resolution is always the same: keep the walk up from
+`gridContainerId` and apply it to any new attribute as well. The `locale.tsx`
+hunk is additive, but a new `document.documentElement` write upstream adds
+beside `lang` belongs inside `stampDocumentLang`, not outside it.
 
 ---
 
@@ -298,8 +328,8 @@ of `canceled` was "the user dismissed the dialog", so the status bar said
 
 Upstream had already drawn this distinction once. The `canceled: true` branch
 of `workbookSaveResultSchema` carries `csvSaveAsPath`, and `save-actions.ts`
-treats it as *"no xlsx was written … the journal stays pending; the session
-keeps its identity (a copy semantics)"*. This is that shape a second time:
+treats it as _"no xlsx was written … the journal stays pending; the session
+keeps its identity (a copy semantics)"_. This is that shape a second time:
 
 - `copyName?: string` beside `csvSaveAsPath` in the canceled branch, documented
   as never set by the desktop shell.
@@ -356,8 +386,8 @@ app. It is threaded to `ExcelShell` as `aiEnabled` and gates every AI entry
 point, not just the panel:
 
 - the `AiChatPanel` mount,
-- the Home ribbon's **AI Assistant** group (the assistant button, *Check*,
-  *Analyze*),
+- the Home ribbon's **AI Assistant** group (the assistant button, _Check_,
+  _Analyze_),
 - the Review ribbon's **Language** group — Translate is an AI prompt behind a
   ribbon button, so it goes with the rest,
 - the prompt that appears after a drag-selection (`AiSelectionAsk`),

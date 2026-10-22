@@ -7,7 +7,11 @@
  */
 import type { WorkbookFile, WorkbookFilterState } from '../shared/desktop-api'
 import {
+  carryLateJournalCells,
   isSheetRemoved,
+  journalSize,
+  snapshotJournalCells,
+  type JournalCellSnapshot,
   toSaveChartEdits,
   toSaveBulkConstantFills,
   toSaveEdits,
@@ -18,10 +22,19 @@ import {
   toSaveSparklineAdds,
   toSaveStructuralOps,
   toSaveTableAdds,
+  toSaveTableEdits,
   toSaveVisualAdds,
   toSaveVisualEdits,
+  toSaveCellImageAdds,
 } from './edit-journal'
-import { activeCsvSheet, handleExportCsv, serializeActiveSheetCsv } from './csv-export'
+import {
+  activeCsvSheet,
+  cellPatternLookup,
+  handleExportCsv,
+  serializeActiveSheetCsv,
+} from './csv-export'
+import type { CellState } from '@genoffice/xlsx-gateway/domain/workbook.types'
+import { verifiedFormulaValues } from './formula-values'
 import { t } from './i18n/locale'
 import { abortStagedEditsTransfer, stageEditsForSave, type StagedEdits } from './save-edits-staging'
 import { showToast } from './toast-bus'
@@ -41,7 +54,16 @@ export interface SaveContext {
   univerRef: { readonly current: UniverRuntime | null }
   lazyWorkbookRef: { readonly current: LazyWorkbookState | null }
   setMessage: (message: string) => void
-  openLazyWorkbook: (opened: WorkbookFile) => void
+  /** `continueChat`: the reopen is a session swap over the same document, so
+      the AI conversation carries on rather than rehydrating from the store. */
+  openLazyWorkbook: (
+    opened: WorkbookFile,
+    opts?: { continueChat?: boolean; onInitialRangeLoaded?: () => void },
+  ) => void | Promise<boolean>
+  /** pending-edit badge; the reopen resets it to 0 before late edits are carried over */
+  setPendingEdits?: (count: number) => void
+  /** live cell readout, for the cached values of formulas an MCP batch wrote (optional in tests) */
+  readCells?: (addresses: string[], sheetId: string) => Record<string, CellState>
   /** Saving swaps the session and reinstalls the workbook, which resets the
       view to the first sheet's A1 — stash where the user was so the
       reinstall lands there instead. `viewRow`/`viewColumn` is the viewport's
@@ -62,16 +84,30 @@ export interface SaveContext {
 /// "Continue as CSV" — asked once per file, like modern Excel's banner.
 const confirmedCsvSaves = new Set<string>()
 
+/** What a save actually did — the MCP bridge needs the outcome, fire-and-forget callers ignore it. */
+export interface SaveOutcome {
+  ok: boolean
+  /** absolute path of the written file when ok */
+  path?: string
+  /** the main-process refusal, verbatim, when the save request itself failed */
+  error?: string
+}
+
 /**
  * mode 'recovery': assemble the very same payload but hand it to the
  * crash-recovery writer instead of the save pipeline — no dialogs, no status
  * messages, no session swap, the opened file untouched.
+ *
+ * explicitTarget: MCP save_sheet — a dialog-free Save As to an exact path
+ * (main enforces the overwrite policy; the request carries it). Callers pass
+ * mode 'save-as' with it.
  */
 export async function handleSave(
   ctx: SaveContext,
   mode: 'save' | 'save-as' | 'recovery',
   quiet = false,
-): Promise<void> {
+  explicitTarget?: { path: string; overwrite: boolean },
+): Promise<SaveOutcome> {
   const state = ctx.lazyWorkbookRef.current
   // Captured at save start (the Ctrl+S moment): the post-save session swap
   // reinstalls the workbook and would otherwise bounce the view to A1.
@@ -106,15 +142,18 @@ export async function handleSave(
   })()
   if (!state) {
     if (mode !== 'recovery') ctx.setMessage(t('appDemoNoSave'))
-    return
+    return { ok: false }
   }
   const edits = toSaveEdits(state.editJournal)
+  const cellsAtSave = snapshotJournalCells(state.editJournal)
   const bulkConstantFills = toSaveBulkConstantFills(state.editJournal)
   const structuralOps = toSaveStructuralOps(state.editJournal)
   const chartEdits = toSaveChartEdits(state.editJournal)
   const visualEdits = toSaveVisualEdits(state.editJournal)
   const visualAdditions = toSaveVisualAdds(state.editJournal)
+  const cellImageAdditions = toSaveCellImageAdds(state.editJournal)
   const tableAdditions = toSaveTableAdds(state.editJournal)
+  const tableEdits = toSaveTableEdits(state.editJournal)
   const pivotAdditions = toSavePivotAdds(state.editJournal)
   const sparklineAdditions = toSaveSparklineAdds(state.editJournal)
   const sheetOps = toSaveSheetOps(state.editJournal)
@@ -126,13 +165,19 @@ export async function handleSave(
     const failed = error instanceof Error ? error.message : t('appFilterSnapshotFailed')
     ctx.setMessage(failed)
     if (mode !== 'recovery' && !quiet) showToast(failed, 'error')
-    return
+    return { ok: false }
   }
   const cfStates = collectCfStates(ctx.univerRef.current, state)
   const dvStates = collectDvStates(ctx.univerRef.current, state)
   const sheetProtections = [...state.editJournal.sheetProtection]
     .filter(([sheetId]) => !isSheetRemoved(state.editJournal, sheetId))
-    .map(([sheetId, isProtected]) => ({ sheetId, protected: isProtected }))
+    .map(([sheetId, desired]) => ({
+      sheetId,
+      protected: desired.protected,
+      allow: desired.allow,
+      password: desired.password,
+      verified: true,
+    }))
   const pageSetupStates = toSavePageSetupStates(state.editJournal)
   const noteStates = collectNoteStates(ctx.univerRef.current, state)
   const pivotCacheRefreshPaths = [...state.editJournal.pivotCacheRefresh]
@@ -176,8 +221,13 @@ export async function handleSave(
   // separately so the save refreshes each formula cell's cached <v>, keeping its <f>.
   // A journaled formula is excluded: the overlay may still hold the previous
   // formula's result when the user saves immediately after entering a replacement.
-  const formulaValues = [...(state.recalc?.overlay ?? [])].flatMap(([sheetId, cells]) =>
-    isSheetRemoved(state.editJournal, sheetId)
+  // A sheet whose run kept any cached value is excluded wholesale: the engine
+  // evaluated an incomplete model there, so a dependent of the gap may carry a
+  // clean wrong value (IFERROR over an unsupported precedent collapses to its
+  // literal); the file's own cached results stay, and fullCalcOnLoad already
+  // asks Excel to recalculate the session's edits on open.
+  const overlayValues = [...(state.recalc?.overlay ?? [])].flatMap(([sheetId, cells]) =>
+    isSheetRemoved(state.editJournal, sheetId) || state.recalc?.incompleteRuns?.has(sheetId)
       ? []
       : [...cells].flatMap(([key, cell]) => {
           // #ERROR! is IronCalc's own failure, never a value Excel would cache.
@@ -185,9 +235,14 @@ export async function handleSave(
           if (state.editJournal.cells.get(sheetId)?.get(key)?.formula !== undefined) return []
           const [row, column] = key.split(':').map(Number)
           if (row === undefined || column === undefined) return []
-          return [{ sheetId, row, column, value: cell.v }]
+          const value = cell.isError && typeof cell.v === 'string' ? { error: cell.v } : cell.v
+          return [{ sheetId, row, column, value }]
         }),
   )
+  // Journaled formulas an MCP batch saw settle (see formula-values.ts) were left
+  // out above because the overlay could be stale; their values are read live here.
+  const journaledValues = ctx.readCells ? verifiedFormulaValues(ctx.readCells) : []
+  const formulaValues = [...overlayValues, ...journaledValues]
   // The gateway fails closed when these additions ride with structural or
   // sheet changes (their coordinates entangle). Instead of bouncing the
   // user, hold them back and save in two sequential phases: structure
@@ -195,23 +250,33 @@ export async function handleSave(
   // sheet ids are stable across saves (`sheet-<sheetId attr>`), so the
   // held ops stay addressable — ops on sheets created this session are
   // the exception and keep the explicit error.
-  const hasShifts = structuralOps.length > 0 || sheetOps.length > 0
+  const sheetStructureOps = sheetOps.filter((op) => op.kind !== 'set-sheet-tab-color')
+  const hasShifts = structuralOps.length > 0 || sheetStructureOps.length > 0
   const heldPivots = hasShifts ? pivotAdditions : []
   const heldTables = structuralOps.length > 0 ? tableAdditions : []
+  // Only resizes pin coordinates; renames and style flags ride phase one.
+  const heldTableEdits =
+    structuralOps.length > 0 ? tableEdits.filter((edit) => edit.area !== undefined) : []
+  const phaseOneTableEdits = tableEdits.filter((edit) => !heldTableEdits.includes(edit))
   const heldNames = hasShifts ? definedNamesState : null
-  const splitSave = heldPivots.length > 0 || heldTables.length > 0 || heldNames !== null
+  const splitSave =
+    heldPivots.length > 0 ||
+    heldTables.length > 0 ||
+    heldTableEdits.length > 0 ||
+    heldNames !== null
   if (splitSave) {
     const addedSheetIds = state.editJournal.sheets.added
     const strandedHeld = [
       ...heldPivots.flatMap((pivot) => [pivot.sheetId, pivot.sourceSheetId]),
       ...heldTables.map((table) => table.sheetId),
+      ...heldTableEdits.map((edit) => edit.sheetId),
     ].some((sheetId) => addedSheetIds.has(sheetId))
     if (strandedHeld) {
       if (mode !== 'recovery') {
         ctx.setMessage(t('appSaveHeldStranded'))
         if (!quiet) showToast(t('appSaveHeldStranded'), 'error')
       }
-      return
+      return { ok: false }
     }
   }
   const total =
@@ -233,17 +298,22 @@ export async function handleSave(
     (themeState === null ? 0 : 1) +
     protectedRangeStates.length +
     visualAdditions.length +
+    cellImageAdditions.length +
     visualEdits.length +
     tableAdditions.length +
+    tableEdits.length +
     pivotAdditions.length +
     sparklineAdditions.length
   // A restored crash-recovery session carries its changes in the workbook
   // bytes themselves, not the journal: a plain Save with nothing pending must
   // still write back to the original file (and clear the recovery copy).
   const restoreWriteBack = mode === 'save' && state.file.restoredFromRecovery === true
-  if (total === 0 && mode !== 'save-as' && !restoreWriteBack) {
+  // An unsaved new workbook's Save is its first Save As, journal or not: a
+  // quiet AutoSave may already have moved the work into the backing file.
+  const firstSaveAs = mode === 'save' && state.file.unsavedNew === true && !quiet
+  if (total === 0 && mode !== 'save-as' && !restoreWriteBack && !firstSaveAs) {
     if (mode !== 'recovery') ctx.setMessage(t('appNoEditsToSave'))
-    return
+    return { ok: false }
   }
   // CSV session: Save keeps the CSV identity — Excel's "keep this format?"
   // question once per file, then the active sheet rides the save request as
@@ -260,27 +330,34 @@ export async function handleSave(
       const choice = await state.api.confirmCsvSave()
       if (choice === 'cancel') {
         ctx.setMessage(t('appSaveCanceled'))
-        return
+        return { ok: false }
       }
       if (choice === 'xlsx') {
-        await handleSave(ctx, 'save-as', quiet)
-        return
+        return await handleSave(ctx, 'save-as', quiet, explicitTarget)
       }
       if (state.flags.preloadComplete) confirmedCsvSaves.add(csvPath)
     }
     if (!state.flags.preloadComplete) {
       ctx.setMessage(t('appCsvExportNeedsFullLoad'))
-      return
+      return { ok: false }
     }
     const active = activeCsvSheet(ctx.univerRef.current)
-    const serialized = active === null ? null : serializeActiveSheetCsv(active.sheet, state)
+    const runtime = ctx.univerRef.current
+    const serialized =
+      active === null || runtime === null
+        ? null
+        : serializeActiveSheetCsv(
+            active.sheet,
+            state,
+            cellPatternLookup(runtime, active.sheet.getSheetId(), state.file.date1904 === true),
+          )
     if (serialized === 'too-large') {
       ctx.setMessage(t('appCsvExportTooLarge'))
-      return
+      return { ok: false }
     }
     if (serialized === null) {
       ctx.setMessage(t('appSaveFailed'))
-      return
+      return { ok: false }
     }
     csvContent = serialized
   }
@@ -298,7 +375,7 @@ export async function handleSave(
       ctx.setMessage(t('appSheetOrderReadFailed'))
       if (!quiet) showToast(t('appSheetOrderReadFailed'), 'error')
     }
-    return
+    return { ok: false }
   }
   // Edit sets above the inline IPC cap are uploaded to the main process in
   // chunks first; the request then references the transfer instead.
@@ -306,16 +383,21 @@ export async function handleSave(
   try {
     staged = await stageEditsForSave(state.api, state.file.sessionId, edits)
   } catch (error: unknown) {
-    if (mode === 'recovery') return
+    if (mode === 'recovery') return { ok: false }
     const message = stripIpcErrorWrapper(error instanceof Error ? error.message : '')
     const failed = message || t('appSaveFailed')
     ctx.setMessage(failed)
     if (!quiet) showToast(failed, 'error')
-    return
+    return { ok: false }
   }
   const payload = {
     sessionId: state.file.sessionId,
     mode: mode === 'recovery' ? ('save' as const) : mode,
+    // MCP explicit-path save: main skips the Save-As dialog and enforces the
+    // overwrite policy from these two fields
+    ...(explicitTarget
+      ? { targetPath: explicitTarget.path, overwrite: explicitTarget.overwrite }
+      : {}),
     edits: staged.edits,
     bulkConstantFills,
     ...(staged.editsTransferId === undefined ? {} : { editsTransferId: staged.editsTransferId }),
@@ -323,7 +405,9 @@ export async function handleSave(
     chartEdits,
     visualEdits,
     visualAdditions,
+    cellImageAdditions,
     tableAdditions,
+    tableEdits,
     pivotAdditions,
     sheetOps,
     sheetOrder,
@@ -346,15 +430,11 @@ export async function handleSave(
   if (mode === 'recovery') {
     // Best-effort; a failure only means this tick's copy is skipped — but an
     // unconsumed transfer must not sit in main-process memory until expiry.
-    await state.api.writeWorkbookRecovery(payload).catch(async () => {
-      await abortStagedEditsTransfer(
-        state.api,
-        state.file.sessionId,
-        staged.editsTransferId,
-      )
+    const written = await state.api.writeWorkbookRecovery(payload).catch(async () => {
+      await abortStagedEditsTransfer(state.api, state.file.sessionId, staged.editsTransferId)
       return { ok: false }
     })
-    return
+    return { ok: written.ok === true }
   }
   try {
     ctx.setMessage(t('appSavingEdits', { count: total }))
@@ -362,7 +442,12 @@ export async function handleSave(
       sessionId: state.file.sessionId,
       mode,
       ...(restoreWriteBack ? { restoreWriteBack: true } : {}),
+      ...(quiet ? { quiet: true } : {}),
       ...(csvContent === undefined ? {} : { csvContent }),
+      // MCP explicit-path save: main skips the Save-As dialog for these
+      ...(explicitTarget
+        ? { targetPath: explicitTarget.path, overwrite: explicitTarget.overwrite }
+        : {}),
       edits: staged.edits,
       bulkConstantFills,
       ...(staged.editsTransferId === undefined ? {} : { editsTransferId: staged.editsTransferId }),
@@ -370,7 +455,9 @@ export async function handleSave(
       chartEdits,
       visualEdits,
       visualAdditions,
+      cellImageAdditions,
       tableAdditions: splitSave && heldTables.length > 0 ? [] : tableAdditions,
+      tableEdits: phaseOneTableEdits,
       pivotAdditions: splitSave && heldPivots.length > 0 ? [] : pivotAdditions,
       sheetOps,
       sheetOrder,
@@ -390,7 +477,7 @@ export async function handleSave(
       workbookProtectionState,
       protectedRangeStates,
     })
-    if (ctx.lazyWorkbookRef.current !== state) return
+    if (ctx.lazyWorkbookRef.current !== state) return { ok: false }
     if (result.canceled) {
       if (result.csvSaveAsPath !== undefined) {
         // The user picked CSV in the Save As dialog: no xlsx was written —
@@ -405,7 +492,7 @@ export async function handleSave(
           },
           result.csvSaveAsPath,
         )
-        return
+        return { ok: false }
       }
       if (result.copyName !== undefined) {
         // A copy left the editor: same semantics as the CSV branch above --
@@ -416,10 +503,15 @@ export async function handleSave(
         const exported = t('appExportedCopy', { name: result.copyName })
         ctx.setMessage(exported)
         if (!quiet) showToast(exported)
-        return
+        // No version was written for *this* document -- the journal stays
+        // pending and the session keeps its identity -- so the outcome is the
+        // same `ok: false` the cancel branch below returns. What Change 5
+        // fixed was the message, not the outcome: the copy succeeded, and
+        // calling that a cancellation is what was wrong.
+        return { ok: false }
       }
       ctx.setMessage(t('appSaveCanceled'))
-      return
+      return { ok: false }
     }
     if (!splitSave) {
       // Cross-save undo: carry the Univer undo stack over the session swap.
@@ -429,16 +521,18 @@ export async function handleSave(
       // pending stash means the previous reopen has not finished its undo
       // bookkeeping, so the stack is not capturable yet either.
       stashUndoCarry(
-        sheetOps.length === 0 && !hasPendingUndoCarry()
+        sheetStructureOps.length === 0 && !hasPendingUndoCarry()
           ? captureUndoCarry(ctx.univerRef.current, result.file.sha256)
           : null,
       )
       ctx.stashViewRestore(viewAtSave)
-      ctx.openLazyWorkbook(result.file)
+      if (!(await reopenCarryingLateEdits(ctx, state, cellsAtSave, result.file))) {
+        return { ok: false }
+      }
       const saved = t('appSaved')
       ctx.setMessage(saved)
       if (!quiet) showToast(saved)
-      return
+      return { ok: true, ...(result.file.path !== undefined ? { path: result.file.path } : {}) }
     }
     // Two-phase saves reopen twice with structural entanglement; v1 does not
     // carry undo history across them (and clears any stale stash).
@@ -447,13 +541,18 @@ export async function handleSave(
       const second = await state.api.saveWorkbookEdits({
         sessionId: result.file.sessionId,
         mode: 'save',
+        // an unsaved new workbook's quiet save writes its backing file in
+        // place; without the flag the second phase would open Save As
+        ...(quiet ? { quiet: true } : {}),
         edits: [],
         bulkConstantFills: [],
         structuralOps: [],
         chartEdits: [],
         visualEdits: [],
         visualAdditions: [],
+        cellImageAdditions: [],
         tableAdditions: heldTables,
+        tableEdits: heldTableEdits,
         pivotAdditions: heldPivots,
         sheetOps: [],
         sheetOrder: [],
@@ -474,27 +573,35 @@ export async function handleSave(
         workbookProtectionState: null,
         protectedRangeStates: [],
       })
-      if (ctx.lazyWorkbookRef.current !== state) return
+      if (ctx.lazyWorkbookRef.current !== state) return { ok: false }
       if (second.canceled) {
         ctx.stashViewRestore(viewAtSave)
-        ctx.openLazyWorkbook(result.file)
+        if (!(await reopenCarryingLateEdits(ctx, state, cellsAtSave, result.file))) {
+          return { ok: false }
+        }
         ctx.setMessage(t('appSaveSecondCanceled'))
-        return
+        return { ok: false }
       }
       ctx.stashViewRestore(viewAtSave)
-      ctx.openLazyWorkbook(second.file)
+      if (!(await reopenCarryingLateEdits(ctx, state, cellsAtSave, second.file))) {
+        return { ok: false }
+      }
       const saved = t('appSavedTwoPhase')
       ctx.setMessage(saved)
       if (!quiet) showToast(saved)
+      return { ok: true, ...(second.file.path !== undefined ? { path: second.file.path } : {}) }
     } catch (error: unknown) {
-      if (ctx.lazyWorkbookRef.current !== state) return
+      if (ctx.lazyWorkbookRef.current !== state) return { ok: false }
       ctx.stashViewRestore(viewAtSave)
-      ctx.openLazyWorkbook(result.file)
+      if (!(await reopenCarryingLateEdits(ctx, state, cellsAtSave, result.file))) {
+        return { ok: false }
+      }
       const failed = t('appSaveSecondFailed', {
         reason: error instanceof Error ? error.message : String(error),
       })
       ctx.setMessage(failed)
       if (!quiet) showToast(failed, 'error')
+      return { ok: false }
     }
   } catch (error: unknown) {
     // The save may have failed before consuming the chunked transfer (e.g.
@@ -504,7 +611,26 @@ export async function handleSave(
     const failed = localizeSaveError(message) ?? (message || t('appSaveFailed'))
     ctx.setMessage(failed)
     if (!quiet) showToast(failed, 'error')
+    return { ok: false, error: message || failed }
   }
+}
+
+/// Cells edited while the save IPC was in flight were not in the request;
+/// the swapped-in session must keep them pending (and show them: range
+/// installs overlay the journal) or the reopen silently drops them.
+async function reopenCarryingLateEdits(
+  ctx: SaveContext,
+  state: LazyWorkbookState,
+  cellsAtSave: JournalCellSnapshot,
+  file: WorkbookFile,
+): Promise<boolean> {
+  if ((await ctx.openLazyWorkbook(file, { continueChat: true })) === false) return false
+  const next = ctx.lazyWorkbookRef.current
+  if (!next || next === state) return true
+  if (carryLateJournalCells(state.editJournal, cellsAtSave, next.editJournal) > 0) {
+    ctx.setPendingEdits?.(journalSize(next.editJournal))
+  }
+  return true
 }
 
 /// Errors thrown by main-process handlers arrive wrapped as

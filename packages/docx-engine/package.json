@@ -8,7 +8,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./math": "./src/math.ts",
-    "./metafile": "./src/metafile.ts"
+    "./metafile": "./src/metafile.ts",
+    "./zip-splice": "./src/zip-splice.ts",
+    "./lazy-media": "./src/lazy-media.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -18,14 +20,16 @@
   },
   "dependencies": {
     "@genoffice/pptx-engine": "*",
+    "@genoffice/zip-gate": "*",
     "fast-xml-parser": "^5.3.4",
     "jszip": "^3.10.1",
-    "utif2": "^4.1.0"
+    "utif2": "^4.1.0",
+    "@genoffice/agent-core": "*"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   }
 }

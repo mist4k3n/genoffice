@@ -52,6 +52,7 @@ import type {
   TableBlock,
   TextBlock,
 } from '../ir'
+import { pageAnchorName } from '../ir'
 import type { UnicodeScript } from '../script'
 import { isEastAsianScript, isNoSpaceScript } from '../script'
 
@@ -172,8 +173,14 @@ function computeGeometry(pages: IrPage[]): PageGeometry {
   for (const page of pages) {
     for (const block of page.blocks) {
       if (!isEdgeBandFloat(block, page)) {
-        left = Math.min(left, block.box.x0)
-        right = Math.min(right, page.widthPt - block.box.x1)
+        // A block PAST the page edge is an off-page artifact, not a margin
+        // measurement: `widthPt - x1` goes negative and clampMargin reads that
+        // as "content TOUCHING the edge" (MARGIN_MIN_PT), so a full-bleed
+        // image bleeding off one page widened the text column for the whole
+        // document (margins are the min across all pages) and re-wrapped every
+        // paragraph. Only on-page content measures a horizontal margin.
+        if (block.box.x0 >= 0) left = Math.min(left, block.box.x0)
+        if (block.box.x1 <= page.widthPt) right = Math.min(right, page.widthPt - block.box.x1)
       }
       top = Math.min(top, page.heightPt - block.box.y1)
       bottom = Math.min(bottom, block.box.y0)
@@ -264,6 +271,9 @@ export function nearestHighlight(hex: string): string | undefined {
   return best === 'white' ? undefined : best
 }
 
+/** Word's font size ceiling, 1638 pt */
+const MAX_HALF_POINTS = 3276
+
 function runFromSpan(span: Span): Run {
   // footnote anchor (P6): a bare reference-marker run — Word renders the
   // number itself, the span's own text stays empty
@@ -281,7 +291,9 @@ function runFromSpan(span: Span): Run {
   }
   if (span.color && span.color !== '000000') run.color = span.color
   const halfPoints = Math.round(span.fontSize * 2)
-  if (halfPoints > 0) run.sizeHalfPoints = halfPoints
+  // corrupt Tf operands (Infinity, 1e22) would otherwise land verbatim in w:val
+  if (Number.isInteger(halfPoints) && halfPoints > 0 && halfPoints <= MAX_HALF_POINTS)
+    run.sizeHalfPoints = halfPoints
   if (span.fontFamily) {
     // CJK-family scripts fill the w:eastAsia slot (docx-engine Run.font);
     // everything else declares only the Latin slots (fontAscii)
@@ -292,19 +304,19 @@ function runFromSpan(span: Span): Run {
     run.rtl = true
     run.fontCs = span.fontFamily || RTL_FALLBACK_CS_FONT[span.script] || 'Traditional Arabic'
   }
-  // character compression (P5): w:w / w:spacing are outside docx-engine's run
-  // model — they ride in rawRPr, whose unmanaged children survive generation
-  const compression: string[] = []
   // invisible source text (PDF Tr 3/7, Word's hidden formatting marks like
   // section-break labels): w:vanish keeps it present but unseen, as in the source (P20)
-  if (span.invisible) compression.push('<w:vanish/>')
-  if (span.charSpacingPt !== undefined) {
-    compression.push(`<w:spacing w:val="${Math.round(span.charSpacingPt * 20)}"/>`)
+  if (span.invisible) {
+    run.vanish = true
+    run.vanishOwn = true
   }
+  // character compression (P5)
+  if (span.charSpacingPt !== undefined) run.charSpacingTwips = Math.round(span.charSpacingPt * 20)
   if (span.charScale !== undefined) {
-    compression.push(`<w:w w:val="${Math.round(span.charScale * 100)}"/>`)
+    const pct = Math.round(span.charScale * 100)
+    if (pct !== 100) run.charScalePct = pct
   }
-  if (compression.length > 0) run.rawRPr = `<w:rPr>${compression.join('')}</w:rPr>`
+  if (span.href !== undefined) run.link = { href: span.href }
   return run
 }
 
@@ -320,7 +332,10 @@ const sameRunStyle = (a: Run, b: Run): boolean =>
   a.fontAscii === b.fontAscii &&
   a.fontCs === b.fontCs &&
   a.rtl === b.rtl &&
-  a.rawRPr === b.rawRPr
+  a.vanishOwn === b.vanishOwn &&
+  a.charSpacingTwips === b.charSpacingTwips &&
+  a.charScalePct === b.charScalePct &&
+  a.link?.href === b.link?.href
 
 function pushRun(runs: Run[], run: Run): void {
   const last = runs[runs.length - 1]
@@ -734,7 +749,11 @@ function tocToSave(
   const numberXml =
     '<w:r><w:tab/></w:r>' +
     rawRunXml({ ...(runs[runs.length - 1] ?? { text: '' }), text: toc.pageNumber })
-  return { kind: 'xml', xml: `<w:p>${pPr}${titleXml}${numberXml}</w:p>` }
+  const anchor = runs.find((r) => r.link?.href.startsWith('#'))?.link?.href.slice(1)
+  const body = anchor
+    ? `<w:hyperlink w:anchor="${escXml(anchor)}">${titleXml}${numberXml}</w:hyperlink>`
+    : `${titleXml}${numberXml}`
+  return { kind: 'xml', xml: `<w:p>${pPr}${body}</w:p>` }
 }
 
 /** cell content → docx-engine rich cell paragraphs (RTL/alignment per block) */
@@ -1054,11 +1073,11 @@ function floatWrapOf(block: ImageBlock, page: IrPage): FloatPlacement['wrap'] {
     : float.wrap
 }
 
-function floatImageToSave(block: ImageBlock, page: IrPage, zOrder?: number): SaveBlock {
+function floatImageOf(block: ImageBlock, page: IrPage, zOrder?: number): NewImage {
   const boxW = Math.max(1, rectWidth(block.box))
   const boxH = Math.max(1, rectHeight(block.box))
   const wrap = floatWrapOf(block, page)
-  const image: NewImage = {
+  return {
     base64: bytesToBase64(block.data),
     mime: block.mime,
     widthPx: Math.max(1, Math.round(boxW * PT_TO_PX)),
@@ -1074,7 +1093,21 @@ function floatImageToSave(block: ImageBlock, page: IrPage, zOrder?: number): Sav
     // the anchor's empty holder paragraph must not take flow space
     paraSpacing: { afterTwips: 0, lineTwips: TIGHT_LINE_TWIPS, lineRule: 'exact' },
   }
-  return { kind: 'image', image }
+}
+
+const floatImageToSave = (block: ImageBlock, page: IrPage, zOrder?: number): SaveBlock => ({
+  kind: 'image',
+  image: floatImageOf(block, page, zOrder),
+})
+
+/**
+ * Every page-pinned picture (background render, panels, floats) used to bring
+ * its own 1pt holder paragraph; a form page with thirty checkbox glyphs was
+ * thirty empty blocks. Page-relative anchors do not care which paragraph
+ * carries them, so a page's pins share one holder.
+ */
+function pinnedImagesToSave(images: NewImage[]): SaveBlock {
+  return images.length === 1 ? { kind: 'image', image: images[0] } : { kind: 'images', images }
 }
 
 /**
@@ -1083,8 +1116,8 @@ function floatImageToSave(block: ImageBlock, page: IrPage, zOrder?: number): Sav
  * under the page's text, restoring gradient/wallpaper backgrounds the flat
  * w:background color cannot carry.
  */
-function bgRenderToSave(render: PageRender, page: IrPage): SaveBlock {
-  const image: NewImage = {
+function bgRenderImageOf(render: PageRender, page: IrPage): NewImage {
+  return {
     base64: bytesToBase64(render.data),
     mime: render.mime,
     widthPx: Math.max(1, Math.round(page.widthPt * PT_TO_PX)),
@@ -1094,8 +1127,12 @@ function bgRenderToSave(render: PageRender, page: IrPage): SaveBlock {
     // the anchor's empty holder paragraph must not take flow space
     paraSpacing: { afterTwips: 0, lineTwips: TIGHT_LINE_TWIPS, lineRule: 'exact' },
   }
-  return { kind: 'image', image }
 }
+
+const bgRenderToSave = (render: PageRender, page: IrPage): SaveBlock => ({
+  kind: 'image',
+  image: bgRenderImageOf(render, page),
+})
 
 /**
  * An empty utility paragraph: near-zero height (exact 1pt line, no after)
@@ -1735,6 +1772,26 @@ const sectionsFromBlocks = (blocks: PageBlock[]): PageSection[] =>
         },
       ]
 
+/** 0-based indexes of the pages some `#_pdfpageN` link points at */
+function internalLinkTargets(pages: readonly IrPage[]): Set<number> {
+  const targets = new Set<number>()
+  const visit = (block: PageBlock): void => {
+    if (block.kind === 'table') {
+      for (const row of block.rows) for (const cell of row) cell.blocks.forEach(visit)
+      return
+    }
+    if (block.kind !== 'text') return
+    for (const line of block.lines) {
+      for (const span of line.spans) {
+        const m = span.href !== undefined ? /^#_pdfpage(\d+)$/.exec(span.href) : null
+        if (m) targets.add(Number(m[1]) - 1)
+      }
+    }
+  }
+  for (const page of pages) page.blocks.forEach(visit)
+  return targets
+}
+
 export function pagesToSaveBlocks(
   pages: IrPage[],
   furnitureHf: readonly FurnitureHf[] = [],
@@ -1773,6 +1830,12 @@ export function pagesToSaveBlocks(
   // page with y resolved against the unrotated page box), so a canvas page
   // must both OPEN and CLOSE its own section even when signatures match
   let forceClose = false
+  // in-document link targets (P33): the first paragraph emitted for a target
+  // page carries the `_pdfpageN` bookmark its w:hyperlink anchors point at
+  const linkTargets = internalLinkTargets(pages)
+  const pageRanges: { index: number; start: number; end: number }[] = []
+  const curRange = (): { index: number; start: number; end: number } | undefined =>
+    pageRanges[pageRanges.length - 1]
 
   const openSection = (sig: SectionSignature, atPageStart: boolean): void => {
     if (curSig === null) {
@@ -1796,6 +1859,13 @@ export function pagesToSaveBlocks(
       sig.pageHeightTwips = curSig.pageHeightTwips
     }
     blocks.push(sectionBreakParagraph(curSig, geo, curStart, titlePgPending))
+    // the break paragraph closes the PREVIOUS page; the new page starts after it
+    if (atPageStart) {
+      const cur = curRange()
+      const prev = pageRanges[pageRanges.length - 2]
+      if (prev) prev.end = blocks.length
+      if (cur) cur.start = blocks.length
+    }
     titlePgPending = false
     sectionBreaks++
     lastWasTable = false
@@ -1808,6 +1878,9 @@ export function pagesToSaveBlocks(
     // a stitched cross-page paragraph flows naturally — no explicit break (P32)
     needBreak = page.index > 0 && page.flowsFromPrev !== true
     const pageStartBlockCount = blocks.length
+    const prevRange = curRange()
+    if (prevRange) prevRange.end = blocks.length
+    pageRanges.push({ index: page.index, start: blocks.length, end: blocks.length })
 
     if ((page.scanned || page.degraded) && page.render) {
       openSection(singleColumnSig(page), needBreak)
@@ -1825,12 +1898,6 @@ export function pagesToSaveBlocks(
     if (page.canvas) {
       forceClose = true
       openSection(singleColumnSig(page), needBreak)
-      if (page.bgRender) {
-        if (needBreak) blocks.push(pageBreakParagraph())
-        blocks.push(bgRenderToSave(page.bgRender, page))
-        lastWasTable = false
-        needBreak = false
-      }
       const pinned = [
         ...(page.bgPanels ?? []),
         ...(page.decorImages ?? []),
@@ -1838,9 +1905,13 @@ export function pagesToSaveBlocks(
       ]
         .map((block, order) => ({ block, order }))
         .sort((a, b) => (a.block.z ?? 0) - (b.block.z ?? 0) || a.order - b.order)
-      for (const [rank, { block: pin }] of pinned.entries()) {
+      const pins = [
+        ...(page.bgRender ? [bgRenderImageOf(page.bgRender, page)] : []),
+        ...pinned.map(({ block: pin }, rank) => floatImageOf(pin, page, rank + 1)),
+      ]
+      if (pins.length > 0) {
         if (needBreak) blocks.push(pageBreakParagraph())
-        blocks.push(floatImageToSave(pin, page, rank + 1))
+        blocks.push(pinnedImagesToSave(pins))
         lastWasTable = false
         needBreak = false
       }
@@ -1930,18 +2001,19 @@ export function pagesToSaveBlocks(
     // and zero out the tail
     let heightsPt = 0
     let wantTotalPt = 0
-    // anchor holder paragraphs (bgRender / panels / floats) each keep a 1pt
-    // exact line in the flow — on a flush-full slide with several floats they
-    // are the hair that spills a blank page (P11 D), so they are budgeted
-    heightsPt +=
-      ((page.bgRender ? 1 : 0) +
-        // card plates leave the pin list (P20): their text box pays instead
-        (page.bgPanels?.filter((p) => p.cardId === undefined).length ?? 0) +
-        sections.reduce(
-          (n, s) => n + s.columns.reduce((m, c) => m + c.blocks.filter(isFloatImage).length, 0),
-          0,
-        )) *
-      (TIGHT_LINE_TWIPS / PT_TO_TWIPS)
+    // the pins' shared holder paragraph keeps a 1pt exact line in the flow —
+    // on a flush-full slide it is the hair that spills a blank page (P11 D),
+    // so it is budgeted
+    const pinCount =
+      (page.bgRender ? 1 : 0) +
+      // card plates leave the pin list (P20): their text box pays instead
+      (page.bgPanels?.filter((p) => p.cardId === undefined).length ?? 0) +
+      sections.reduce(
+        (n, s) => n + s.columns.reduce((m, c) => m + c.blocks.filter(isFloatImage).length, 0),
+        0,
+      )
+    // the page's pins share one holder paragraph
+    heightsPt += (pinCount > 0 ? 1 : 0) * (TIGHT_LINE_TWIPS / PT_TO_TWIPS)
     // wrap-growth reserve: display-size multi-line titles gain a line under a
     // substituted font; one pitch per such block stays budgeted (not emitted)
     let wrapRiskPt = 0
@@ -2161,12 +2233,6 @@ export function pagesToSaveBlocks(
     for (const [si, section] of sections.entries()) {
       openSection(signatureOf(section, geo, page), si === 0 && needBreak)
       if (si === 0) {
-        if (page.bgRender) {
-          if (needBreak) blocks.push(pageBreakParagraph())
-          blocks.push(bgRenderToSave(page.bgRender, page))
-          lastWasTable = false
-          needBreak = false
-        }
         // panels and floats stack by source paint order (P16 A): behindDoc
         // anchors tie on relativeHeight otherwise, and a full-page wallpaper
         // drawn first would paint OVER card panels drawn later, hiding the
@@ -2179,9 +2245,13 @@ export function pagesToSaveBlocks(
         ]
           .map((block, order) => ({ block, order }))
           .sort((a, b) => (a.block.z ?? 0) - (b.block.z ?? 0) || a.order - b.order)
-        for (const [rank, { block: pin }] of pinned.entries()) {
+        const pins = [
+          ...(page.bgRender ? [bgRenderImageOf(page.bgRender, page)] : []),
+          ...pinned.map(({ block: pin }, rank) => floatImageOf(pin, page, rank + 1)),
+        ]
+        if (pins.length > 0) {
           if (needBreak) blocks.push(pageBreakParagraph())
-          blocks.push(floatImageToSave(pin, page, rank + 1))
+          blocks.push(pinnedImagesToSave(pins))
           lastWasTable = false
           needBreak = false
         }
@@ -2359,7 +2429,22 @@ export function pagesToSaveBlocks(
       blocks.push(emptyParagraph())
     }
   }
+  const lastRange = curRange()
+  if (lastRange) lastRange.end = blocks.length
   if (lastWasTable) blocks.push(emptyParagraph())
+  // later pages first: an inserted placeholder must not shift unprocessed ranges
+  for (const { index, start, end } of [...pageRanges].reverse()) {
+    if (!linkTargets.has(index)) continue
+    const name = pageAnchorName(index)
+    const first = blocks.slice(start, end).find((b) => b.kind === 'generated')
+    if (first?.kind === 'generated') {
+      ;(first.block.hiddenBookmarks ??= []).push(name)
+    } else {
+      const holder = emptyParagraph()
+      if (holder.kind === 'generated') holder.block.hiddenBookmarks = [name]
+      blocks.splice(start, 0, holder)
+    }
+  }
 
   // the last open section's properties land in the trailing body sectPr
   const finalSig: SectionSignature =

@@ -6,7 +6,7 @@
  * P4. Pure geometry, fully unit-testable.
  */
 import type { Rect } from '../geometry'
-import { approxEq, coversBox, intersectArea, rectArea } from '../geometry'
+import { approxEq, bboxOfPoints, coversBox, intersectArea, rectArea } from '../geometry'
 import type { Fill, PageShapes, RawPath, RawSubpath, Stroke } from '../ir'
 
 /** points this close are the same coordinate when detecting rectangles/axis lines */
@@ -111,11 +111,7 @@ function allEdgesAxisAligned(sub: RawSubpath): boolean {
   return true
 }
 
-const bboxOf = (sub: RawSubpath): Rect => {
-  const xs = sub.points.map((p) => p.x)
-  const ys = sub.points.map((p) => p.y)
-  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) }
-}
+const bboxOf = (sub: RawSubpath): Rect => bboxOfPoints(sub.points)
 
 /** thin + elongated → the rect IS a line */
 function thinRectStroke(rect: Rect, color: string): Stroke | null {
@@ -252,6 +248,41 @@ function clipRect(rect: Rect, clip: Rect | undefined): Rect | null {
 /** strokes this far outside the clip window are cut, not just clamped (pt) */
 const CLIP_STROKE_TOL = 0.5
 
+/** straight edges under this share of the bbox perimeter = an ellipse, not a rounded rect */
+const ELLIPSE_MAX_STRAIGHT_SHARE = 0.2
+
+/**
+ * Read a curved, filled subpath as the preset shape it was drawn as: the
+ * straight (LINETO) runs along each axis leave the corner radius as what the
+ * bbox side does not cover; an outline with (almost) no straight run is an
+ * ellipse. Slide decks draw bullets, rounded cards and pills this way, and
+ * pdf2pptx emits them as native shapes instead of dropping them.
+ */
+function curvedGeometry(
+  sub: RawSubpath,
+  box: Rect,
+): { geometry: 'roundRect' | 'ellipse'; cornerRadiusPt?: number } {
+  const w = box.x1 - box.x0
+  const h = box.y1 - box.y0
+  let straight = 0
+  let maxH = 0
+  let maxV = 0
+  for (let i = 1; i < sub.points.length; i++) {
+    if (!sub.lineTo?.[i]) continue
+    const a = sub.points[i - 1]!
+    const b = sub.points[i]!
+    const dx = Math.abs(b.x - a.x)
+    const dy = Math.abs(b.y - a.y)
+    straight += Math.hypot(dx, dy)
+    if (approxEq(a.y, b.y, AXIS_TOL)) maxH = Math.max(maxH, dx)
+    else if (approxEq(a.x, b.x, AXIS_TOL)) maxV = Math.max(maxV, dy)
+  }
+  if (straight < ELLIPSE_MAX_STRAIGHT_SHARE * 2 * (w + h)) return { geometry: 'ellipse' }
+  const half = Math.min(w, h) / 2
+  const radius = Math.min(half, (w - maxH) / 2, (h - maxV) / 2)
+  return { geometry: 'roundRect', cornerRadiusPt: Math.max(0, radius) }
+}
+
 /** fills keep the source paint order for behindDoc stacking (P16 A) */
 const zOf = (path: RawPath): { z?: number } => (path.z !== undefined ? { z: path.z } : {})
 
@@ -265,7 +296,7 @@ export function normalizeShapes(
   const curvedFills: Fill[] = []
   let ignoredPaths = 0
 
-  for (const path of paths) {
+  for (const [seq, path] of paths.entries()) {
     const strokesBefore = strokes.length
     if (!path.filled && !path.stroked) continue
     // a translucent fill is a glow/shadow/tint (P10 C): as cell shading or
@@ -294,6 +325,8 @@ export function normalizeShapes(
               color: path.fillColor,
               ...alphaOf(path),
               ...zOf(path),
+              seq,
+              ...curvedGeometry(sub, box),
             })
           }
         }
@@ -319,7 +352,9 @@ export function normalizeShapes(
           strokes.push(thin)
           continue
         }
-        if (filled) fills.push({ box: rect, color: path.fillColor, ...alphaOf(path), ...zOf(path) })
+        if (filled) {
+          fills.push({ box: rect, color: path.fillColor, ...alphaOf(path), ...zOf(path), seq })
+        }
         if (path.stroked) {
           // stroke the AUTHORED edges masked by the clip — the clip boundary
           // itself was never stroked, so edges falling outside it vanish

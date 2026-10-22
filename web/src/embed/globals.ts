@@ -42,8 +42,17 @@ async function install(): Promise<void> {
  * comment in main.tsx says the same; the timeout guards a broken bundle from
  * blanking the editor rather than being a real deadline.
  */
+/**
+ * The families worth having before the first measure: the Office defaults a
+ * workbook is most likely to ask for, which are also the ones our bundled
+ * Carlito faces stand in for. Upstream registers aliases per workbook now,
+ * from the families the opened file actually uses (`workbookFontFamilies`), so
+ * this is a head start rather than the whole job.
+ */
+const DEFAULT_CELL_FAMILIES = ['Calibri', 'Aptos', 'Aptos Narrow', 'Carlito']
+
 async function loadCellFonts(): Promise<void> {
-  const loads: Promise<unknown>[] = [registerCellFontAliases()]
+  const loads: Promise<unknown>[] = [registerCellFontAliases(DEFAULT_CELL_FAMILIES)]
   for (const variant of ['', 'bold ', 'italic ', 'italic bold ']) {
     for (const family of ['Calibri', 'Aptos', "'Aptos Narrow'", 'Carlito']) {
       loads.push(document.fonts?.load?.(`${variant}16px ${family}`)?.catch(() => {}) ?? [])

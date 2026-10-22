@@ -2,7 +2,10 @@ import { Extension } from '@tiptap/core'
 import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { SettledParagraphCache } from './settled-measure'
+import { SettledParagraphCache, noteFloatTransaction } from './settled-measure'
+import { sameLine } from './justify-shrink'
+import { rangeSlot } from '../dom-range'
+import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 
 /**
  * Word's CJK line breaking (settings characterSpacingControl =
@@ -41,7 +44,12 @@ import { SettledParagraphCache } from './settled-measure'
  *   only when everything before it fits, on the same alignments compression
  *   applies to (justified under compat 15, every alignment under legacy).
  *   Under compressPunctuation that trailing stop is compressed to half width
- *   instead, even when it is the line's only compressible glyph.
+ *   instead, even when it is the line's only compressible glyph. When even
+ *   that does not fit, the stop still hangs at the margin provided the body
+ *   before it fits once the line's own closers give up at most half a glyph
+ *   in total (Yu Mincho 10.5pt probes 2026-10-13: 1.4pt and 4.5pt over one
+ *   comma accepted, 7.3pt over two commas and 12.4pt over one declined -> the
+ *   next line starts with the kana + stop).
  * - All of it is gated on the run's effective w:lang w:eastAsia (run rPr >
  *   character style > paragraph style chain > docDefaults; the paragraph mark
  *   does not count): under en-US / ko-KR Word neither hangs nor compresses
@@ -85,6 +93,12 @@ export function usesEastAsianRules(eastAsiaLang: string | null | undefined): boo
   return !eastAsiaLang || /^(ja|zh)(-|$)/i.test(eastAsiaLang)
 }
 
+/** the shrink decoration carries the compressed spacing: the natural base lives on its nearest other ancestor */
+export function spacingHost(el: Element | null): Element | null {
+  while (el && el.classList.contains('doc-cjkshrink')) el = el.parentElement
+  return el
+}
+
 /** decoration style compressing one glyph by perChar px (baseLs: inherited letter-spacing it replaces) */
 export function shrinkStyle(ch: string, perChar: number, baseLs: number): string {
   const px = (v: number) => Math.round(v * 100) / 100
@@ -121,6 +135,9 @@ export interface CjkPunctShrinkStorage {
 
 /** dispatched on document after the doc-scoped <style> commits (App) */
 export const DOC_CSS_COMMITTED_EVENT = 'genoffice:doc-css'
+/** the paginator applied per-block wrap widths (section widths, columns,
+ *  letter-spacing): the line breaks the shrink loops measured are stale */
+export const WRAP_WIDTHS_COMMITTED_EVENT = 'genoffice:wrap-widths'
 
 export function measuresAlignment(textAlign: string, legacyLayout: boolean): boolean {
   return textAlign === 'justify' || legacyLayout
@@ -141,11 +158,17 @@ interface CharBox {
   ea: boolean
   /** natural advance (layout px), independent of active decorations */
   width: number
+  /** inherited letter-spacing (px) included in width */
+  ls: number
   top: number
   bottom: number
   left: number
   right: number
+  /** rendered right edge (screen px) when measured straight off the DOM text */
+  rendRight?: number
 }
+
+const shiftShrinks = (r: MeasuredShrink[], d: number) => r.map((s) => ({ ...s, from: s.from + d }))
 
 const isPunct = (c: CharBox) => c.ea && COMPRESSIBLE.has(c.ch)
 const isClose = (c: CharBox) => c.ea && COMPRESSIBLE_CLOSE.has(c.ch)
@@ -158,6 +181,8 @@ interface MeasuredShrink {
   /** paragraph base letter-spacing (px, docGrid charSpace): the decoration's
    *  own letter-spacing replaces the inherited value, so it must fold it in */
   baseLs: number
+  /** the glyph hangs at zero advance (a trailing stop at the margin) */
+  hang?: boolean
 }
 
 export interface ShrinkLineChars {
@@ -177,6 +202,10 @@ export interface ShrinkLineChars {
   candPunctCount: number
   /** the chain drags a kinsoku-close character that cannot start a line */
   forced: boolean
+  /** natural advance of the line's last glyph when it already hangs (decorated) */
+  hungWidth?: number | null
+  /** the chain ends with a stop / closing bracket that may hang */
+  candEndsWithStop?: boolean
 }
 
 export interface HangLineChars {
@@ -201,6 +230,26 @@ export function decideCjkHang(line: HangLineChars): 'keep' | 'pull' | null {
   return line.natural + body <= line.avail + NOISE ? 'pull' : null
 }
 
+/**
+ * Word's hang rule under compressPunctuation, tried once decideCjkShrinks
+ * declined: the chain's trailing stop hangs at zero advance when the body
+ * before it fits after the line's own closers (the hung stop excluded) give
+ * up at most half a glyph in total. Returns the per-closer compression (0 =
+ * hang only) or null.
+ */
+export function decideCjkHangUnderCompression(line: ShrinkLineChars): number | null {
+  const hung = line.hungWidth != null
+  const body = hung
+    ? line.natural - line.hungWidth!
+    : line.natural + line.candWidths.slice(0, -1).reduce((s, w) => s + w, 0)
+  if (!hung && (!line.candEndsWithStop || line.candWidths.length === 0)) return null
+  const deficit = body - line.avail
+  if (deficit <= NOISE) return 0
+  const pool = line.punctCount - (hung ? 1 : 0)
+  if (pool <= 0 || line.avgPunctW <= 0 || deficit > FORCED_CAP * line.avgPunctW) return null
+  return (deficit + SHRINK_EPS) / pool
+}
+
 /** The glyphs a decided amount lands on: the line's own punctuation (closers
  *  and openers) when it has a closer to compress, otherwise the pulled chain's
  *  stops alone — decideCjkShrinks sized the amount for exactly those. */
@@ -218,6 +267,9 @@ export function shrinkTargets<T>(line: ShrinkLineChars, own: T[], cand: T[]): T[
  */
 export function decideCjkShrinks(lines: ShrinkLineChars[]): Array<number | null> {
   return lines.map((line) => {
+    // a hung stop is decideCjkHangUnderCompression's keep state: its natural
+    // width is not line overflow
+    if (line.hungWidth != null) return null
     if (line.avgPunctW <= 0) return null
     const overflow = line.natural - line.avail
     if (line.punctCount === 0) {
@@ -246,32 +298,105 @@ export function decideCjkShrinks(lines: ShrinkLineChars[]): Array<number | null>
   })
 }
 
-let measureCtx: CanvasRenderingContext2D | null | undefined
-const advanceCache = new Map<string, number>()
+interface TextSlot {
+  dom: Text
+  from: number
+  ea: boolean
+}
 
-function charAdvancePx(cs: CSSStyleDeclaration, ch: string): number {
+/**
+ * The paragraph's DOM text nodes mapped to document positions. Valid only when
+ * the DOM text is exactly the node's text in order (decorations split text
+ * nodes but never add characters); widget text, cursor wrappers or inline
+ * atoms make it null and the caller falls back to view.coordsAtPos. The direct
+ * map avoids ProseMirror's per-position descent through every top-level
+ * block, which made per-character measurement scale with document size.
+ */
+export function mapTextNodes(
+  el: HTMLElement,
+  node: ProseMirrorNode,
+  pos: number,
+  eaOf: (child: ProseMirrorNode) => boolean,
+): { slots: TextSlot[]; breaks: number[] } | null {
+  const pieces: Array<{ text: string; from: number; ea: boolean }> = []
+  const breaks: number[] = []
+  let atom = false
+  node.forEach((child, offset) => {
+    if (child.isText && child.text)
+      pieces.push({ text: child.text, from: pos + 1 + offset, ea: eaOf(child) })
+    else if (child.type.name === 'hardBreak') breaks.push(pos + 1 + offset)
+    else atom = true
+  })
+  if (atom) return null
+  const slots: TextSlot[] = []
+  let pi = 0
+  let off = 0
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  for (let tn = walker.nextNode() as Text | null; tn; tn = walker.nextNode() as Text | null) {
+    const data = tn.data
+    if (!data) continue
+    const piece = pieces[pi]
+    if (!piece || off + data.length > piece.text.length) return null
+    if (piece.text.substr(off, data.length) !== data) return null
+    slots.push({ dom: tn, from: piece.from + off, ea: piece.ea })
+    off += data.length
+    if (off === piece.text.length) {
+      pi++
+      off = 0
+    }
+  }
+  return pi === pieces.length ? { slots, breaks } : null
+}
+
+const charRange = rangeSlot()
+
+const candidateCache = new WeakMap<ProseMirrorNode, boolean>()
+/** CJK paragraph with something to compress, within the per-char measurement budget */
+function isCandidate(node: ProseMirrorNode): boolean {
+  let is = candidateCache.get(node)
+  if (is === undefined) {
+    const text = node.textContent
+    is = text.length <= PARA_CHAR_BUDGET && CJK_RE.test(text)
+    if (is) {
+      is = false
+      for (const ch of text) {
+        if (COMPRESSIBLE.has(ch)) {
+          is = true
+          break
+        }
+      }
+    }
+    candidateCache.set(node, is)
+  }
+  return is
+}
+
+let measureCtx: CanvasRenderingContext2D | null | undefined
+const advanceCache = new Map<string, Map<string, number>>()
+
+function fontOf(cs: CSSStyleDeclaration): string {
+  return `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
+}
+
+function charAdvancePx(font: string, ch: string): number {
   if (measureCtx === undefined) measureCtx = document.createElement('canvas').getContext('2d')
   if (!measureCtx) return 0
-  const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
-  const key = `${font}|${ch}`
-  let w = advanceCache.get(key)
+  let perFont = advanceCache.get(font)
+  if (!perFont) advanceCache.set(font, (perFont = new Map()))
+  let w = perFont.get(ch)
   if (w === undefined) {
     measureCtx.font = font
     // Blink snaps each advance up to a LayoutUnit; raw floats undercount a
     // 40-glyph line by ~0.5px, enough to miss a pull
     w = Math.ceil(measureCtx.measureText(ch).width * 64) / 64
-    advanceCache.set(key, w)
+    perFont.set(ch, w)
   }
   return w
 }
 
-function sameLine(a: { top: number; bottom: number }, b: { top: number; bottom: number }): boolean {
-  return a.top < b.bottom - 1 && a.bottom > b.top + 1
-}
-
 class CjkPunctShrinkView {
   private lastSig = ''
-  private results = new SettledParagraphCache<MeasuredShrink[]>()
+  private results = new SettledParagraphCache<MeasuredShrink[]>(shiftShrinks, (r) => r.length === 0)
   private seenSigs = new Set<string>()
   private frozen = false
   private retryRaf = 0
@@ -289,6 +414,10 @@ class CjkPunctShrinkView {
     this.invalidate()
     this.measure()
   }
+  private onPhasedSettled = () => {
+    this.invalidate()
+    this.measure()
+  }
 
   constructor(
     private view: EditorView,
@@ -297,6 +426,8 @@ class CjkPunctShrinkView {
     this.measure()
     document.fonts?.addEventListener('loadingdone', this.onFontsLoaded)
     document.addEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
+    document.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onDocCss)
+    document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => {
         const w = this.view.dom.offsetWidth
@@ -309,16 +440,22 @@ class CjkPunctShrinkView {
     }
   }
 
+  /** layout input changed (resize, fonts, stylesheet): every paragraph re-measures */
   private invalidate() {
-    this.seenSigs.clear()
     this.results.clear()
+    this.restartConvergence()
+  }
+
+  private restartConvergence() {
+    this.seenSigs.clear()
     this.frozen = false
     this.lastSig = ''
   }
 
   update(view: EditorView, prevState: EditorState) {
     if (view.state.doc !== prevState.doc) {
-      this.invalidate()
+      // untouched paragraphs keep their settled results (keyed on node identity)
+      this.restartConvergence()
     } else if (
       cjkPunctShrinkPluginKey.getState(view.state) === cjkPunctShrinkPluginKey.getState(prevState)
     ) {
@@ -330,6 +467,8 @@ class CjkPunctShrinkView {
   destroy() {
     document.fonts?.removeEventListener('loadingdone', this.onFontsLoaded)
     document.removeEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
+    document.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onDocCss)
+    document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     this.resizeObserver?.disconnect()
     if (this.retryRaf) cancelAnimationFrame(this.retryRaf)
   }
@@ -349,6 +488,8 @@ class CjkPunctShrinkView {
       this.retryRaf = 0
     }
     const { view } = this
+    // a streamed tail is still landing: measured once, when it has (settled event)
+    if (isPhasedContentPending()) return
     // PDF export parks the editor subtree (.app.pv-exporting); any layout
     // read here would force the parked document to re-lay out per print chunk
     if (view.dom.closest('.app.pv-exporting')) {
@@ -374,22 +515,21 @@ class CjkPunctShrinkView {
       if (!node.isTextblock) return true
       // justification usually comes from the paragraph style, not a direct
       // attr: filter on the rendered alignment in measureParagraph instead
-      const text = node.textContent
-      if (text.length > PARA_CHAR_BUDGET) return false
-      if (!CJK_RE.test(text)) return false
-      let has = false
-      for (const ch of text) if (COMPRESSIBLE.has(ch)) has = true
-      if (!has) return false
-      paras.push({ node, pos })
+      if (isCandidate(node)) paras.push({ node, pos })
       return false
     })
 
     const shrinks: MeasuredShrink[] = []
     let measurable = paras.length === 0
     this.results.beginPass(view)
+    const topLevel = SettledParagraphCache.topLevelDom(view)
     for (const para of paras) {
-      const measured = this.results.measure(view, para.node, para.pos, () =>
-        this.measureParagraph(para.node, para.pos),
+      const measured = this.results.measure(
+        view,
+        para.node,
+        para.pos,
+        (el) => this.measureParagraph(para.node, para.pos, el),
+        topLevel.get(para.node),
       )
       if (!measured) continue
       measurable = true
@@ -414,10 +554,12 @@ class CjkPunctShrinkView {
 
     if (shrinks.length === 0 && (!old || old === DecorationSet.empty)) return
     const decos = shrinks.map((s) =>
-      Decoration.inline(s.from, s.from + 1, {
-        class: 'doc-cjkshrink',
-        style: shrinkStyle(s.ch, s.perChar, s.baseLs),
-      }),
+      Decoration.inline(
+        s.from,
+        s.from + 1,
+        { class: 'doc-cjkshrink', style: shrinkStyle(s.ch, s.perChar, s.baseLs) },
+        { hang: s.hang === true },
+      ),
     )
     view.dispatch(
       view.state.tr.setMeta(cjkPunctShrinkPluginKey, decos).setMeta('addToHistory', false),
@@ -425,10 +567,12 @@ class CjkPunctShrinkView {
   }
 
   /** null = not measurable right now (hidden / not mounted) → retry */
-  private measureParagraph(node: ProseMirrorNode, pos: number): MeasuredShrink[] | null {
+  private measureParagraph(
+    node: ProseMirrorNode,
+    pos: number,
+    el: HTMLElement,
+  ): MeasuredShrink[] | null {
     const { view } = this
-    const el = view.nodeDOM(pos)
-    if (!(el instanceof HTMLElement)) return null
     if (el.offsetWidth === 0) return null
     const rect = el.getBoundingClientRect()
     if (rect.width === 0) return null
@@ -450,62 +594,107 @@ class CjkPunctShrinkView {
     const textIndent = parseFloat(cs.textIndent) || 0
     const paraLang = (node.attrs.eaLang as string | null) ?? this.storage.docEastAsiaLang
 
-    // per-character boxes: caret coords give the line geometry (they survive
-    // decoration-split text nodes); natural advances come from canvas metrics
-    // so active shrink decorations do not feed back into the next round
+    // per-character boxes: character rects give the line geometry (straight
+    // off the DOM text when it maps cleanly, else via caret coords, both
+    // surviving decoration-split text nodes); natural advances come from
+    // canvas metrics so active shrink decorations do not feed back into the
+    // next round
     const chars: CharBox[] = []
-    const breakPositions: number[] = []
-    const styleCache = new Map<Element, CSSStyleDeclaration>()
-    let bail = false
-    // positions map linearly inside one DOM text node: only re-resolve at its end
-    let dp: { node: Node; offset: number; pos: number } | null = null
-    node.forEach((child, offset) => {
-      if (bail || !child.isText || !child.text) {
-        // atoms (images, tabs, fields) break the char model: skip the paragraph
-        if (!child.isText && child.type.name !== 'hardBreak') bail = true
-        else if (!child.isText) breakPositions.push(pos + 1 + offset)
-        return
+    let breakPositions: number[] = []
+    const paraFont = fontOf(cs)
+    // balanced grids give full-width spans a larger letter-spacing than the paragraph
+    const styleCache = new Map<Element, { font: string; ls: number }>()
+    const styleAt = (el: Element | null): { font: string; ls: number } => {
+      const parent = spacingHost(el)
+      if (!parent) return { font: paraFont, ls: baseLs }
+      let st = styleCache.get(parent)
+      if (!st) {
+        const pcs = window.getComputedStyle(parent)
+        st = { font: fontOf(pcs), ls: parseFloat(pcs.letterSpacing) || 0 }
+        styleCache.set(parent, st)
       }
-      const base = pos + 1 + offset
+      return st
+    }
+    const eaOf = (child: ProseMirrorNode): boolean => {
       const runLang = child.marks.find((m) => m.type.name === 'docTextStyle')?.attrs.eaLang as
         string | null | undefined
-      const ea = usesEastAsianRules(runLang ?? paraLang)
-      for (let i = 0; i < child.text.length; i++) {
-        const from = base + i
-        let a: { top: number; bottom: number; left: number; right: number }
-        try {
-          a = view.coordsAtPos(from, 1)
-        } catch {
-          bail = true
+      return usesEastAsianRules(runLang ?? paraLang)
+    }
+    let bail = false
+    const mapped = mapTextNodes(el, node, pos, eaOf)
+    if (mapped) {
+      breakPositions = mapped.breaks
+      const range = charRange()
+      for (const slot of mapped.slots) {
+        const { font, ls } = styleAt(slot.dom.parentElement)
+        const data = slot.dom.data
+        for (let i = 0; i < data.length; i++) {
+          range.setStart(slot.dom, i)
+          range.setEnd(slot.dom, i + 1)
+          const r = range.getBoundingClientRect()
+          const width = charAdvancePx(font, data[i]) + ls
+          chars.push({
+            ch: data[i],
+            from: slot.from + i,
+            ea: slot.ea,
+            width,
+            ls,
+            top: r.top,
+            bottom: r.bottom,
+            left: r.left,
+            right: r.left + width * zoom,
+            rendRight: r.right,
+          })
+        }
+      }
+    }
+    // positions map linearly inside one DOM text node: only re-resolve at its end
+    let dp: { node: Node; offset: number; pos: number } | null = null
+    if (!mapped)
+      node.forEach((child, offset) => {
+        if (bail || !child.isText || !child.text) {
+          // atoms (images, tabs, fields) break the char model: skip the paragraph
+          if (!child.isText && child.type.name !== 'hardBreak') bail = true
+          else if (!child.isText) breakPositions.push(pos + 1 + offset)
           return
         }
-        dp =
-          dp &&
-          dp.pos + 1 === from &&
-          dp.node.nodeType === Node.TEXT_NODE &&
-          dp.offset + 1 < (dp.node as Text).length
-            ? { node: dp.node, offset: dp.offset + 1, pos: from }
-            : { ...view.domAtPos(from, 1), pos: from }
-        const parent =
-          dp.node.nodeType === Node.TEXT_NODE ? dp.node.parentElement : (dp.node as Element | null)
-        let pcs = parent ? styleCache.get(parent) : undefined
-        if (!pcs && parent) {
-          pcs = window.getComputedStyle(parent)
-          styleCache.set(parent, pcs)
+        const base = pos + 1 + offset
+        const ea = eaOf(child)
+        for (let i = 0; i < child.text.length; i++) {
+          const from = base + i
+          let a: { top: number; bottom: number; left: number; right: number }
+          try {
+            a = view.coordsAtPos(from, 1)
+          } catch {
+            bail = true
+            return
+          }
+          dp =
+            dp &&
+            dp.pos + 1 === from &&
+            dp.node.nodeType === Node.TEXT_NODE &&
+            dp.offset + 1 < (dp.node as Text).length
+              ? { node: dp.node, offset: dp.offset + 1, pos: from }
+              : { ...view.domAtPos(from, 1), pos: from }
+          const parent =
+            dp.node.nodeType === Node.TEXT_NODE
+              ? dp.node.parentElement
+              : (dp.node as Element | null)
+          const st = styleAt(parent)
+          const width = charAdvancePx(st.font, child.text[i]) + st.ls
+          chars.push({
+            ch: child.text[i],
+            from,
+            ea,
+            width,
+            ls: st.ls,
+            top: a.top,
+            bottom: a.bottom,
+            left: a.left,
+            right: a.left + width * zoom,
+          })
         }
-        const width = charAdvancePx(pcs ?? cs, child.text[i]) + baseLs
-        chars.push({
-          ch: child.text[i],
-          from,
-          ea,
-          width,
-          top: a.top,
-          bottom: a.bottom,
-          left: a.left,
-          right: a.left + width * zoom,
-        })
-      }
-    })
+      })
     if (bail || chars.length === 0) return []
 
     // group into rendered lines
@@ -525,6 +714,8 @@ class CjkPunctShrinkView {
 
     const active = cjkPunctShrinkPluginKey.getState(view.state)
     const decorated = (c: CharBox) => (active?.find(c.from, c.from + 1).length ?? 0) > 0
+    const hungDecorated = (c: CharBox) =>
+      (active?.find(c.from, c.from + 1) ?? []).some((d) => d.spec.hang === true)
     const punctBoxesPerLine: CharBox[][] = []
     const candPunctBoxesPerLine: CharBox[][] = []
     const hangModels: HangLineChars[] = []
@@ -532,11 +723,14 @@ class CjkPunctShrinkView {
       const natural = line.reduce((s, c) => s + c.width, 0)
       const left = Math.min(...line.map((c) => c.left))
       // rendered right edge: the caret after the line's last character
-      let right = Math.max(...line.map((c) => c.right))
-      try {
-        right = view.coordsAtPos(line[line.length - 1].from + 1, -1).left
-      } catch {
-        /* keep the advance-based fallback */
+      const lastChar = line[line.length - 1]
+      let right = lastChar.rendRight ?? Math.max(...line.map((c) => c.right))
+      if (lastChar.rendRight === undefined) {
+        try {
+          right = view.coordsAtPos(lastChar.from + 1, -1).left
+        } catch {
+          /* keep the advance-based fallback */
+        }
       }
       const punctBoxes = line.filter(isPunct)
       const closeBoxes = punctBoxes.filter(isClose)
@@ -574,7 +768,10 @@ class CjkPunctShrinkView {
       // amount — measure those against the paragraph content box instead
       const ragged = !justified || k === lines.length - 1 || brBetween
       const avail = ragged ? contentW - (k === 0 ? textIndent : 0) : (right - left) / zoom
-      const last = line[line.length - 1]
+      // a hung stop keeps its trailing spaces on the line: look past them
+      let lastIx = line.length - 1
+      while (lastIx > 0 && line[lastIx].ch === ' ') lastIx--
+      const last = line[lastIx]
       hangModels.push({
         natural,
         avail,
@@ -592,6 +789,8 @@ class CjkPunctShrinkView {
         candWidths: k === lines.length - 1 ? [] : candWidths,
         candPunctCount: candPunctBoxes.length,
         forced,
+        hungWidth: isClose(last) && hungDecorated(last) ? last.width : null,
+        candEndsWithStop: candLast !== null && isClose(candLast),
       }
     })
 
@@ -600,22 +799,60 @@ class CjkPunctShrinkView {
       lines.forEach((line, k) => {
         const decision = decideCjkHang(hangModels[k])
         if (decision === null) return
+        let lastIx = line.length - 1
+        while (lastIx > 0 && line[lastIx].ch === ' ') lastIx--
         const stop =
-          decision === 'keep'
-            ? line[line.length - 1]
-            : lines[k + 1][hangModels[k].candWidths.length - 1]
-        out.push({ from: stop.from, ch: stop.ch, perChar: stop.width, baseLs })
+          decision === 'keep' ? line[lastIx] : lines[k + 1][hangModels[k].candWidths.length - 1]
+        out.push({ from: stop.from, ch: stop.ch, perChar: stop.width, baseLs: stop.ls, hang: true })
       })
       return out
     }
     const decisions = decideCjkShrinks(lineModels)
+    // a stop hung from line k is also a closer on line k+1: one decoration only
+    const hungFrom = new Set<number>()
     for (let k = 0; k < decisions.length; k++) {
       const perGlyph = decisions[k]
-      if (perGlyph === null) continue
+      const lm = lineModels[k]
+      // a compression emitted last round that did not pull its chain (own
+      // closers decorated, line still short, chain still on the next line):
+      // Chromium's breaker rejected the marginal fit, so hang instead
+      const pullFailed =
+        lm.natural - lm.avail <= NOISE &&
+        lm.candWidths.length > 0 &&
+        punctBoxesPerLine[k].some((c) => isClose(c) && decorated(c))
+      const own = perGlyph === null || pullFailed ? decideCjkHangUnderCompression(lm) : null
+      if (own !== null || perGlyph === null) {
+        if (own === null) continue
+        const line = lines[k]
+        const hung = lineModels[k].hungWidth != null
+        let lastIx = line.length - 1
+        while (lastIx > 0 && line[lastIx].ch === ' ') lastIx--
+        const stop = hung ? line[lastIx] : lines[k + 1][lineModels[k].candWidths.length - 1]
+        if (!hungFrom.has(stop.from)) {
+          hungFrom.add(stop.from)
+          out.push({
+            from: stop.from,
+            ch: stop.ch,
+            perChar: stop.width,
+            baseLs: stop.ls,
+            hang: true,
+          })
+        }
+        const perChar = Math.round(own * 100) / 100
+        if (perChar > 0) {
+          for (const c of punctBoxesPerLine[k]) {
+            if (isClose(c) && !hungFrom.has(c.from))
+              out.push({ from: c.from, ch: c.ch, perChar, baseLs: c.ls })
+          }
+        }
+        continue
+      }
       const perChar = Math.round(perGlyph * 100) / 100
       if (perChar <= 0) continue
       const boxes = shrinkTargets(lineModels[k], punctBoxesPerLine[k], candPunctBoxesPerLine[k])
-      for (const c of boxes) out.push({ from: c.from, ch: c.ch, perChar, baseLs })
+      for (const c of boxes) {
+        if (!hungFrom.has(c.from)) out.push({ from: c.from, ch: c.ch, perChar, baseLs: c.ls })
+      }
     }
     return out
   }
@@ -634,6 +871,7 @@ export const CjkPunctShrinkExtension = Extension.create({
         state: {
           init: () => DecorationSet.empty,
           apply(tr, old) {
+            noteFloatTransaction(tr)
             const meta = tr.getMeta(cjkPunctShrinkPluginKey) as Decoration[] | undefined
             if (meta)
               return meta.length > 0 ? DecorationSet.create(tr.doc, meta) : DecorationSet.empty

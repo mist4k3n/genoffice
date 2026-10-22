@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IRange } from '@univerjs/core'
 import {
   FindModel,
@@ -10,6 +10,7 @@ import { Subject } from 'rxjs'
 
 import {
   buildLazyCellTest,
+  coerceReplaceValue,
   collectJournalMatches,
   coveredByWindow,
   extraComparator,
@@ -207,6 +208,12 @@ type FakeOverrides = {
 
 function state(overrides: FakeOverrides): LazyWorkbookState {
   return {
+    // The host bridge is per workbook state, not a page-level global, so that one
+    // page can hold several editors each bound to its own document. Tests build
+    // this state by hand, so they supply it the same way the app does.
+    get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
     file: {
       sessionId: 'session-1',
       sheets: [{ id: 's1', name: 'Sheet1', rowCount: overrides.rowCount ?? 1000, columnCount: 8 }],
@@ -389,7 +396,11 @@ function facade(
   }
   const providers = new Set<unknown>()
   const registrations: { provider: unknown; dispose: () => void }[] = []
+  let findString = ''
+  const find = vi.fn()
   const service = {
+    getFindString: () => findString,
+    find,
     getProviders: () => providers,
     registerFindReplaceProvider: (provider: unknown) => {
       const registration = {
@@ -432,6 +443,10 @@ function facade(
     registrations,
     rowFiltered,
     active,
+    find,
+    setFindString: (value: string) => {
+      findString = value
+    },
   }
 }
 
@@ -784,6 +799,62 @@ describe('installLazyFindBridge', () => {
     expect(mockEnsure).not.toHaveBeenCalled()
     bridge.dispose()
   })
+
+  it('replaceAll on out-of-window hits writes numbers back as numbers', async () => {
+    const harness = facade(state({}))
+    const inner = new FakeInnerModel([])
+    const builtin = { find: vi.fn().mockResolvedValue([inner]), terminate: vi.fn() }
+    harness.providers.add(builtin)
+    const bridge = installLazyFindBridge(harness)
+
+    mockRead.mockResolvedValue(mapped([{ row: 500, column: 3, value: 123 }]))
+
+    const models = await harnessLookup(harness)(query({ findString: '2' }))
+    const model = models[0]!
+    await settle(model)
+    await model.replaceAll('9')
+    // 123 → "193" → numeric 193, so SUM keeps counting it (was text "193" before)
+    expect(harness.setValues).toHaveBeenCalledWith([[{ v: 193 }]])
+    bridge.dispose()
+  })
+
+  it('replaceAll on out-of-window hits writes booleans back as booleans', async () => {
+    const harness = facade(state({}))
+    const inner = new FakeInnerModel([])
+    const builtin = { find: vi.fn().mockResolvedValue([inner]), terminate: vi.fn() }
+    harness.providers.add(builtin)
+    const bridge = installLazyFindBridge(harness)
+
+    mockRead.mockResolvedValue(mapped([{ row: 500, column: 3, value: true }]))
+
+    const models = await harnessLookup(harness)(query({ findString: '1' }))
+    const model = models[0]!
+    await settle(model)
+    await model.replaceAll('0')
+    expect(harness.setValues).toHaveBeenCalledWith([[{ v: false }]])
+    bridge.dispose()
+  })
+})
+
+describe('coerceReplaceValue', () => {
+  it('keeps numbers numeric, falling back to text when the result is not a number', () => {
+    expect(coerceReplaceValue(123, '193')).toBe(193)
+    expect(coerceReplaceValue(123, 'abc')).toBe('abc')
+    expect(coerceReplaceValue(123, '')).toBe('')
+  })
+
+  it('maps 1/0 back to booleans, leaving anything else as text', () => {
+    expect(coerceReplaceValue(true, '0')).toBe(false)
+    expect(coerceReplaceValue(false, '1')).toBe(true)
+    expect(coerceReplaceValue(true, 'TRUE')).toBe(true)
+    expect(coerceReplaceValue(true, 'yes')).toBe('yes')
+  })
+
+  it('leaves strings, nullish and formula-missing raws as text', () => {
+    expect(coerceReplaceValue('abc', 'abd')).toBe('abd')
+    expect(coerceReplaceValue(null, 'x')).toBe('x')
+    expect(coerceReplaceValue(undefined, 'x')).toBe('x')
+  })
 })
 
 /** A model whose disposal is observable, like the built-in SheetFindModel. */
@@ -856,7 +927,12 @@ describe('service-level dispatch (Univer semantics)', () => {
     const harness = facade(state({}))
     const bridge = installLazyFindBridge(harness)
     const builtin = univerLikeBuiltin([match('s1', 1, 1)])
+    harness.setFindString('needle')
     harness.service.registerFindReplaceProvider(builtin)
+    // the sweep happens at registration, before any find() dispatch …
+    expect([...harness.providers]).not.toContain(builtin)
+    // … and a session that was already searching gets re-run
+    expect(harness.find).toHaveBeenCalledTimes(1)
 
     mockRead.mockResolvedValue(mapped([]))
     await dispatchLikeUniver(harness)
@@ -1026,7 +1102,7 @@ describe('research cursor stability (r167)', () => {
     } as IFindMoveParams) as LazyCellMatch
     expect(walked).toBe(innerList[1])
     // walk steps must not carry stayIfOnMatch: with the selection on another
-    // in-window hit the inner model would re-anchor there forever (bugbot)
+    // in-window hit the inner model would re-anchor there forever
     for (const call of innerMove.mock.calls) {
       expect((call[0] as { stayIfOnMatch?: boolean } | undefined)?.stayIfOnMatch).toBe(false)
     }
@@ -1044,3 +1120,150 @@ function harnessLookup(harness: ReturnType<typeof facade>): (q: unknown) => Prom
   expect(typeof wrapper.find).toBe('function')
   return (q) => wrapper.find(q)
 }
+
+describe('sidecar find path', () => {
+  const sidecarPage = (
+    matches: { row: number; column: number; value?: unknown; formula?: string }[],
+    rest: Record<string, unknown> = {},
+  ) => ({
+    matches: matches.map((m) => ({
+      sheetId: 's1',
+      row: m.row,
+      column: m.column,
+      value: m.value ?? 'file needle',
+      valueText: m.value === undefined ? 'file needle' : String(m.value),
+      ...(m.formula === undefined ? {} : { formulaText: m.formula }),
+    })),
+    complete: true,
+    indexingComplete: true,
+    ...rest,
+  })
+
+  beforeEach(() => {
+    mockRead.mockReset()
+    mockEnsure.mockReset()
+    mockEnsure.mockResolvedValue(true)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('merges sidecar file hits with journal edits (shadow, overlay, window)', async () => {
+    const findWorkbookCells = vi.fn().mockResolvedValue(
+      sidecarPage([
+        { row: 5, column: 3 }, // inside the loaded window: the inner model owns it
+        { row: 200, column: 0 }, // shadowed by a journal edit that no longer matches
+        { row: 300, column: 1 }, // shadowed by a journal edit that still matches
+        { row: 400, column: 2 },
+      ]),
+    )
+    vi.stubGlobal('window', { desktopApi: { findWorkbookCells } })
+    const journal = new Map([
+      [
+        's1',
+        new Map([
+          ['200:0', { row: 200, column: 0, hasValue: true, value: 'edited away' }],
+          ['300:1', { row: 300, column: 1, hasValue: true, value: 'edited needle' }],
+          ['900:0', { row: 900, column: 0, hasValue: true, value: 'new needle' }],
+          ['950:0', { row: 950, column: 0, hasValue: false, value: null }],
+        ]),
+      ],
+    ])
+    const harness = facade(state({ journalCells: journal }))
+    const inner = new FakeInnerModel([])
+    const builtin = { find: vi.fn().mockResolvedValue([inner]), terminate: vi.fn() }
+    harness.providers.add(builtin)
+    const bridge = installLazyFindBridge(harness)
+
+    const models = await harnessLookup(harness)(query())
+    const model = models[0]!
+    await vi.waitFor(() => expect(model.getMatches().length).toBe(3))
+    const positions = model
+      .getMatches()
+      .map((m) => (m as LazyCellMatch).range.range)
+      .map((r) => [r.startRow, r.startColumn])
+    expect(positions).toEqual([
+      [300, 1],
+      [400, 2],
+      [900, 0],
+    ])
+    expect((model.getMatches()[1] as LazyCellMatch).matchedText).toBe('file needle')
+    expect(mockRead).not.toHaveBeenCalled()
+    expect(findWorkbookCells.mock.calls[0]![0]).toMatchObject({
+      sheetId: 's1',
+      query: 'needle',
+      matchCase: false,
+      matchEntireCell: false,
+      lookIn: 'values',
+      wildcards: false,
+    })
+    expect(harness.setMessage).not.toHaveBeenCalled()
+    bridge.dispose()
+  })
+
+  it('asks the sidecar for formula text when searching formulas', async () => {
+    const findWorkbookCells = vi
+      .fn()
+      .mockResolvedValue(sidecarPage([{ row: 400, column: 2, value: 7, formula: '=NEEDLE()' }]))
+    vi.stubGlobal('window', { desktopApi: { findWorkbookCells } })
+    const harness = facade(state({}))
+    const inner = new FakeInnerModel([])
+    harness.providers.add({ find: vi.fn().mockResolvedValue([inner]), terminate: vi.fn() })
+    const bridge = installLazyFindBridge(harness)
+
+    const models = await harnessLookup(harness)(query({ findBy: 'formula', caseSensitive: true }))
+    const model = models[0]!
+    await vi.waitFor(() => expect(model.getMatches().length).toBe(1))
+    expect(findWorkbookCells.mock.calls[0]![0]).toMatchObject({
+      lookIn: 'formulas',
+      matchCase: true,
+    })
+    const hit = model.getMatches()[0] as LazyCellMatch
+    expect(hit.isFormula).toBe(true)
+    expect(hit.matchedText).toBe('=NEEDLE()')
+    bridge.dispose()
+  })
+
+  it('falls back to range paging when the sidecar rejects the command', async () => {
+    const findWorkbookCells = vi.fn().mockRejectedValue(new Error('unsupported command'))
+    vi.stubGlobal('window', { desktopApi: { findWorkbookCells } })
+    mockRead.mockResolvedValue(mapped([{ row: 500, column: 3, value: 'deep needle' }]))
+    const harness = facade(state({}))
+    const inner = new FakeInnerModel([])
+    harness.providers.add({ find: vi.fn().mockResolvedValue([inner]), terminate: vi.fn() })
+    const bridge = installLazyFindBridge(harness)
+
+    const models = await harnessLookup(harness)(query())
+    const model = models[0]!
+    await settle(model)
+    expect((model.getMatches()[0] as LazyCellMatch).range.range.startRow).toBe(500)
+    bridge.dispose()
+  })
+
+  it('reports the match cap instead of the scan budget', async () => {
+    const many = Array.from({ length: 100_000 }, (_, i) => ({
+      row: 10 + Math.floor(i / 8),
+      column: i % 8,
+    }))
+    const findWorkbookCells = vi.fn().mockResolvedValue(
+      sidecarPage(many, {
+        complete: false,
+        nextCursor: { sheetId: 's1', row: 99_999, column: 0 },
+      }),
+    )
+    vi.stubGlobal('window', { desktopApi: { findWorkbookCells } })
+    const harness = facade(state({ rowCount: 200_000 }))
+    const inner = new FakeInnerModel([])
+    harness.providers.add({ find: vi.fn().mockResolvedValue([inner]), terminate: vi.fn() })
+    const bridge = installLazyFindBridge(harness)
+
+    const models = await harnessLookup(harness)(query())
+    const model = models[0]!
+    await vi.waitFor(() => expect(harness.setMessage).toHaveBeenCalled())
+    expect(harness.setMessage.mock.calls[0]![0]).toContain('appFindMatchesCapped')
+    expect(model.getMatches().length).toBe(100_000)
+    expect(findWorkbookCells).toHaveBeenCalledTimes(1)
+    bridge.dispose()
+  })
+})

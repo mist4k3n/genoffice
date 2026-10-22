@@ -14,7 +14,7 @@
  *     (ja/ko/traditional-zh/serif/mono) with fonts guaranteed on this platform -> if all miss,
  *     return undefined (callers use heuristic metrics).
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -28,6 +28,7 @@ import {
   type RunStyle,
 } from '@genoffice/pptx-render'
 import { classifyCjkScript, classifyCjkScriptByNameScript } from '../shared/cjk-script'
+import { scanFontDirs, type ScanTask } from './font-scan'
 import {
   initShapedMetrics,
   shapedMeasure,
@@ -159,27 +160,20 @@ function appleFontAssetDirs(): string[] {
   return dirs
 }
 
-/** Office cloud-font roots: <root>/<Family Name>/<numeric-id>.ttf — indexed by directory name. */
-function cloudFontRoots(): string[] {
-  const globDirs = (base: string, sub: string): string[] => {
-    try {
-      return readdirSync(base).map((d) => join(base, d, sub))
-    } catch {
-      return []
-    }
-  }
+/** Office cloud-font store: <base>/<cache-id>/CloudFonts/<Family Name>/<numeric-id>.ttf — indexed by directory name. */
+function cloudFontBase(): string | undefined {
   switch (process.platform) {
     case 'darwin':
-      return globDirs(
-        join(homedir(), 'Library/Group Containers/UBF8T346G9.Office/FontCache'),
-        'CloudFonts',
-      )
+      return join(homedir(), 'Library/Group Containers/UBF8T346G9.Office/FontCache')
     case 'win32':
-      return globDirs(join(homedir(), 'AppData/Local/Microsoft/FontCache'), 'CloudFonts')
+      return join(homedir(), 'AppData/Local/Microsoft/FontCache')
     default:
-      return []
+      return undefined
   }
 }
+
+/** Directory scan budget; the FontCache readdir has stalled for minutes on some Macs */
+const SCAN_DEADLINE_MS = 3000
 
 /** Normalize: NFKC (full-width MS -> MS), lowercase, strip spaces/hyphens/underscores. */
 function norm(s: string): string {
@@ -199,6 +193,7 @@ const MS_MINCHO = ['MSMincho']
 // by weight; the full name with W3 is the fallback (index key = normalized filename)
 const HIRAGINO_SANS = ['ヒラギノ角ゴシック', 'ヒラギノ角ゴシック W3']
 const HIRAGINO_MINCHO = ['ヒラギノ明朝 ProN']
+const SCRIPT_FALLBACK_KEYS = new Set([...HIRAGINO_SANS, ...HIRAGINO_MINCHO].map((f) => norm(f)))
 
 /** Common font-name aliases (localized name <-> English family <-> actual filename); keys match via norm. */
 const ALIASES: Record<string, string[]> = {
@@ -212,6 +207,7 @@ const ALIASES: Record<string, string[]> = {
   仿宋: ['FangSong', 'STFangsong'],
   helvetica: ['Arial'],
   'helvetica neue': ['Arial'],
+  'arial rounded mt bold': ['Arial Rounded Bold'],
   calibri: ['Carlito', 'Arial'],
   'calibri light': ['Carlito', 'Arial'],
   // PowerPoint for Mac substitutes the Windows-only Lucida Sans family with Lucida Grande
@@ -284,6 +280,16 @@ const ALIASES: Record<string, string[]> = {
 const ALIAS_MAP = new Map(Object.entries(ALIASES).map(([k, v]) => [norm(k), v]))
 const aliasesOf = (family: string): string[] => ALIAS_MAP.get(norm(family)) ?? []
 
+// "X Variable" / "X VF" is the variable-font packaging of static "X" (same outlines and
+// advances); whichever one is installed stands in for the other before script substitution
+const VARIABLE_SUFFIX_RE = /\s+(?:variable|vf)$/i
+function variableTwinsOf(family: string): string[] {
+  const f = family.trim()
+  const m = VARIABLE_SUFFIX_RE.exec(f)
+  if (m) return [f.slice(0, m.index).trim()].filter(Boolean)
+  return [`${f} Variable`, `${f} VF`]
+}
+
 /**
  * Substitution for missing fonts (aligned with PowerPoint's font substitution): first classify
  * script by family name (ja/ko/traditional-zh) and substitute a same-script font guaranteed on
@@ -296,6 +302,8 @@ const aliasesOf = (family: string): string[] => ALIAS_MAP.get(norm(family)) ?? [
 const SERIF_RE =
   /serif|roman|garamond|georgia|playfair|didot|bodoni|baskerville|caslon|palatino|antiqua|minion|lora|merriweather|crimson|spectral|charter|literata|song|songti|宋|mincho|明朝|ming|batang|바탕|myeongjo|명조|gungsuh|궁서|細明|標楷|儷宋/i
 const MONO_RE = /mono|courier|consolas|menlo|monaco|code|typewriter/i
+/** Bullet glyphs Arial (WGL4) covers: • ■ □ ▪ ▫ ▲ ► ▼ ◄ ◊ ○ ● ◘ ◙ */
+const SYMBOL_BULLET_GLYPH_RE = /^[•■□▪▫▲►▼◄◊○●◘◙]+$/
 
 // PowerPoint for Mac substitutes EVERY unresolvable family with Calibri regardless of its
 // apparent class — probe decks with fake serif ("Qqzgaramond") / mono ("Zxqvwt Mono Courier")
@@ -495,24 +503,68 @@ function readFaceDir(buf: Buffer): FaceInfo[] {
 /** OpenType layout tables — droppable for metrics-only parsing when opentype.js rejects them. */
 const LAYOUT_TABLES: ReadonlySet<string> = new Set(['GSUB', 'GPOS', 'GDEF'])
 
-/** Extract a single face from a ttc into a standalone sfnt (rewrite the table directory, copy table data by original offset). */
-function extractFace(buf: Buffer, offset: number, drop?: ReadonlySet<string>): ArrayBuffer {
+/**
+ * A gvar table with no glyph variations (axisCount filled in per font). Layout only needs
+ * advances, which come from hmtx plus HVAR deltas, but opentype.js exposes its variation API
+ * only when a gvar table exists and parses the real one eagerly — SF Pro's is 220 MB of heap.
+ * The stub keeps the API and drops the outlines' variations.
+ */
+function emptyGvar(axisCount: number): Buffer {
+  const b = Buffer.alloc(22)
+  b.writeUInt16BE(1, 0)
+  b.writeUInt16BE(axisCount, 4)
+  b.writeUInt32BE(20, 16)
+  return b
+}
+
+const metricsOnlyTableName = (tag: string) => tag === 'gvar' || tag === 'cvar'
+
+/**
+ * Extract a single face from a ttc into a standalone sfnt (rewrite the table directory, copy
+ * table data by original offset). `metricsOnly` also replaces the outline-variation tables
+ * (gvar stubbed empty, cvar dropped) for a parse that only reads advances.
+ */
+export function extractFace(
+  buf: Buffer,
+  offset: number,
+  drop?: ReadonlySet<string>,
+  metricsOnly = false,
+): ArrayBuffer {
   const isTtc = buf.toString('ascii', 0, 4) === 'ttcf'
-  if (!isTtc && !drop) {
-    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
-  }
   const faceOff = isTtc ? offset : 0
   const numTables = buf.readUInt16BE(faceOff + 4)
-  const entries: Array<{ dirPos: number; tOff: number; tLen: number; newOff: number }> = []
+  const entries: Array<{
+    dirPos: number
+    tOff: number
+    tLen: number
+    newOff: number
+    stub?: Buffer
+  }> = []
+  let axisCount = 0
+  let rewriteVariations = false
   for (let t = 0; t < numTables; t++) {
     const e = faceOff + 12 + 16 * t
-    if (drop?.has(buf.toString('ascii', e, e + 4))) continue
+    const tag = buf.toString('ascii', e, e + 4)
+    if (drop?.has(tag)) continue
+    if (tag === 'fvar') axisCount = buf.readUInt16BE(buf.readUInt32BE(e + 8) + 8)
+    if (metricsOnly && metricsOnlyTableName(tag)) rewriteVariations = true
+    if (metricsOnly && tag === 'cvar') continue
     entries.push({
       dirPos: e,
       tOff: buf.readUInt32BE(e + 8),
       tLen: buf.readUInt32BE(e + 12),
       newOff: 0,
     })
+  }
+  if (!isTtc && !drop && !rewriteVariations) {
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
+  }
+  if (rewriteVariations) {
+    for (const e of entries) {
+      if (buf.toString('ascii', e.dirPos, e.dirPos + 4) !== 'gvar') continue
+      e.stub = emptyGvar(axisCount)
+      e.tLen = e.stub.length
+    }
   }
   let total = 12 + 16 * entries.length
   for (const e of entries) {
@@ -531,7 +583,8 @@ function extractFace(buf: Buffer, offset: number, drop?: ReadonlySet<string>): A
     buf.copy(out, 12 + 16 * t, e.dirPos, e.dirPos + 8)
     out.writeUInt32BE(e.newOff, 12 + 16 * t + 8)
     out.writeUInt32BE(e.tLen, 12 + 16 * t + 12)
-    buf.copy(out, e.newOff, e.tOff, e.tOff + e.tLen)
+    if (e.stub) e.stub.copy(out, e.newOff)
+    else buf.copy(out, e.newOff, e.tOff, e.tOff + e.tLen)
   }
   return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer
 }
@@ -600,25 +653,13 @@ class FontRegistry {
   private parsed = new Map<string, OpentypeFontLike | null>()
   private indexed = false
 
-  private scanFlatDir(dir: string): void {
-    let names: string[]
-    try {
-      names = readdirSync(dir)
-    } catch {
-      return
-    }
-    for (const name of names) {
+  private addFlatDir(dir: string, files: string[]): void {
+    for (const name of files) {
       const m = /^(.+)\.(ttf|otf|ttc|otc)$/i.exec(name)
       if (!m) continue
       // Strip the variable-font axis suffix: NotoSansSC[wght].ttf -> notosanssc
       const key = norm(m[1]!.replace(/\[[^\]]*\]$/, ''))
-      const full = join(dir, name)
-      try {
-        if (!statSync(full).isFile()) continue
-      } catch {
-        continue
-      }
-      if (!this.index.has(key)) this.index.set(key, full)
+      if (!this.index.has(key)) this.index.set(key, join(dir, name))
     }
   }
 
@@ -629,40 +670,38 @@ class FontRegistry {
       this.index.set(norm(name), path)
     }
     // System dirs first so same-named Office copies (arial.ttf…) resolve non-private
-    for (const dir of fontDirs()) this.scanFlatDir(dir)
+    const flat = fontDirs()
     if (userFontDir) {
       this.privateDirs.push(userFontDir)
-      this.scanFlatDir(userFontDir)
+      flat.push(userFontDir)
     }
     for (const dir of officeFontDirs()) {
       this.privateDirs.push(dir)
-      this.scanFlatDir(dir)
+      flat.push(dir)
     }
     // One prefix each covers every scanned asset dir for the isPrivate check
     this.privateDirs.push(APPLE_FONT_ASSET_ROOT, APPLE_FONT_SUBSETS, EMBEDDED_FONT_DIR)
-    for (const dir of appleFontAssetDirs()) this.scanFlatDir(dir)
-    for (const root of cloudFontRoots()) {
-      let families: string[]
-      try {
-        families = readdirSync(root)
-      } catch {
-        continue
+    flat.push(...appleFontAssetDirs())
+    const tasks: ScanTask[] = flat.map((dir) => ({ kind: 'flat', dir }))
+    const cloudBase = cloudFontBase()
+    if (cloudBase) tasks.push({ kind: 'cloud', base: cloudBase, sub: 'CloudFonts' })
+    const results = scanFontDirs(tasks, SCAN_DEADLINE_MS)
+    tasks.forEach((task, i) => {
+      const r = results[i]
+      if (!r) return
+      if (task.kind === 'flat' && r.kind === 'flat') {
+        this.addFlatDir(task.dir, r.files)
+        return
       }
-      this.privateDirs.push(root)
-      for (const fam of families) {
-        const dir = join(root, fam)
-        let files: string[]
-        try {
-          files = readdirSync(dir)
-        } catch {
-          continue
+      if (r.kind !== 'cloud') return
+      for (const { root, families } of r.roots) {
+        this.privateDirs.push(root)
+        for (const [fam, paths] of families) {
+          const key = norm(fam)
+          this.cloud.set(key, [...(this.cloud.get(key) ?? []), ...paths])
         }
-        const paths = files.filter((f) => /\.(ttf|otf|ttc|otc)$/i.test(f)).map((f) => join(dir, f))
-        if (!paths.length) continue
-        const key = norm(fam)
-        this.cloud.set(key, [...(this.cloud.get(key) ?? []), ...paths])
       }
-    }
+    })
   }
 
   isPrivate(path: string): boolean {
@@ -689,14 +728,20 @@ class FontRegistry {
     let font: OpentypeFontLike | null
     try {
       const buf = readFileSync(path)
+      // lowMemory: glyphs are materialized on lookup instead of one object per glyph at
+      // parse time — PingFang (49k glyphs) drops from 171 MB of heap to 10 MB with identical
+      // advances; combined with the metrics-only face this is what keeps opening a CJK deck
+      // from pinning several hundred MB in the main process
       try {
-        font = opentype.parse(extractFace(buf, offset)) as unknown as OpentypeFontLike
+        font = opentype.parse(extractFace(buf, offset, undefined, true), {
+          lowMemory: true,
+        }) as unknown as OpentypeFontLike
       } catch {
         // Legacy CJK fonts (gulim/batang) carry GSUB versions opentype.js rejects; advances
         // only need cmap/hmtx/kern, so retry without the OpenType layout tables
-        font = opentype.parse(
-          extractFace(buf, offset, LAYOUT_TABLES),
-        ) as unknown as OpentypeFontLike
+        font = opentype.parse(extractFace(buf, offset, LAYOUT_TABLES, true), {
+          lowMemory: true,
+        }) as unknown as OpentypeFontLike
       }
     } catch {
       font = null
@@ -792,6 +837,7 @@ class FontRegistry {
     }
     push(style.fontFamily)
     for (const a of aliasesOf(style.fontFamily)) push(a)
+    for (const v of variableTwinsOf(style.fontFamily)) push(v)
     // Candidates after this index are same-script/class substitutes, not the requested
     // family — the sub-family cloud fallback below must run before them
     const substituteStart = candidates.length
@@ -858,6 +904,10 @@ class FontRegistry {
     if (embedded) return embedded
     for (const strict of style.bold || style.italic ? [true, false] : [false])
       for (const family of candidates.slice(1, substituteStart)) {
+        // The platform script fallback at the tail of a JP alias list is not a style
+        // variant of the family: a bold MS PGothic request must synthesize bold from
+        // msgothic.ttc (PowerPoint) rather than swap to Hiragino's real W6 face
+        if (strict && SCRIPT_FALLBACK_KEYS.has(norm(family))) break
         const hit = tryFamily(family, strict)
         if (hit) return hit
       }
@@ -1270,6 +1320,13 @@ export function createSystemFontMetrics(): FontMetricsProvider {
     const lacks = (probe: string) => !e || e.font.charToGlyphIndex?.(probe) === 0
     if (style.substScript === 'ko' && /[가-힣]/.test(text) && lacks('가')) return 'Malgun Gothic'
     if (style.substScript === 'ja' && /[぀-ヿ]/.test(text) && lacks('あ')) return 'Yu Gothic'
+    // Geometric bullets the face lacks draw in Arial, PowerPoint's linked symbol font (its ● is
+    // 0.43em whatever the run font; Chromium's per-glyph fallback on macOS lands on a CJK face
+    // with a 0.75em circle, which buSzPts then scales up — seen in an Open Sans deck)
+    if (SYMBOL_BULLET_GLYPH_RE.test(text) && lacks(text[0]!)) {
+      const arial = resolveEntry({ ...style, fontFamily: 'Arial' })
+      if (arial && !arial.substituted && arial.font.charToGlyphIndex?.(text[0]!)) return 'Arial'
+    }
     return undefined
   }
   const withFallback = (style: RunStyle, family: string): RunStyle => {

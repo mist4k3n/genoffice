@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { findWorkbookCells, selectWorkbookRange } from '../src/renderer/ai/workbook-search'
+import {
+  ERROR_VALUE_RE,
+  findWorkbookCells,
+  selectWorkbookRange,
+} from '../src/renderer/ai/workbook-search'
 import { ensureLazyRangeLoaded, readSheetRangeMapped } from '../src/renderer/univer-sync'
 import type { FindCellsOptions } from '../src/renderer/ai/tools'
 import type { WorkbookReadContext } from '../src/renderer/ai/workbook-readers'
@@ -75,6 +79,30 @@ describe('findWorkbookCells: demo workbook', () => {
     expect(result.matches[0]?.value).toBe('#REF!')
   })
 
+  it('recognizes every error value Excel can display, modern data-type errors included', () => {
+    for (const value of [
+      '#REF!',
+      '#DIV/0!',
+      '#VALUE!',
+      '#NAME?',
+      '#N/A',
+      '#NUM!',
+      '#NULL!',
+      '#SPILL!',
+      '#CALC!',
+      '#FIELD!',
+      '#CONNECT!',
+      '#BLOCKED!',
+      '#UNKNOWN!',
+      '#GETTING_DATA',
+    ]) {
+      expect(ERROR_VALUE_RE.test(value)).toBe(true)
+    }
+    for (const value of ['#FOO!', 'N/A', '#REF', '', '#12345!']) {
+      expect(ERROR_VALUE_RE.test(value)).toBe(false)
+    }
+  })
+
   it('supports regex matching and reports invalid patterns', async () => {
     const regexResult = await findWorkbookCells(
       demoCtx(DEMO_SHEETS),
@@ -125,6 +153,12 @@ function lazyCtx(state: unknown, worksheets: unknown[]): WorkbookReadContext {
 
 function lazyState(journalCells: Map<string, Map<string, unknown>>) {
   return {
+    // The host bridge is per workbook state, not a page-level global, so that one
+    // page can hold several editors each bound to its own document. Tests build
+    // this state by hand, so they supply it the same way the app does.
+    get api() {
+      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+    },
     file: {
       sessionId: 'session-1',
       sheets: [{ id: 'sh1', name: 'Data', rowCount: 4, columnCount: 2 }],
@@ -274,4 +308,93 @@ describe('selectWorkbookRange', () => {
     )
     expect(result).toEqual({ ok: false, error: 'Unknown sheet: ghost' })
   })
+})
+
+describe('findWorkbookCells: lazy workbook via sidecar', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('searches the file in the sidecar and overlays journal edits', async () => {
+    const sidecarFind = vi.fn().mockResolvedValue({
+      matches: [
+        { sheetId: 'sh1', row: 0, column: 0, value: 'file total', valueText: 'file total' },
+        { sheetId: 'sh1', row: 1, column: 0, value: 'total again', valueText: 'total again' },
+        { sheetId: 'sh1', row: 2, column: 1, value: 9, valueText: '9', formulaText: '=TOTAL()' },
+      ],
+      complete: true,
+      indexingComplete: true,
+    })
+    vi.stubGlobal('window', { desktopApi: { findWorkbookCells: sidecarFind } })
+    vi.mocked(readSheetRangeMapped).mockReset()
+    const journal = new Map([
+      ['sh1', new Map([['0:0', { row: 0, column: 0, hasValue: true, value: 'edited total' }]])],
+    ])
+    const result = await findWorkbookCells(
+      lazyCtx(lazyState(journal), [DATA_SHEET]),
+      options({ query: 'total' }),
+    )
+    expect(result.matches.map((m) => `${m.address}: ${String(m.value)}`)).toEqual([
+      'A1: edited total',
+      'A2: total again',
+      'B3: 9',
+    ])
+    expect(result.truncated).toBe(false)
+    expect(result.incompleteSheets).toEqual([])
+    expect(readSheetRangeMapped).not.toHaveBeenCalled()
+    expect(sidecarFind.mock.calls[0]![0]).toMatchObject({
+      sessionId: 'session-1',
+      sheetId: 'sh1',
+      query: 'total',
+      matchCase: false,
+      matchEntireCell: false,
+      lookIn: 'both',
+      wildcards: false,
+      limit: 51,
+    })
+  })
+
+  it('truncates at maxResults and keeps regex queries on the range scan', async () => {
+    const sidecarFind = vi.fn().mockResolvedValue({
+      matches: [0, 1, 2].map((row) => ({
+        sheetId: 'sh1',
+        row,
+        column: 0,
+        value: 'total',
+        valueText: 'total',
+      })),
+      complete: false,
+      nextCursor: { sheetId: 'sh1', row: 3, column: 0 },
+      indexingComplete: true,
+    })
+    vi.stubGlobal('window', { desktopApi: { findWorkbookCells: sidecarFind } })
+    const capped = await findWorkbookCells_(options({ query: 'total', maxResults: 2 }))
+    expect(capped.matches).toHaveLength(2)
+    expect(capped.truncated).toBe(true)
+    expect(sidecarFind.mock.calls[0]![0]).toMatchObject({ limit: 3 })
+
+    sidecarFind.mockClear()
+    await findWorkbookCells_(options({ query: 'total', lookIn: 'formulas' }))
+    expect(sidecarFind.mock.calls[0]![0]).toMatchObject({ lookIn: 'formulas_only' })
+
+    vi.mocked(readSheetRangeMapped).mockResolvedValue({
+      screen: {
+        cells: [{ row: 0, column: 0, value: 'total' }],
+        rows: [],
+        merges: [],
+        hyperlinks: [],
+      },
+      raw: { indexingComplete: true },
+      indexedThroughScreen: 3,
+      fileEndRow: 3,
+    } as never)
+    sidecarFind.mockClear()
+    const viaRegex = await findWorkbookCells_(options({ query: 'tot+al', regex: true }))
+    expect(viaRegex.matches).toHaveLength(1)
+    expect(sidecarFind).not.toHaveBeenCalled()
+  })
+
+  function findWorkbookCells_(opts: FindCellsOptions) {
+    return findWorkbookCells(lazyCtx(lazyState(new Map()), [DATA_SHEET]), opts)
+  }
 })

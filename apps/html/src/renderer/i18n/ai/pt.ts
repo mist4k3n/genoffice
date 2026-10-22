@@ -37,6 +37,8 @@ export const pt = {
     'Problema de rede: não foi possível conectar ao serviço de IA. Verifique sua conexão e tente novamente',
   aiNewChat: 'Nova conversa',
   aiNoReply: '(sem resposta)',
+  aiRegionError:
+    'O fornecedor deste modelo não atende à sua região atual — escolha outro modelo ou mude de rede',
   aiOverloadedError:
     'O serviço de IA está sobrecarregado no momento — tente novamente em instantes',
   aiRegenerateTitle: 'Gerar novamente',
@@ -65,6 +67,7 @@ export const pt = {
   aiClarifyDecideAnswer: '(decida por mim)',
   aiClarifyMulti: 'Seleção múltipla',
   aiClarifyNext: 'Próxima',
+  aiClarifyPrev: 'Anterior',
   aiClarifyOther: 'Outro (digite)',
   aiClarifySelected: '{n} selecionados',
   aiClarifySkip: 'Pular pesquisa',
@@ -73,6 +76,8 @@ export const pt = {
   aiToolClarifySkipped: 'Questionário ignorado',
   aiToolPlan: 'Briefing confirmado ({n} seções)',
   aiToolPlanRejected: 'Briefing não confirmado',
+  aiToolPlanFailed: 'Não foi possível redigir o briefing',
+  aiDraftingBrief: 'Redigindo o briefing…',
   aiToolWritePage: 'Página gerada',
   aiToolWritePageFailed: 'Falha ao gerar a página',
   aiToolWritePagePartial: 'Página gerada parcialmente',

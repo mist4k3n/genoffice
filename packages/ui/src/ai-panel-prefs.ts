@@ -1,4 +1,5 @@
 export const AI_FONT_SIZES = ['default', 'large', 'xlarge', 'custom'] as const
+export type AiPanelSide = 'left' | 'right'
 export type AiFontSize = (typeof AI_FONT_SIZES)[number]
 
 /** Body text size of `.ai-chat` in every app's stylesheet; the presets scale from it */
@@ -14,16 +15,28 @@ const PRESET_ZOOM: Record<Exclude<AiFontSize, 'custom'>, number> = {
 
 /** AI panel display preferences, persisted by the shell in app-settings.json */
 export interface AiPanelPrefs {
+  readonly side: AiPanelSide
   readonly fontSize: AiFontSize
   /** Body text size in px, used only when `fontSize` is `'custom'` */
   readonly customFontSize: number
   readonly spellcheck: boolean
+  /** Off: every new document opens with the panel collapsed, ignoring the remembered state */
+  readonly openInNewDocs: boolean
+  /** Off: the panel and its rail button are hidden and new documents never open
+   * it, the way Word treats the Copilot pane — an explicit Ask-AI action (ribbon,
+   * context menu, shortcut) still opens the panel for the current document, and
+   * turning the switch off closes one that was already open (for users who want
+   * a plain editor without a broken Ask-AI) */
+  readonly showAiSidebar: boolean
 }
 
 export const DEFAULT_AI_PANEL_PREFS: AiPanelPrefs = {
+  side: 'left',
   fontSize: 'default',
   customFontSize: AI_FONT_BASE_PX,
   spellcheck: true,
+  openInNewDocs: true,
+  showAiSidebar: true,
 }
 
 export function isAiFontSize(value: unknown): value is AiFontSize {
@@ -52,9 +65,12 @@ export function aiPanelZoom(prefs: AiPanelPrefs): number {
 
 export function sameAiPanelPrefs(a: AiPanelPrefs, b: AiPanelPrefs): boolean {
   return (
+    a.side === b.side &&
     a.fontSize === b.fontSize &&
     a.customFontSize === b.customFontSize &&
-    a.spellcheck === b.spellcheck
+    a.spellcheck === b.spellcheck &&
+    a.openInNewDocs === b.openInNewDocs &&
+    a.showAiSidebar === b.showAiSidebar
   )
 }
 
@@ -62,10 +78,19 @@ export function sameAiPanelPrefs(a: AiPanelPrefs, b: AiPanelPrefs): boolean {
 export function normalizeAiPanelPrefs(raw: unknown): AiPanelPrefs {
   const obj = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   return {
+    side: obj.side === 'right' ? 'right' : 'left',
     fontSize: isAiFontSize(obj.fontSize) ? obj.fontSize : DEFAULT_AI_PANEL_PREFS.fontSize,
     customFontSize:
       clampAiCustomFontSize(obj.customFontSize) ?? DEFAULT_AI_PANEL_PREFS.customFontSize,
     spellcheck:
       typeof obj.spellcheck === 'boolean' ? obj.spellcheck : DEFAULT_AI_PANEL_PREFS.spellcheck,
+    openInNewDocs:
+      typeof obj.openInNewDocs === 'boolean'
+        ? obj.openInNewDocs
+        : DEFAULT_AI_PANEL_PREFS.openInNewDocs,
+    showAiSidebar:
+      typeof obj.showAiSidebar === 'boolean'
+        ? obj.showAiSidebar
+        : DEFAULT_AI_PANEL_PREFS.showAiSidebar,
   }
 }

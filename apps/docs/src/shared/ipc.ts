@@ -1,8 +1,8 @@
 export interface OpenFileResult {
   path: string
   name: string
-  /** raw docx bytes */
-  data: ArrayBuffer
+  /** one-shot URL serving the docx bytes (fetch it exactly once) */
+  dataUrl: string
   /** sha256 of the original file; original archived under this hash */
   hash: string
   /** the on-disk file is password protected (opened via decrypt; saves re-encrypt) */
@@ -43,6 +43,7 @@ import type {
   AiStreamRequest,
   GenSparkAccountStatus,
 } from '@genoffice/ai-provider'
+import type { HeadlessExportTarget } from '@genoffice/electron-utils/headless-export'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
 import type { AiPanelPrefs } from '@genoffice/ui'
 
@@ -69,6 +70,39 @@ export type {
   AgentToolDef,
   AgentToolResult,
 } from '@genoffice/agent-core'
+
+// ---- PDF export ----
+
+/**
+ * In-document link to stamp into an exported PDF as a GoTo annotation. All
+ * coordinates are fractions of the page box (top-left origin) so the main
+ * process can scale them to whatever page size Chromium produced.
+ */
+export interface PdfInternalLink {
+  page: number
+  x: number
+  y: number
+  w: number
+  h: number
+  toPage: number
+  toY: number
+}
+
+// ---- Markdown export ----
+
+export interface MarkdownImage {
+  /** file name inside the media folder */
+  name: string
+  /** data: URL or lazy docx-media URL the main process resolves */
+  src: string
+}
+
+/**
+ * Folder token the Markdown references pictures under; the writer swaps it
+ * for the real `<file>_files` folder once the save path is known. User text
+ * can never spell it: `_` is escaped on the way out.
+ */
+export const MARKDOWN_MEDIA_DIR_TOKEN = '__genoffice_media__'
 
 // ---- chat attachments (local files fed to the agent via tools) ----
 
@@ -129,8 +163,10 @@ export type MenuCommand =
   | 'zoom-in'
   | 'zoom-out'
   | 'zoom-100'
+  | 'zoom-set'
   | 'zoom-page-width'
   | 'zoom-whole-page'
+  | 'zoom-multi-page'
   | 'toggle-ai'
   | 'toggle-dark'
   | 'insert-table'
@@ -150,14 +186,50 @@ export type MenuCommand =
   | 'align-justify'
   | 'page-setup'
   | 'find'
+  | 'replace'
+  | 'goto'
   | 'print'
   | 'export-pdf'
   | 'export-html'
+  | 'export-markdown'
+  | 'export-images'
   | 'word-count'
+  | 'autocorrect-options'
+  | 'preferences'
+  | 'table-insert-cells'
+  | 'table-insert-rows-above'
+  | 'table-insert-rows-below'
+  | 'table-insert-cols-left'
+  | 'table-insert-cols-right'
+  | 'table-delete-table'
+  | 'table-delete-columns'
+  | 'table-delete-rows'
+  | 'table-delete-cells'
+  | 'table-select-table'
+  | 'table-select-column'
+  | 'table-select-row'
+  | 'table-select-cell'
+  | 'table-merge-cells'
+  | 'table-split-cells'
+  | 'table-split-table'
+  | 'table-autofit-contents'
+  | 'table-autofit-window'
+  | 'table-autofit-fixed'
+  | 'table-distribute-rows'
+  | 'table-distribute-columns'
+  | 'table-repeat-header'
+  | 'table-gridlines'
+  | 'table-properties'
   | 'ai-proofread'
   | 'shortcuts'
 
 export type UiTheme = 'light' | 'dark' | 'system'
+
+/**
+ * Document page theme preference (genoffice#1811): what the canvas/paper does relative
+ * to the UI theme. 'follow' keeps the previous single-theme behavior.
+ */
+export type DocTheme = 'follow' | 'light' | 'dark'
 
 /** shell-wide AutoSave default; updatedAt is 0 until the user has ever set it */
 export interface AutoSaveDefault {
@@ -189,9 +261,95 @@ export interface AiDocContent {
   html: string
 }
 
+export type ZoteroCommand =
+  'addEditCitation' | 'addEditBibliography' | 'refresh' | 'setDocPrefs' | 'removeCodes'
+
+export type ZoteroCommandErrorCode =
+  'connection-refused' | 'unsupported-command' | 'operation-failed'
+
+export interface ZoteroCommandResult {
+  ok: boolean
+  errorCode?: ZoteroCommandErrorCode
+  error?: string
+}
+
+export interface ZoteroRendererRequest {
+  requestId: string
+  command: string
+  args: unknown[]
+}
+
+export interface ZoteroRendererResponse {
+  requestId: string
+  ok: boolean
+  result?: unknown
+  error?: string
+}
+
+/**
+ * MCP bridge: an editor command pushed from the shell main process into a docs
+ * tab so an external agent drives the *visible* editor instead of writing a file
+ * behind it. `insert_content` / `replace_blocks` / `apply_ops` / `read_document`
+ * reuse the built-in agent's tool executors; `save_document` writes the live
+ * document to an explicit path.
+ */
+export type McpEditorCommand =
+  'insert_content' | 'replace_blocks' | 'apply_ops' | 'read_document' | 'save_document'
+
+export interface McpCommandMessage {
+  requestId: string
+  command: McpEditorCommand
+  payload: unknown
+}
+
+export interface McpCommandResult {
+  requestId: string
+  ok: boolean
+  result?: unknown
+  error?: string
+}
+
+export interface McpSaveResult {
+  ok: boolean
+  path?: string
+  error?: string
+  passwordIntentPending?: boolean
+  dataUrl?: string
+}
+
+/** Chromium's misspelling data for a claimed body right-click (`seq` = the claim it answers) */
+export interface ContextMenuRequest {
+  seq: number
+  misspelledWord: string
+  suggestions: string[]
+}
+
+export interface SpellLanguages {
+  active: string[]
+  /** empty on macOS: the OS checker picks the language itself */
+  available: string[]
+}
+
+export type PrintDuplex = 'simplex' | 'longEdge' | 'shortEdge'
+
+/** job options from the in-app print dialog; deviceName null = system dialog, '' = OS default printer */
+export interface PrintJobOptions {
+  deviceName: string | null
+  copies?: number
+  collate?: boolean
+  duplex?: PrintDuplex
+}
+
+export interface PrinterInfo {
+  name: string
+  displayName: string
+}
+
 export interface DesktopApi {
   /** current UI language (persisted by the shell in app-settings.json) */
   getLanguage(): Promise<'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'>
+  /** OS regional-settings locale (BCP 47); Word derives the new-document paper size from it */
+  getSystemLocale(): Promise<string>
   /** language switched from the shell home page */
   onLanguageChanged(
     handler: (
@@ -202,19 +360,34 @@ export interface DesktopApi {
   getTheme(): Promise<UiTheme>
   /** theme switched from the shell home page */
   onThemeChanged(handler: (theme: UiTheme) => void): () => void
+  /** current document page theme preference (genoffice#1811, persisted by the shell in app-settings.json) */
+  getDocumentTheme(): Promise<DocTheme>
+  /** document page theme switched from the shell home page */
+  onDocumentThemeChanged(handler: (theme: DocTheme) => void): () => void
   /** shell-wide AutoSave default (see useAutoSavePref) */
   getAutoSaveDefault(): Promise<AutoSaveDefault>
   onAutoSaveDefaultChanged(handler: (value: AutoSaveDefault) => void): () => void
+  /** author of comments and tracked changes (Settings → General, falling back to the OS account) */
+  getAuthorName(): Promise<string>
+  onAuthorNameChanged(handler: (name: string) => void): () => void
   /** AI panel text size + chat-input spellcheck (Settings → General in the shell) */
   getAiPanelPrefs(): Promise<AiPanelPrefs>
+  setAiPanelPrefs(patch: Partial<AiPanelPrefs>): Promise<AiPanelPrefs>
   onAiPanelPrefsChanged(handler: (prefs: AiPanelPrefs) => void): () => void
   /** press on the shell chrome (tab strip is a sibling WebContentsView whose
    *  clicks produce no DOM event here) — dismiss open popovers */
   onChromePressed(handler: () => void): () => void
+  /** invoke Zotero's word-processor integration and service its document callbacks */
+  zoteroCommand(command: ZoteroCommand): Promise<ZoteroCommandResult>
+  onZoteroRequest(handler: (request: ZoteroRendererRequest) => void): () => void
+  respondToZotero(response: ZoteroRendererResponse): void
   openDocx(): Promise<OpenDocxResult>
   openDocxPath(path: string): Promise<OpenDocxResult>
+  confirmDocumentReplace(): Promise<boolean>
   /** decrypt-and-open a password-protected docx (path from a needsPassword result) */
   openDocxDecrypt(path: string, password: string): Promise<DecryptOpenResult>
+  /** w:altChunk HTML rendered through html2docx in a hidden window; null when conversion fails */
+  convertAltChunkHtml(html: string): Promise<Uint8Array | null>
   /** Review > Protect: set (or clear with null) the desired next-save password;
    *  filePath null = document not saved yet, applied on its first successful save */
   setDocPassword(filePath: string | null, password: string | null): Promise<{ ok: boolean }>
@@ -228,6 +401,10 @@ export interface DesktopApi {
   consumeNewBlankDoc(): Promise<boolean>
   /** AI-authored content queued for this tab by create_document; one-shot, null when none */
   consumeAiDocContent(): Promise<AiDocContent | null>
+  /** Headless export mode: the path and format this hidden renderer must export, null in normal use */
+  consumeHeadlessExport(): Promise<HeadlessExportTarget | null>
+  /** Headless export mode: report the export outcome so the main process can quit */
+  headlessExportDone(result: { ok: boolean; error?: string }): void
   /** AI create_document: build a new standalone file and open it in a new tab */
   createDocument(request: CreateDocumentRequest): Promise<CreateDocumentResult>
   /** receive documents opened from Finder/Explorer while the app is running */
@@ -247,6 +424,9 @@ export interface DesktopApi {
     reason?: 'external-modified'
     /** a newer password choice arrived after this save's snapshot */
     passwordIntentPending?: boolean
+    /** one-shot URL of the saved document in full when an encrypted save absorbed
+     *  lazily served pictures: the renderer reparses from it and leaves lazy mode */
+    dataUrl?: string
   }>
   /** crash-recovery copy of a dirty document, stored under userData */
   writeRecoveryCopy(path: string, data: ArrayBuffer): Promise<{ ok: boolean }>
@@ -257,27 +437,76 @@ export interface DesktopApi {
    *  back on (r168); the caller pauses the PM DOM observer and removes the
    *  space again by script */
   respellKick(): Promise<void>
+  /** append one line to userData/spell-diag.log (size-capped) — field
+   *  spellcheck failures are intermittent and platform-bound, so the
+   *  toggle/kick lifecycle keeps a trace support can ask users for */
+  spellDiag(line: string): void
+  /** opt this renderer into claiming right-clicks: claimed clicks get no native menu */
+  armContextMenu(): void
+  /** synchronous, from the DOM contextmenu handler: the React menu answers this
+   *  right-click, so Blink's request for it must not pop the native menu */
+  claimContextMenu(seq: number): void
+  /** Chromium's misspelling data for a claimed click */
+  onContextMenuRequest(handler: (request: ContextMenuRequest) => void): () => void
+  spellAddWord(word: string): Promise<boolean>
+  /** Word's Ignore All: skipped while this document is open, forgotten when it closes */
+  spellIgnoreWord(word: string): Promise<boolean>
+  /** Blink-side replacement of the misspelled word under the last right-click */
+  spellReplace(word: string): Promise<void>
+  spellLanguages(): Promise<SpellLanguages>
+  spellSetLanguages(langs: string[]): Promise<SpellLanguages>
   /** sourcePath: the document's current path — Save As uses its desired next-save
    *  password and commits that state to the chosen path only after success */
   saveDocxAs(
     defaultName: string,
     data: ArrayBuffer,
     sourcePath?: string | null,
-  ): Promise<{ ok: boolean; path?: string; error?: string; passwordIntentPending?: boolean }>
+  ): Promise<{
+    ok: boolean
+    path?: string
+    error?: string
+    passwordIntentPending?: boolean
+    dataUrl?: string
+  }>
   /** first save of a new document: silently writes into the default folder, no dialog */
   saveDocxNew(
     defaultName: string,
     data: ArrayBuffer,
-  ): Promise<{ ok: boolean; path?: string; error?: string; passwordIntentPending?: boolean }>
+  ): Promise<{
+    ok: boolean
+    path?: string
+    error?: string
+    passwordIntentPending?: boolean
+    dataUrl?: string
+  }>
+  /** MCP-driven output: write the current document to an explicit absolute path
+   *  with no dialog; refuses to replace an existing file unless overwrite is true */
+  saveDocxTo(path: string, data: ArrayBuffer, overwrite: boolean): Promise<McpSaveResult>
+  /** MCP bridge: receive an editor command pushed by the shell main process */
+  onMcpCommand(handler: (message: McpCommandMessage) => void): () => void
+  /** MCP bridge: report a command's outcome back to the shell main process */
+  reportMcpResult(result: McpCommandResult): void
+  /** MCP bridge: announce that this tab's editor is ready for commands */
+  signalMcpReady(): void
   getRecentFiles(): Promise<string[]>
   pickImage(): Promise<PickImageResult | null>
   /** vertical metrics of an installed family (exact name match), null when missing */
   fontMetrics(family: string): Promise<FaceVerticalMetrics | null>
   getAiSettings(): Promise<AiSettings>
   setAiSettings(settings: AiSettings): Promise<void>
-  /** system print dialog for the current window; ok=false without error = canceled.
-   *  scale: print scale inverting the preview's print zoom (print-zoom.ts) */
-  print(scale?: number): Promise<{ ok: boolean; error?: string }>
+  /** ai-settings.json was rewritten by any renderer; re-read it */
+  onAiSettingsChanged(handler: () => void): () => void
+  /** shell only: switch to Home and open Settings › AI Model (rejects in standalone) */
+  openAiModelSettings(): Promise<void>
+  /** shell: switch to Home and open Settings › Integrations (the skills list) */
+  openSkillsSettings(): Promise<void>
+  /** print the current window; ok=false without error = canceled.
+   *  scale: print scale inverting the preview's print zoom (print-zoom.ts).
+   *  job: printer/copies/duplex from the in-app dialog; a named printer ('' = OS
+   *  default) prints silently, null or omitted opens the system dialog */
+  print(scale?: number, job?: PrintJobOptions): Promise<{ ok: boolean; error?: string }>
+  /** installed printers for the in-app print dialog */
+  listPrinters(): Promise<PrinterInfo[]>
   /** render the document to PDF and ask where to save; size in twips.
    *  outPath is only honored when a previous export dialog chose that exact path */
   exportPdf(
@@ -286,12 +515,19 @@ export interface DesktopApi {
     pageHeightTwips: number,
     outPath?: string,
     scale?: number,
+    links?: PdfInternalLink[],
   ): Promise<{ ok: boolean; path?: string; error?: string }>
   exportHtml(
     defaultName: string,
     html: string,
     outPath?: string,
   ): Promise<{ ok: boolean; path?: string; error?: string }>
+  exportMarkdown(
+    defaultName: string,
+    markdown: string,
+    images: MarkdownImage[],
+    outPath?: string,
+  ): Promise<{ ok: boolean; path?: string; error?: string; imagesDropped?: number }>
   /** Mixed paper-size export: produce a set of PDF bytes (base64) at given sizes per the current print layout */
   printPdfBuffer(
     pageWidthTwips: number,
@@ -304,7 +540,23 @@ export interface DesktopApi {
     defaultName: string,
     base64Parts: string[],
     outPath?: string,
+    links?: PdfInternalLink[],
   ): Promise<{ ok: boolean; path?: string; error?: string }>
+  /** Export as images: the folder picker plus a pre-authorized temp PDF path the
+   *  regular PDF export writes to silently (no reveal, no open) */
+  pickExportImagesTarget(): Promise<{ dir: string; pdfPath: string } | null>
+  /** Read back and delete the temp PDF written for an image export */
+  takeExportPdf(pdfPath: string): Promise<{ ok: boolean; base64?: string; error?: string }>
+  /** Write one page PNG into the folder chosen by pickExportImagesTarget */
+  writeExportImage(
+    dir: string,
+    fileName: string,
+    pngBase64: string,
+  ): Promise<{ ok: boolean; path?: string; error?: string }>
+  /** Save a picture the renderer displays (data URL) through a Save dialog */
+  saveImageAs(src: string): Promise<{ ok: boolean; path?: string; error?: string }>
+  /** Native context menu "View Image" on a chrome surface such as the AI panel */
+  onViewImage(handler: (src: string) => void): () => void
   aiChat(request: AiChatRequest): Promise<AiChatResponse>
   /** start a streaming AI call; deltas arrive via onAiStream with the same requestId */
   aiStream(request: AiStreamRequest): Promise<void>
@@ -339,6 +591,11 @@ export interface DesktopApi {
     /** failure reason when method === 'error' */
     error?: string
   }>
+  /** media understanding (image/audio/video) via the configured media provider; returns analysis text */
+  analyzeMedia(op: {
+    mediaUrls: string[]
+    requirements: string
+  }): Promise<{ text?: string; error?: string }>
   fetchImage(url: string): Promise<{ base64: string; mime: string } | null>
   /** AI image generation via the Genspark cloud channel (requires login + cloud tools) */
   aiGenerateImage(op: {
@@ -358,10 +615,34 @@ export interface DesktopApi {
   readAttachment(path: string, offset: number, maxChars: number): Promise<AttachmentReadResult>
   /** read an image attachment as base64 for multimodal input (≤5MB) */
   readAttachmentImage(path: string): Promise<AttachmentImageResult>
+  /** the reader's starred files as the AI's knowledge base */
+  kbList(): Promise<
+    Array<{
+      path: string
+      folder: string
+      folderPath: string
+      name: string
+      ext: string
+      sizeBytes: number
+    }>
+  >
+  /** full-text search over the starred set; q capped like the home search box */
+  kbSearch(query: {
+    q: string
+    limit?: number
+  }): Promise<Array<{ path: string; name: string; ext: string; folder: string; snippet: string }>>
+  /** one page of a starred file's parsed text (path must be in kbList) */
+  kbRead(
+    path: string,
+    offset: number,
+  ): Promise<{ text: string; totalChars: number; offset: number }>
+
   /** absolute path of a File dropped onto the window (Electron webUtils) */
   getPathForFile(file: File): string
   /** View → New Tab: open another docs tab, optionally loading the same document */
   openNewTab(openPath?: string | null): Promise<void>
+  /** open any shell-routed document path (an AI answer's filenav citation) */
+  openSourcePath(path: string): Promise<void>
   /** all open docs tabs, for View → Switch Tab */
   listDocsTabs(): Promise<DocsTabInfo[]>
   focusDocsTab(id: string): Promise<void>
@@ -377,4 +658,39 @@ export interface DesktopApi {
   reportCloseSaveResult(ok: boolean): void
   /** keep the native View menu's checkbox items in sync with renderer state */
   reportViewMenuState(state: { aiSidebar: boolean; darkCanvas: boolean }): void
+  /** the skills the user installed (userData/skills), for the AI panel's skills skill */
+  skillsList(): Promise<UserSkillEntry[]>
+  /** the body of one installed skill, by name — the main process resolves the path */
+  skillText(name: string): Promise<string>
+  /** run the bundled genoffice CLI; failures come back as ok:false, never a throw */
+  runCli(args: string[]): Promise<UserCliRun>
 }
+
+export interface UserSkillEntry {
+  name: string
+  description: string
+  relevant: boolean
+}
+
+export interface UserCliRun {
+  ok: boolean
+  /** process exit code, or -1 when the process never started */
+  code: number
+  json?: {
+    status: string
+    command: string | null
+    code?: number
+    summary?: string
+    output_path?: string
+    message?: string
+  }
+  stdout: string
+  stderr: string
+  /** where relative paths resolved; absent in a window with no document and no save folder */
+  cwd?: string
+  /** the folders the CLI may read and write */
+  allowedRoots?: string[]
+}
+
+/** mirrors VIEW_IMAGE_CHANNEL in @genoffice/electron-utils (kept literal so the preload stays free of main-only deps) */
+export const VIEW_IMAGE_CHANNEL = 'genoffice:view-image'

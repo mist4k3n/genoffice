@@ -1,5 +1,17 @@
 import JSZip from 'jszip'
+import { assertDeclaredSizesWithinLimits, assertZipInflatesWithinLimits } from '@genoffice/zip-gate'
 import { needsOoxmlNormalization, normalizeOoxmlXml } from './ooxml-normalize'
+
+// Re-exported for the engine's public API (index.ts) and the CLI's pre-open
+// check: the implementations live in @genoffice/zip-gate so the pptx engine
+// and the attachment parsers share one metered-inflation gate (see #759).
+export {
+  assertDeclaredSizesWithinLimits,
+  assertZipInflatesWithinLimits,
+  type DeclaredPart,
+  type ZipLimits,
+} from '@genoffice/zip-gate'
+export { DEFAULT_ZIP_LIMITS as DOCX_ZIP_LIMITS } from '@genoffice/zip-gate'
 
 const EOCD_SIG = 0x06054b50
 const CENTRAL_SIG = 0x02014b50
@@ -50,38 +62,23 @@ function neutralizeUnicodePathFields(bytes: Uint8Array): Uint8Array {
   return out ?? bytes
 }
 
-const MAX_ZIP_PARTS = 10000
-const MAX_PART_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
-const MAX_TOTAL_UNCOMPRESSED_BYTES = 1.5 * 1024 * 1024 * 1024
-
 /**
- * Reject zip bombs before any part is inflated, using the declared
- * uncompressed sizes from the central directory (JSZip keeps them in
- * the lazy `_data` compressed object).
+ * Cheap fast path: reject zip bombs using the uncompressed sizes the central
+ * directory declares (JSZip keeps them in the lazy `_data` compressed object).
+ *
+ * Advisory only — it costs nothing when the archive tells the truth and nothing
+ * at all when it lies. `assertZipInflatesWithinLimits` is the gate that holds
+ * against a forged declaration.
  */
 export function assertZipWithinLimits(zip: JSZip): void {
   const files = Object.values(zip.files).filter((f) => !f.dir)
-  if (files.length > MAX_ZIP_PARTS) {
-    throw new Error(`docx rejected: ${files.length} parts exceeds the ${MAX_ZIP_PARTS} limit`)
-  }
-  let total = 0
-  for (const file of files) {
-    const size =
-      (file as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0
-    if (size > MAX_PART_UNCOMPRESSED_BYTES) {
-      throw new Error(
-        `docx rejected: part ${file.name} declares ${size} uncompressed bytes ` +
-          `(limit ${MAX_PART_UNCOMPRESSED_BYTES})`,
-      )
-    }
-    if (size > 0) total += size
-  }
-  if (total > MAX_TOTAL_UNCOMPRESSED_BYTES) {
-    throw new Error(
-      `docx rejected: total uncompressed size ${total} exceeds the ` +
-        `${MAX_TOTAL_UNCOMPRESSED_BYTES} limit`,
-    )
-  }
+  assertDeclaredSizesWithinLimits(
+    files.map((file) => ({
+      name: file.name,
+      usize:
+        (file as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0,
+    })),
+  )
 }
 
 // The gate parts carry the strict / non-canonical-prefix markers whenever the
@@ -113,7 +110,11 @@ async function normalizeOoxmlParts(zip: JSZip): Promise<void> {
 
 /** Load a docx/zip resolving part names the way Word does. */
 export async function loadDocxZip(bytes: Uint8Array): Promise<JSZip> {
-  const zip = await JSZip.loadAsync(neutralizeUnicodePathFields(bytes))
+  const prepared = neutralizeUnicodePathFields(bytes)
+  // Metered inflation first: past this point no part is larger than a limit,
+  // so the inflates normalizeOoxmlParts and every caller perform are bounded.
+  await assertZipInflatesWithinLimits(prepared)
+  const zip = await JSZip.loadAsync(prepared)
   assertZipWithinLimits(zip)
   await normalizeOoxmlParts(zip)
   return zip

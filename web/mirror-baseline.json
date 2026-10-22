@@ -1,7 +1,7 @@
 {
   "writeWorkbookTo": {
-    "sha": "a1214d8c6eccf8af3afb58092abd9ea7c62570cba5d9858de67cf096cc4bf425",
-    "lines": 259,
+    "sha": "4ba5db25a829b14bb6c8a7e6c058bb49f69d4a04e1629e59de5d72fea2ba81e9",
+    "lines": 289,
     "upstream": "apps/sheets/src/main/sheets-main.ts"
   }
 }

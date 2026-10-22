@@ -6,9 +6,10 @@
  * in never-visited rows are invisible and users conclude the data does not
  * exist (issue #113). This module wraps the built-in sheets find provider:
  * the inner model keeps handling everything inside the loaded window, while
- * the wrapper extends the session with out-of-window matches paged from the
- * underlying file via readSheetRangeMapped (journal edits included) — the
- * same approach the AI-side find takes. Focusing an out-of-window match
+ * the wrapper extends the session with out-of-window matches found in the
+ * underlying file — by the sidecar's find_cells over its chunk index (journal
+ * edits overlaid here), or paged through readSheetRangeMapped when that
+ * command is unavailable. Focusing an out-of-window match
  * activates its sheet, starts loading its range, scrolls to it, and selects
  * it, so the grid shows real data instead of an empty jump.
  */
@@ -28,9 +29,15 @@ import { FormulaDataModel } from '@univerjs/preset-sheets-core'
 import { Subject, type Subscription } from 'rxjs'
 import { FILE_READ_BATCH_CELLS, MAX_SCAN_CELLS } from './ai/workbook-search'
 import { t } from './i18n/locale'
+import {
+  MAX_FIND_MATCHES,
+  findSheetCellsInFile,
+  sidecarFindAvailable,
+  type SidecarFindQuery,
+} from './sidecar-find'
 import { installSparseFind, type SpillLookup } from './sparse-find'
 import { netAxisDelta } from './view-transform'
-import type { LazyWorkbookState, UniverRuntime } from './univer-state'
+import { lazySheetMeta, type LazyWorkbookState, type UniverRuntime } from './univer-state'
 import { ensureLazyRangeLoaded, readSheetRangeMapped } from './univer-sync'
 
 /** Same match shape the built-in sheets provider produces (ISheetCellMatch). */
@@ -41,6 +48,10 @@ export interface LazyCellMatch extends IFindMatch {
   /// by Univer's composite model.
   range: { subUnitId: string; range: IRange }
   matchedText?: string | null
+  /// Pre-replacement scalar for out-of-window hits (ScanCell.value): lets the
+  /// replace path write numbers/booleans back with their type instead of the
+  /// stringified display text. Absent for formula hits and inner-model hits.
+  rawValue?: string | number | boolean | null | undefined
 }
 
 export interface LazyCellTexts {
@@ -201,6 +212,7 @@ function makeCellMatch(
     // built-in model); plain cells behave exactly like in-memory ones.
     replaceable: isFormula ? findByFormula : cell.value !== null && cell.value !== undefined,
     matchedText: (findByFormula && isFormula ? cell.formula : scalarToText(cell.value)) ?? null,
+    rawValue: isFormula ? undefined : cell.value,
     range: {
       subUnitId: sheetId,
       range: {
@@ -210,6 +222,23 @@ function makeCellMatch(
         endColumn: cell.column,
       },
     },
+  }
+}
+
+interface ScanProgress {
+  readonly collected: (ScanCell & { sheetId: string })[]
+  scannedCells: number
+  capped: boolean
+}
+
+/** Univer's dialog has no wildcard switch, so `*`/`?` stay literal. */
+export function sidecarQuery(query: IFindQuery): SidecarFindQuery {
+  return {
+    query: query.findString ?? '',
+    matchCase: query.caseSensitive === true,
+    matchEntireCell: query.matchesTheWholeCell === true,
+    lookIn: query.findBy === FindBy.FORMULA ? 'formulas' : 'values',
+    wildcards: false,
   }
 }
 
@@ -289,9 +318,30 @@ export function installLazyFindBridge(deps: LazyFindBridgeDeps): { dispose(): vo
   }
   const registration = service.registerFindReplaceProvider(wrapper)
   adoptForeign()
+  // The find()-time re-sweep cannot cover a builtin that registers between
+  // this install and a session start: FindReplaceModel captures the provider
+  // set when the session STARTS, so a late builtin gets dispatched both
+  // directly and through the wrapper (the doubled find() breaks the session).
+  // Sweep at registration time instead, the moment a foreign provider lands.
+  const originalRegister = service.registerFindReplaceProvider.bind(service)
+  const hookedRegister: typeof service.registerFindReplaceProvider = (provider) => {
+    const disposable = originalRegister(provider)
+    if (provider !== wrapper) {
+      adoptForeign()
+      // A session that started before this provider existed searched nothing
+      // (an empty model list still reports "completed"); run it again now
+      // that the provider is reachable.
+      if ((service.getFindString?.() ?? '') !== '') service.find()
+    }
+    return disposable
+  }
+  service.registerFindReplaceProvider = hookedRegister
   return {
     dispose() {
       generation += 1
+      if (service.registerFindReplaceProvider === hookedRegister) {
+        service.registerFindReplaceProvider = originalRegister
+      }
       registration.dispose()
       for (const builtin of adopted) providers.add(builtin)
       adopted.clear()
@@ -383,7 +433,7 @@ export class LazyExtendedFindModel extends FindModel {
       // cursor here would walk it — and the reveal subscriber's scroll —
       // through the extras on every streamed patch: with two matches the
       // viewport ping-pongs between them for as long as the stream keeps
-      // mutating (alpha r167). Stay on the current extra if it still exists.
+      // mutating. Stay on the current extra if it still exists.
       const current = this.lastFocusedExtra.range
       const stay = this.currentExtras().find(
         (extra) =>
@@ -399,13 +449,12 @@ export class LazyExtendedFindModel extends FindModel {
       // materialized in the grid and the hit now belongs to the inner
       // session. Hand the cursor over THROUGH the inner model (not by
       // returning the match directly): later Next/Previous/Replace must
-      // continue from this position, not from a stale inner index (bugbot).
+      // continue from this position, not from a stale inner index.
       // With the selection sitting on the cell one stayIfOnMatch call lands
       // there; otherwise walk the inner cursor to the position — never
-      // return an unverified landing (bugbot round 2: that restarted the
-      // cursor walk) and never park a ghost cursor (round 3: a held extra
-      // that currentExtras() dropped skipped the inner session on the next
-      // user nav and could not self-recover).
+      // return an unverified landing (that restarted the cursor walk) and never
+      // park a ghost cursor (a held extra that currentExtras() dropped skipped
+      // the inner session on the next user nav and could not self-recover).
       const samePos = (candidate: IFindMatch | null): candidate is LazyCellMatch => {
         const range = candidate ? (candidate as LazyCellMatch).range : null
         return (
@@ -428,7 +477,7 @@ export class LazyExtendedFindModel extends FindModel {
         // the cursor sits on the taken-over cell (bounded by the list size).
         // stayIfOnMatch must NOT ride along: with the selection on any other
         // in-window hit each step would re-anchor there and never advance
-        // (bugbot round 4).
+        // again.
         let candidate = this.innerNeighbor(direction, {
           noFocus: true,
           ignoreSelection: true,
@@ -749,9 +798,8 @@ export class LazyExtendedFindModel extends FindModel {
           [{ f: replaceAllOccurrences(match.matchedText ?? '', this.query, replaceString) }],
         ])
       } else {
-        target.setValues([
-          [{ v: replaceAllOccurrences(match.matchedText ?? '', this.query, replaceString) }],
-        ])
+        const replaced = replaceAllOccurrences(match.matchedText ?? '', this.query, replaceString)
+        target.setValues([[{ v: coerceReplaceValue(match.rawValue, replaced) }]])
       }
       return true
     } catch {
@@ -764,7 +812,7 @@ export class LazyExtendedFindModel extends FindModel {
     this.matchesUpdate$.next(this.getMatches())
   }
 
-  /** Pages the underlying file for out-of-window hits, emitting as it goes. */
+  /** Scans the underlying file for out-of-window hits, emitting as it goes. */
   private async runScan(): Promise<void> {
     const workbook = this.deps.runtime.univerAPI.getActiveWorkbook()
     if (!workbook) return
@@ -779,10 +827,11 @@ export class LazyExtendedFindModel extends FindModel {
     const sheetOrder = new Map(sheets.map((sheet, index) => [sheet.getSheetId(), index] as const))
     const comparator = extraComparator(sheetOrder, this.query.findDirection === 'column')
     const collected: (ScanCell & { sheetId: string })[] = []
-    // Budget counts scanned extent, not hits — the AI-side findInLazyWorkbook
-    // semantics. Counting hits would scan sparse multi-million-cell sheets
-    // end to end.
-    let scannedCells = 0
+    const scan: ScanProgress = { collected, scannedCells: 0, capped: false }
+    const emit = () => {
+      this.refreshExtras(collected, comparator, unitId)
+      this.emitMerged()
+    }
 
     for (const worksheet of targets) {
       const sheetId = worksheet.getSheetId()
@@ -790,72 +839,134 @@ export class LazyExtendedFindModel extends FindModel {
       for (const cell of collectJournalMatches(this.state, sheetId, test)) {
         collected.push({ ...cell, sheetId })
       }
-      const meta = this.state.file.sheets.find((candidate) => candidate.id === sheetId)
+      const meta = lazySheetMeta(this.state, sheetId)
       // Sheets added this session live entirely in the journal.
       if (!meta || meta.rowCount <= 0 || meta.columnCount <= 0) {
-        this.refreshExtras(collected, comparator, unitId)
-        this.emitMerged()
+        emit()
         continue
       }
-      const ops = this.state.editJournal.structuralOps.get(sheetId) ?? []
-      const screenRows = Math.max(meta.rowCount + netAxisDelta(ops, 'row'), 0)
-      const screenColumns = Math.max(meta.columnCount + netAxisDelta(ops, 'column'), 0)
-      if (screenRows <= 0 || screenColumns <= 0) continue
-      const shadowed = journalShadowKeys(this.state, sheetId)
-      const batchRows = Math.max(1, Math.floor(FILE_READ_BATCH_CELLS / screenColumns))
-      for (let startRow = 0; startRow < screenRows; startRow += batchRows) {
-        if (!this.alive || !this.isLiveGeneration() || !this.stateIsCurrent()) return
-        if (this.truncated) break
-        if (scannedCells >= MAX_SCAN_CELLS) {
-          this.truncated = true
-          break
-        }
-        const endRow = Math.min(startRow + batchRows - 1, screenRows - 1)
-        let mapped
+      let viaSidecar = false
+      if (sidecarFindAvailable()) {
         try {
-          mapped = await readSheetRangeMapped(
-            this.state,
-            sheetId,
-            { startRow, endRow, startColumn: 0, endColumn: screenColumns - 1 },
-            meta,
-          )
+          await this.scanSheetViaSidecar(sheetId, scan, emit)
+          viaSidecar = true
         } catch {
-          this.truncated = true
-          break
+          /* older sidecar or rejected request: page the ranges instead */
         }
-        if (!mapped) continue
-        scannedCells += (endRow - startRow + 1) * screenColumns
-        if (
-          !mapped.raw.indexingComplete &&
-          (mapped.indexedThroughScreen === null || mapped.indexedThroughScreen < endRow)
-        ) {
-          this.truncated = true
-        }
-        for (const cell of mapped.screen.cells) {
-          if (shadowed.has(`${cell.row}:${cell.column}`)) continue
-          if (coveredByWindow(this.state, sheetId, cell.row, cell.column)) continue
-          if (!test({ value: scalarToText(cell.value), formula: cell.formula })) continue
-          collected.push({
-            row: cell.row,
-            column: cell.column,
-            value: cell.value,
-            formula: cell.formula,
-            sheetId,
-          })
-        }
-        this.refreshExtras(collected, comparator, unitId)
-        this.emitMerged()
       }
-      if (this.truncated) break
+      if (!viaSidecar) await this.scanSheetViaRanges(sheetId, meta, test, scan, emit)
+      if (!this.alive || !this.isLiveGeneration() || !this.stateIsCurrent()) return
+      if (this.truncated || scan.capped) break
     }
 
     this.refreshExtras(collected, comparator, unitId)
-    if (this.truncated && this.alive && this.isLiveGeneration()) {
-      // Report what was actually scanned — truncation can also come from a
-      // failed read or indexing lag long before the budget.
-      this.deps.setMessage(t('appFindScanTruncated', { cells: scannedCells.toLocaleString() }))
+    if (this.alive && this.isLiveGeneration()) {
+      if (scan.capped) {
+        this.deps.setMessage(
+          t('appFindMatchesCapped', { count: MAX_FIND_MATCHES.toLocaleString() }),
+        )
+      } else if (this.truncated) {
+        // Report what was actually scanned — truncation can also come from a
+        // failed read or indexing lag long before the budget.
+        this.deps.setMessage(
+          t('appFindScanTruncated', { cells: scan.scannedCells.toLocaleString() }),
+        )
+      }
     }
     this.emitMerged()
+  }
+
+  /// The sidecar matches file cells; journal-shadowed and in-window
+  /// coordinates are dropped here, where the overlay lives.
+  private async scanSheetViaSidecar(
+    sheetId: string,
+    scan: ScanProgress,
+    emit: () => void,
+  ): Promise<void> {
+    const shadowed = journalShadowKeys(this.state, sheetId)
+    const outcome = await findSheetCellsInFile(this.state, sheetId, sidecarQuery(this.query), {
+      alive: () => this.alive && this.isLiveGeneration() && this.stateIsCurrent(),
+      maxMatches: MAX_FIND_MATCHES - scan.collected.length,
+      onPage: (hits) => {
+        let kept = 0
+        for (const hit of hits) {
+          if (shadowed.has(`${hit.row}:${hit.column}`)) continue
+          if (coveredByWindow(this.state, sheetId, hit.row, hit.column)) continue
+          scan.collected.push({
+            row: hit.row,
+            column: hit.column,
+            value: hit.value,
+            formula: hit.formula,
+            sheetId,
+          })
+          kept += 1
+        }
+        emit()
+        return kept
+      },
+    })
+    if (outcome.capped) scan.capped = true
+    else if (!outcome.complete && this.alive && this.isLiveGeneration()) this.truncated = true
+  }
+
+  /** Fallback: pages the file through range reads, bounded by scanned extent. */
+  private async scanSheetViaRanges(
+    sheetId: string,
+    meta: NonNullable<ReturnType<typeof lazySheetMeta>>,
+    test: LazyCellTest,
+    scan: ScanProgress,
+    emit: () => void,
+  ): Promise<void> {
+    const ops = this.state.editJournal.structuralOps.get(sheetId) ?? []
+    const screenRows = Math.max(meta.rowCount + netAxisDelta(ops, 'row'), 0)
+    const screenColumns = Math.max(meta.columnCount + netAxisDelta(ops, 'column'), 0)
+    if (screenRows <= 0 || screenColumns <= 0) return
+    const shadowed = journalShadowKeys(this.state, sheetId)
+    const batchRows = Math.max(1, Math.floor(FILE_READ_BATCH_CELLS / screenColumns))
+    for (let startRow = 0; startRow < screenRows; startRow += batchRows) {
+      if (!this.alive || !this.isLiveGeneration() || !this.stateIsCurrent()) return
+      if (this.truncated) break
+      // Budget counts scanned extent, not hits — counting hits would scan
+      // sparse multi-million-cell sheets end to end.
+      if (scan.scannedCells >= MAX_SCAN_CELLS) {
+        this.truncated = true
+        break
+      }
+      const endRow = Math.min(startRow + batchRows - 1, screenRows - 1)
+      let mapped
+      try {
+        mapped = await readSheetRangeMapped(
+          this.state,
+          sheetId,
+          { startRow, endRow, startColumn: 0, endColumn: screenColumns - 1 },
+          meta,
+        )
+      } catch {
+        this.truncated = true
+        break
+      }
+      if (!mapped) continue
+      scan.scannedCells += (endRow - startRow + 1) * screenColumns
+      if (
+        !mapped.raw.indexingComplete &&
+        (mapped.indexedThroughScreen === null || mapped.indexedThroughScreen < endRow)
+      ) {
+        this.truncated = true
+      }
+      for (const cell of mapped.screen.cells) {
+        if (shadowed.has(`${cell.row}:${cell.column}`)) continue
+        if (coveredByWindow(this.state, sheetId, cell.row, cell.column)) continue
+        if (!test({ value: scalarToText(cell.value), formula: cell.formula })) continue
+        scan.collected.push({
+          row: cell.row,
+          column: cell.column,
+          value: cell.value,
+          formula: cell.formula,
+          sheetId,
+        })
+      }
+      emit()
+    }
   }
 
   private refreshExtras(
@@ -868,6 +979,29 @@ export class LazyExtendedFindModel extends FindModel {
       .sort(comparator)
       .map((cell) => makeCellMatch(unitId, cell.sheetId, cell, findByFormula))
   }
+}
+
+/// Restores the replaced text to the cell's pre-replacement scalar type so
+/// out-of-window Replace All matches the in-window model: numeric cells stay
+/// numeric (SUM keeps counting them), booleans stay boolean, and anything
+/// that no longer parses as the original type falls back to text — the same
+/// outcome as typing the replacement by hand.
+export function coerceReplaceValue(
+  raw: string | number | boolean | null | undefined,
+  replaced: string,
+): string | number | boolean {
+  if (typeof raw === 'number') {
+    if (replaced.trim() === '') return replaced
+    const n = Number(replaced)
+    return Number.isFinite(n) ? n : replaced
+  }
+  if (typeof raw === 'boolean') {
+    const t = replaced.trim().toLowerCase()
+    if (t === '1' || t === 'true') return true
+    if (t === '0' || t === 'false') return false
+    return replaced
+  }
+  return replaced
 }
 
 /// Substring replacement honoring the query's case sensitivity, replacing

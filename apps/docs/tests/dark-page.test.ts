@@ -20,6 +20,7 @@ import {
   darkPageBorderCss,
   darkPageColor,
   dkBackground,
+  dkBackgroundImage,
   dkBorder,
   dkColor,
   dkStyleProps,
@@ -103,6 +104,13 @@ describe('inline twins', () => {
     })
   })
 
+  it('cell diagonals get a background-image twin with every color remapped', () => {
+    const layer =
+      'linear-gradient(to bottom right,transparent 49%,#000 49%,#000 51%,transparent 51%)'
+    expect(dkBackgroundImage(layer)).toBe(`--dk-bgi:${layer.replaceAll('#000', '#ffffff')}`)
+    expect(dkStyleProps({ backgroundImage: layer })['--dk-bgi']).toContain('#ffffff')
+  })
+
   it('table-level border variables get --dk-tb-* twins that keep "none"', () => {
     const authored = tableBordersCss({
       top: { style: 'single', szEighths: 4, color: '000000' },
@@ -139,10 +147,17 @@ describe('docStyleCss dark twins', () => {
 
   it('pairs every color rule with a .page-dark rule inside one @media screen block', () => {
     const styles = new Map<string, StyleInfo>()
+    styles.set('Normal', {
+      styleId: 'Normal',
+      name: 'Normal',
+      type: 'paragraph',
+      isDefault: true,
+    } as StyleInfo)
     styles.set('Heading1', {
       styleId: 'Heading1',
       name: 'heading 1',
       type: 'paragraph',
+      basedOn: 'Normal',
       display: { color: '2f5496', shadingFill: 'f2f2f2' } as StyleDisplay,
     } as StyleInfo)
     styles.set('Grid', {
@@ -158,7 +173,7 @@ describe('docStyleCss dark twins', () => {
     const css = docStyleCss(parsed(styles, { color: '333333' }))
     // authored rules untouched
     expect(css).toContain(
-      '.doc-page [data-style="Heading1"] { color:#2f5496;background-color:#f2f2f2 }',
+      '.doc-page [data-style="Heading1"] { color:#2f5496;background-color:#f2f2f2;--pbdr-fill:#f2f2f2 }',
     )
     expect(css).toContain('color:#333333')
     // twins; every subject skips filled text boxes (light islands) with a
@@ -167,7 +182,7 @@ describe('docStyleCss dark twins', () => {
     const dark = css.slice(css.indexOf('@media screen {'))
     expect(dark).toContain(`.page-dark .doc-page${island} { color:${darkPageColor('333333')} }`)
     expect(dark).toContain(
-      `.page-dark .doc-page [data-style="Heading1"]${island} { color:${darkPageColor('2f5496')};background-color:${darkPageColor('f2f2f2')} }`,
+      `.page-dark .doc-page [data-style="Heading1"]${island} { color:${darkPageColor('2f5496')};background-color:${darkPageColor('f2f2f2')};--pbdr-fill:${darkPageColor('f2f2f2')} }`,
     )
     expect(dark).toContain(
       `.page-dark .doc-page table[data-tbl-style="Grid"] td${island}, .page-dark .doc-page table[data-tbl-style="Grid"] th${island} { background:${DARK_PAPER_HEX} }`,
@@ -176,7 +191,7 @@ describe('docStyleCss dark twins', () => {
       `tr:nth-child(even) td${island} { background:${darkPageColor('d9d9d9')} }`,
     )
     expect(dark).toContain(
-      `tr:first-child th${island} { background:${darkPageColor('4472c4')};color:${DARK_PAPER_HEX} }`,
+      `tr[data-repeat-header="1"]:not(tr:not([data-repeat-header="1"]) ~ tr) th${island} { background:${darkPageColor('4472c4')};color:${DARK_PAPER_HEX} }`,
     )
     // a filled box would inherit the remapped document default from .doc-page:
     // the island re-sets the authored one

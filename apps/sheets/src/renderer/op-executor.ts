@@ -6,24 +6,29 @@ import type { DesktopApi } from '../shared/desktop-api'
  * AI proposes; every function receives its App-scope context explicitly.
  */
 import { IUndoRedoService } from '@univerjs/core'
-import type { CellBounds } from '../domain/chart-visual'
+import type { CellBounds } from '@genoffice/xlsx-gateway/domain/chart-visual'
 import {
   columnIndex,
   columnLabel,
   formatAddress,
   parseAddress,
   parseRange,
-} from '../domain/cell-address'
-import { offsetFormulaRefs } from '../domain/formula-shift'
-import { computeSortedRowOrder } from '../domain/sort-range'
+} from '@genoffice/xlsx-gateway/domain/cell-address'
+import { offsetFormulaRefs } from '@genoffice/xlsx-gateway/domain/formula-shift'
+import { MAX_GRID_COLUMNS, MAX_GRID_ROWS } from '@genoffice/xlsx-gateway/shared/grid-bounds'
+import { computeSortedRowOrder } from '@genoffice/xlsx-gateway/domain/sort-range'
 import {
   copyTargetBounds,
   filteredCopySourceRows,
   matchableCellText,
   replaceOccurrences,
   type WorkbookOperation,
-} from '../domain/workbook-dsl'
-import type { ApplyOutcome, ChangePlan, StructuralChange } from '../domain/workbook.types'
+} from '@genoffice/xlsx-gateway/domain/workbook-dsl'
+import type {
+  ApplyOutcome,
+  ChangePlan,
+  StructuralChange,
+} from '@genoffice/xlsx-gateway/domain/workbook.types'
 import { pushBulkFillUndo } from './bulk-fill-undo'
 import {
   journalCellContentAt,
@@ -36,6 +41,7 @@ import {
   removeBulkConstantFill,
   removeTableAdd,
   restoreJournalCells,
+  type HeaderFooterParts,
   type PageSetupJournalState,
 } from './edit-journal'
 import { indexedFormulaText } from './formula-view'
@@ -52,6 +58,12 @@ import {
   type StreamedRefSheet,
 } from './plan-operations'
 import { aiBulkUndoGate, journalSuppression } from './univer-state'
+import { isVeryHiddenSheet } from './very-hidden-sheets'
+import { effectiveSheetProtection, mergeSheetProtectionAllow } from './sheet-protection'
+import {
+  hashSheetPassword,
+  verifySheetPassword,
+} from '@genoffice/xlsx-gateway/gateway/xlsx-protection-hash'
 import type {
   ActiveWorkbook,
   LazyWorkbookState,
@@ -67,6 +79,7 @@ import {
   applyFormatPatchToRange,
   applyJournalOverlay,
   applyRangeInLoadedChunks,
+  ensureSheetFileState,
   lazyWorkbookCellReader,
   loadVisibleRange,
   measureImage,
@@ -330,6 +343,18 @@ export function nextSheetName(taken: readonly string[]): string {
   }
 }
 
+function planTargetSheets(plan: ChangePlan): Set<string> {
+  const sheets = new Set<string>()
+  for (const structural of plan.structuralChanges) {
+    const op = structural.op as { sheetId?: unknown; targetSheetId?: unknown }
+    if (typeof op.sheetId === 'string') sheets.add(op.sheetId)
+    if (typeof op.targetSheetId === 'string') sheets.add(op.targetSheetId)
+  }
+  for (const change of plan.cellChanges) sheets.add(change.sheetId)
+  for (const change of plan.formatChanges) sheets.add(change.sheetId)
+  return sheets
+}
+
 /**
  * Applies a plan: prechecks, then every operation inside one undo batch —
  * range/structural ops first (so inserts establish the final coordinate
@@ -366,6 +391,11 @@ async function applyChangePlanNow(
     imageData = await prefetchOpImages(state.api, plannedOps)
     const spanError = await precheckStructuralDeletes(state, workbook, plannedOps)
     if (spanError) throw new Error(options.userFacing ? t('appDeleteSpanFormulas') : spanError)
+    for (const sheetId of planTargetSheets(plan)) {
+      if (!(await ensureSheetFileState(state, sheetId, lazyWorkbookRef))) {
+        throw new Error(t('appProtectionNeedsIndexed'))
+      }
+    }
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : t('appCannotReadImage')
     setMessage(reason)
@@ -561,7 +591,9 @@ async function executeOp(op: PlannedOp, run: OpRun): Promise<void> {
     if (op.name) copy.setName(op.name)
   } else if (op.op === 'set_sheet_hidden') {
     if (op.hidden) sheetById(op.sheetId).hideSheet()
-    else sheetById(op.sheetId).showSheet()
+    else if (isVeryHiddenSheet(lazyWorkbookRef.current?.file, op.sheetId)) {
+      throw new Error(`Sheet ${op.sheetId} is veryHidden and cannot be unhidden.`)
+    } else sheetById(op.sheetId).showSheet()
   } else if (op.op === 'move_sheet') {
     if (!workbook) throw new Error(t('appNoWorkbookOpen'))
     workbook.moveSheet(sheetById(op.sheetId), op.position - 1)
@@ -574,6 +606,9 @@ async function executeOp(op: PlannedOp, run: OpRun): Promise<void> {
       op.targetCell === undefined
         ? { row: bounds.startRow, column: bounds.endColumn + 1 }
         : parseAddress(op.targetCell)
+    if (base.column >= MAX_GRID_COLUMNS || base.row + rows > MAX_GRID_ROWS) {
+      throw new Error(t('appSparklineOutsideGrid'))
+    }
     const sheetName = target.getSheetName()
     const cells = Array.from({ length: rows }, (_, offset) => ({
       cell: `${columnLabel(base.column)}${base.row + offset + 1}`,
@@ -633,10 +668,36 @@ async function executeOp(op: PlannedOp, run: OpRun): Promise<void> {
   } else if (op.op === 'set_hyperlink') {
     applyAiHyperlink(state, sheetById(op.sheetId), op)
   } else if (op.op === 'protect_sheet') {
-    const guard = protectSheetGuard(state, op.sheetId, op.protected)
+    const guard = protectSheetGuard(state, op.sheetId, op.protected, op.password !== undefined)
     if (guard) throw new Error(guard)
-    const original = state.sheetProtections.get(op.sheetId)?.protected ?? false
-    recordSheetProtection(state.editJournal, op.sheetId, op.protected, original)
+    const current = effectiveSheetProtection(state, op.sheetId)
+    if (!op.protected && current?.hasPassword) {
+      // A stale sidecar may report a password without its hash: fail closed.
+      if (!current.password) throw new Error(t('appProtectedWithPassword'))
+      if (!(await verifySheetPassword(op.password ?? '', current.password))) {
+        throw new Error(t('appProtectionWrongPassword'))
+      }
+    }
+    // Re-protecting an already protected sheet keeps its password unless a
+    // new one is given; only a verified unprotect clears it.
+    const password = !op.protected
+      ? null
+      : op.password
+        ? await hashSheetPassword(op.password)
+        : current?.protected
+          ? current.password
+          : null
+    recordSheetProtection(
+      state.editJournal,
+      op.sheetId,
+      {
+        protected: op.protected,
+        hasPassword: password !== null,
+        allow: mergeSheetProtectionAllow(op.allow),
+        password,
+      },
+      state.sheetProtections.get(op.sheetId),
+    )
   } else if (op.op === 'set_filter') {
     const target = sheetById(op.sheetId)
     const existing = target.getFilter()
@@ -690,6 +751,11 @@ async function executeOp(op: PlannedOp, run: OpRun): Promise<void> {
     if (op.printGridlines !== undefined) patch.printGridlines = op.printGridlines
     if (op.printHeadings !== undefined) patch.printHeadings = op.printHeadings
     if (op.printArea !== undefined) patch.printArea = op.printArea
+    if (op.printTitles !== undefined) patch.printTitles = op.printTitles
+    if (op.header !== undefined) patch.header = headerFooterParts(op.header)
+    if (op.footer !== undefined) patch.footer = headerFooterParts(op.footer)
+    if (op.rowBreaks !== undefined) patch.rowBreaks = op.rowBreaks
+    if (op.colBreaks !== undefined) patch.colBreaks = op.colBreaks
     // Scale and fit-to-page are exclusive; whichever the op sets wins,
     // and a fit on one axis keeps the other axis' prior value.
     if (op.scale !== undefined) {
@@ -1512,4 +1578,19 @@ async function executeOp(op: PlannedOp, run: OpRun): Promise<void> {
     )
   }
   run.markApplied()
+}
+
+function headerFooterParts(
+  parts: {
+    left?: string | undefined
+    center?: string | undefined
+    right?: string | undefined
+  } | null,
+): HeaderFooterParts | null {
+  if (parts === null) return null
+  return {
+    ...(parts.left === undefined ? {} : { left: parts.left }),
+    ...(parts.center === undefined ? {} : { center: parts.center }),
+    ...(parts.right === undefined ? {} : { right: parts.right }),
+  }
 }

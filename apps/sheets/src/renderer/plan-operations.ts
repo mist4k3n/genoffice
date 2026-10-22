@@ -14,9 +14,9 @@ import {
   parseRange,
   rangeCellCount,
   type RangeBounds,
-} from '../domain/cell-address'
-import { CHART_EDIT_TYPES, chartDataFromValues } from '../domain/chart-visual'
-import type { InMemoryWorkbookAdapter } from '../domain/in-memory-workbook'
+} from '@genoffice/xlsx-gateway/domain/cell-address'
+import { CHART_EDIT_TYPES, chartDataFromValues } from '@genoffice/xlsx-gateway/domain/chart-visual'
+import type { InMemoryWorkbookAdapter } from '@genoffice/xlsx-gateway/domain/in-memory-workbook'
 import {
   convertToValuesBatchError,
   copyTargetBounds,
@@ -27,15 +27,15 @@ import {
   workbookCommandBatchSchema,
   type PrimitiveOperation,
   type WorkbookOperation,
-} from '../domain/workbook-dsl'
-import type { ApplyOutcome, ChangePlan } from '../domain/workbook.types'
-import { offsetFormulaRefs } from '../domain/formula-shift'
+} from '@genoffice/xlsx-gateway/domain/workbook-dsl'
+import type { ApplyOutcome, ChangePlan } from '@genoffice/xlsx-gateway/domain/workbook.types'
+import { offsetFormulaRefs } from '@genoffice/xlsx-gateway/domain/formula-shift'
 import {
   qualifierMatches,
   shiftCellArea,
   shiftFormulaText,
   StructuralShiftError,
-} from '../gateway/xlsx-structure'
+} from '@genoffice/xlsx-gateway/gateway/xlsx-structure'
 import { MAX_PATCH_ENTRY_BYTES } from '../shared/desktop-api'
 import { isSheetRemoved } from './edit-journal'
 import { cellKey, parseFormulaReferences } from './formula-closure'
@@ -49,6 +49,7 @@ import {
   normalizeLinkTarget,
   protectSheetGuard,
 } from './univer-sync'
+import { SharedFormulaLookup, indexedFormulas, sharedFormulaText } from './shared-formula-index'
 import { CLOSURE_MAX_CELLS, type LazyWorkbookState, type UniverRuntime } from './univer-state'
 import { convertibleType } from './WorkbookVisuals'
 
@@ -366,7 +367,12 @@ export function proposeOperations(
           continue
         }
         if (operation.op === 'protect_sheet') {
-          const guard = protectSheetGuard(state, operation.sheetId, operation.protected)
+          const guard = protectSheetGuard(
+            state,
+            operation.sheetId,
+            operation.protected,
+            operation.password !== undefined,
+          )
           if (guard) return { ok: false, error: guard }
           continue
         }
@@ -390,7 +396,7 @@ export function proposeOperations(
           // sheet-scoped defined names; catching it here keeps the failure
           // out of the apply-ok-save-fail gap. The sidecar flag covers
           // hidden and _xlnm.* built-ins the modeled definedNames omit
-          // (bugbot); the scan remains as the older-sidecar fallback.
+          // entirely; the scan remains as the older-sidecar fallback.
           const fileIndex = state.file.sheets.findIndex((sheet) => sheet.id === operation.sheetId)
           const scopedNames =
             sheetMeta?.hasScopedDefinedNames ??
@@ -993,7 +999,7 @@ export function lazyGateFailure(
   // a save that must fail. Workbook-level ops (rename/move/hide/delete a
   // sheet) only rewrite workbook.xml and stay allowed. add_pivot reads
   // `sheetId` and bakes its output onto `targetSheetId` — gate that one on
-  // the write target (bugbot).
+  // the write target.
   const writeSheetId = operation.op === 'add_pivot' ? (operation.targetSheetId ?? sheetId) : sheetId
   if (
     !state.editJournal.sheets.added.has(writeSheetId) &&
@@ -1211,7 +1217,7 @@ export function collectStreamedFormulaPrecedents(
  * copy's own write rectangle are pinned like any other precedent: the copied
  * cells are plain journal cells otherwise, and viewport eviction would wipe
  * the ones outside the current window, leaving in-block formulas computing
- * against blanks while still looking live (bugbot).
+ * against blanks while still looking live.
  */
 export function carryCopyFormulasPlan(
   state: LazyWorkbookState,
@@ -1356,10 +1362,12 @@ export async function structuralDeleteFormulaError(
         return null
       }
       if (result.truncated || !result.indexingComplete) return null
-      for (const cell of result.cells) {
-        if (!cell.formula) continue
+      for (const cell of indexedFormulas(
+        result.cells,
+        new SharedFormulaLookup(result.sharedGroups),
+      )) {
         // Only a CONTENT overwrite supersedes the file's formula text — a
-        // style-only journal entry leaves the formula in force (bugbot).
+        // style-only journal entry leaves the formula in force.
         const entry = journalCells?.get(`${cell.row}:${cell.column}`)
         if (entry && (entry.hasValue || entry.formula)) continue
         texts.push(cell.formula)
@@ -1400,7 +1408,7 @@ export function structuralDeleteFormulaErrorSync(
 ): string | null {
   // Session structural ops only invalidate the STREAMED path's texts (the
   // harvested index is in file coordinates); the full-load model already
-  // reflects them, so formulaMode keeps checking (bugbot).
+  // reflects them, so formulaMode keeps checking.
   const structuralShifted = [...state.editJournal.structuralOps.values()].some(
     (ops) => ops.length > 0,
   )
@@ -1432,6 +1440,11 @@ export function structuralDeleteFormulaErrorSync(
           texts.push(text)
         }
       }
+      state.sharedFormulaGroups.get(sheetId)?.forEachFollower((row, column, group) => {
+        const entry = journalCells?.get(`${row}:${column}`)
+        if (entry && (entry.hasValue || entry.formula)) return
+        texts.push(sharedFormulaText(group, row, column))
+      })
     }
     const error = deletedSpanTextError(texts, spec, sheetId !== operation.sheetId)
     if (error) return error

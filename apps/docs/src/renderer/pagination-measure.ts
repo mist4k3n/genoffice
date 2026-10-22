@@ -6,7 +6,10 @@ import type {
   FloatBox,
   MeasuredContent,
   PageNoteItem,
+  PageSlice,
 } from './pagination-types'
+import { effectiveParaFlags } from './editor/para-flags'
+import { additiveParagraphSpacing, autoLineMultOf } from './line-metrics'
 
 /**
  * Collect the editor's top-level block boxes (relative to the content-area top,
@@ -15,9 +18,65 @@ import type {
  * they are skipped and subtracted from subsequent block coordinates, yielding
  * "gapless continuous flow" virtual coordinates so slicing is independent of the gaps.
  */
-/** anchor offset painted as a wrapper translate (px): display-only, the flow slot is unshifted */
+/** display-only offsets of a block from its flow slot (px): the anchor wrapper
+ *  translate and the leading shift's relative top (styles.css --doc-lead-shift) */
 export function anchorShiftPx(el: HTMLElement): number {
-  return parseFloat(el.dataset.anchorDy ?? '') || 0
+  const anchor = parseFloat(el.dataset.anchorDy ?? '') || 0
+  return anchor + (parseFloat(getComputedStyle(el).top) || 0)
+}
+
+/**
+ * Extra leading of one line of an auto-multiple paragraph (px, unzoomed like
+ * every computed length here). Word charges only the single-spacing extent at
+ * the page bottom (probe 2026-09-23); exact and atLeast lines demand their full
+ * box, space before/after always counts.
+ */
+export function lineLeadPx(el: HTMLElement): number {
+  // a protected field block carries its line rule on the inner field element
+  const inner = el.classList.contains('doc-protected-field')
+    ? el.querySelector<HTMLElement>(':scope > .doc-toc-line, :scope > .doc-field-text')
+    : null
+  if (inner) el = inner
+  const mult = autoLineMultOf(el)
+  if (mult <= 1) return 0
+  const cs = getComputedStyle(el)
+  // typed line grids centre the multiple's extra in the snapped cell (unprobed at
+  // the page bottom): keep charging the full box there
+  if (cs.getPropertyValue('--doc-grid-pitch').trim()) return 0
+  // a picture line's extra is the bottom padding past its effectExtent (styles.css --doc-pic-extra)
+  if (el.classList.contains('doc-img-para')) {
+    const effect = parseFloat(el.style.getPropertyValue('--doc-pic-effect-b')) || 0
+    return Math.max(0, (parseFloat(cs.paddingBottom) || 0) - effect)
+  }
+  const lh = parseFloat(cs.lineHeight)
+  if (!Number.isFinite(lh) || lh <= 0) return 0
+  return lh * (1 - 1 / mult)
+}
+
+const ZERO_SLOT_PX = 0.05
+
+/**
+ * Per-top-level-block buckets for the whole-flow scans below: one
+ * querySelectorAll per selector over the flow instead of a subtree scan per
+ * block — the scan returns only matches, so a document of plain paragraphs
+ * pays a handful of whole-DOM walks instead of one per block (genoffice#526).
+ * Each hit climbs to its top-level owner (a direct child of the flow root);
+ * hits outside any block (page-gap widgets) land under the widget element and
+ * are never looked up. Bucket lists keep document order, matching what the
+ * per-block scans returned.
+ */
+function bucketByBlock(pm: HTMLElement, selector: string): Map<HTMLElement, HTMLElement[]> {
+  const byOwner = new Map<HTMLElement, HTMLElement[]>()
+  for (const hit of pm.querySelectorAll(selector)) {
+    let owner = hit.parentElement
+    while (owner && owner.parentElement !== pm) owner = owner.parentElement
+    if (!owner || owner === pm) continue
+    const el = owner as HTMLElement
+    const list = byOwner.get(el)
+    if (list) list.push(hit as HTMLElement)
+    else byOwner.set(el, [hit as HTMLElement])
+  }
+  return byOwner
 }
 
 export function measureBlocks(
@@ -30,17 +89,46 @@ export function measureBlocks(
   const sectBreaks = new Set<number>()
   let totalHeight = 0
   let gapAccum = 0
+  // float-carry spacer (split floating table): real flow space that moves the
+  // anchor paragraph beside the last portion, so it is not a gap; its height
+  // is reported on the block it precedes
+  let carryApplied = 0
+  // consecutive zero-height break carriers collapse their margins onto one DOM
+  // top; each gets its own virtual slot so its page can be told apart
+  let lastZeroTop = -Infinity
+  const showDeleted = !!pm.closest('.rev-display-original')
+  const breaksByBlock = bucketByBlock(pm, '.doc-field-pagebreak, .doc-page-br')
+  const colBreaksByBlock = bucketByBlock(pm, '.doc-col-br')
+  const gapInlinesByBlock = bucketByBlock(pm, '.page-gap-inline')
+  const relImgsByBlock = bucketByBlock(pm, '.doc-inline-img-anchor > img[data-page-rel-v="1"]')
+  const relXImgsByBlock = bucketByBlock(
+    pm,
+    '.doc-inline-img-anchor > img[data-page-rel-x="1"]:not([data-page-rel-v="1"])',
+  )
+  const imgsByBlock = bucketByBlock(pm, 'img')
+  const tablesByBlock = bucketByBlock(pm, 'table')
   for (const el of Array.from(pm.children) as HTMLElement[]) {
     const rect = el.getBoundingClientRect()
     if (el.classList.contains('page-gap') || el.classList.contains('page-float-host')) {
       gapAccum += rect.height
       continue
     }
+    if (el.classList.contains('page-float-carry')) {
+      carryApplied += rect.height / zoomFactor
+      continue
+    }
     // floating-anchor boxes: absolute children of a zero-height wrapper; record
     // shift-neutral virtual positions so pages can be extended to contain them
     let wrapFloatBottom: number | undefined
+    const pageBreakBefore = el.classList.contains('page-break-before')
+    let nudge = 0
+    if (rect.height <= 0 && pageBreakBefore) {
+      const raw = (rect.top - origin - gapAccum) / zoomFactor
+      if (raw <= lastZeroTop + ZERO_SLOT_PX) nudge = lastZeroTop + ZERO_SLOT_PX - raw
+      lastZeroTop = raw + nudge
+    }
     if (el.classList.contains('doc-protected-floating') || el.classList.contains('doc-img-float')) {
-      const anchorTop = (rect.top - origin - gapAccum) / zoomFactor
+      const anchorTop = (rect.top - origin - gapAccum) / zoomFactor + nudge
       const pinned = el.classList.contains('doc-protected-pagepinned')
       for (const box of Array.from(
         el.querySelectorAll(':scope > .doc-textbox, :scope > .doc-img-wrap'),
@@ -48,7 +136,7 @@ export function measureBlocks(
         const b = (box as HTMLElement).getBoundingClientRect()
         if (b.height <= 0) continue
         const applied = parseFloat((box as HTMLElement).dataset.pageFloatDy ?? '0') || 0
-        const top = (b.top - origin - (pinned ? 0 : gapAccum)) / zoomFactor - applied
+        const top = (b.top - origin - (pinned ? 0 : gapAccum)) / zoomFactor - applied + nudge
         const height = b.height / zoomFactor
         if (!pinned) wrapFloatBottom = Math.max(wrapFloatBottom ?? 0, top + height)
         floats.push({
@@ -60,8 +148,38 @@ export function measureBlocks(
           pinned,
           pageRelV: (box as HTMLElement).dataset.pageRelV === '1',
           ...((box as HTMLElement).dataset.pageRelFrom === 'page' ? { pageRelFromPage: true } : {}),
+          ...((box as HTMLElement).dataset.noSpill === '1' ? { noSpill: true } : {}),
         })
       }
+    }
+    // run-level page-relative pictures re-pin like floating boxes (origin = hosting paragraph)
+    for (const img of relImgsByBlock.get(el) ?? []) {
+      const b = img.getBoundingClientRect()
+      if (b.height <= 0) continue
+      const applied = parseFloat(img.dataset.pageFloatDy ?? '0') || 0
+      floats.push({
+        el: img,
+        top: (b.top - origin - gapAccum) / zoomFactor - applied,
+        height: b.height / zoomFactor,
+        anchorTop: (rect.top - origin - gapAccum) / zoomFactor,
+        pinned: false,
+        pageRelV: true,
+        ...(img.dataset.pageRelFrom === 'page' ? { pageRelFromPage: true } : {}),
+      })
+    }
+    // page-relative X only: the preview hoists them out of the column window
+    for (const img of relXImgsByBlock.get(el) ?? []) {
+      const b = img.getBoundingClientRect()
+      if (b.height <= 0) continue
+      floats.push({
+        el: img,
+        top: (b.top - origin - gapAccum) / zoomFactor,
+        height: b.height / zoomFactor,
+        anchorTop: (rect.top - origin - gapAccum) / zoomFactor,
+        pinned: false,
+        pageRelV: false,
+        noSpill: true,
+      })
     }
     // sectPr-only paragraph: the section-break mark itself has no height in Word
     // (its editor chip must not occupy a page or hold a forced break's page open),
@@ -73,62 +191,56 @@ export function measureBlocks(
     }
     // Word ignores page-type w:br inside table cells, and breaks inside a
     // textbox lay out that box's own text — neither may break the body flow
-    const breakEls = Array.from(el.querySelectorAll('.doc-field-pagebreak, .doc-page-br')).filter(
-      (b) => !b.closest('td, th, .doc-textbox'),
+    // a tracked-deleted break (w:del) only breaks in the Original view
+    const breakEls = (breaksByBlock.get(el) ?? []).filter(
+      (b) => !b.closest('td, th, .doc-textbox') && (showDeleted || !b.closest('.doc-del')),
     )
     const hasBreak = breakEls.length > 0
-    const colBreakEls = Array.from(el.querySelectorAll('.doc-col-br')).filter(
-      (b) => !b.closest('td, th, .doc-textbox'),
+    const colBreakEls = (colBreaksByBlock.get(el) ?? []).filter(
+      (b) => !b.closest('td, th, .doc-textbox') && (showDeleted || !b.closest('.doc-del')),
     )
     const hasColBreak = colBreakEls.length > 0
     // zero-height blocks are skipped, except a break carrier (e.g. a floating
-    // textbox whose anchor paragraph holds a page-type w:br) must still be seen
-    if (rect.height <= 0 && !hasBreak) continue
+    // textbox whose anchor paragraph holds a page-type w:br or pageBreakBefore)
+    // must still be seen
+    if (rect.height <= 0 && !hasBreak && !pageBreakBefore) continue
     // in-block gaps from mid-paragraph page breaks: subtract from block height and add to the gap accumulator for later blocks
-    const innerGap = innerGapHeight(el)
-    const top = (rect.top - anchorShiftPx(el) * zoomFactor - origin - gapAccum) / zoomFactor
+    let innerGap = 0
+    for (const g of gapInlinesByBlock.get(el) ?? []) innerGap += g.getBoundingClientRect().height
+    const top = (rect.top - anchorShiftPx(el) * zoomFactor - origin - gapAccum) / zoomFactor + nudge
     const height = (rect.height - innerGap) / zoomFactor
     const idxAttr = el.getAttribute('data-idx')
-    // break-only paragraph (br line + ProseMirror trailing-break phantom line): marked
-    // for dedicated placement — Word pushes it into a deliberate blank page when its
-    // line doesn't fit at the page bottom. Word renders a single break line, but the
-    // DOM height spans one line box per <br> (a text-less paragraph lays out exactly
-    // brCount line boxes), so the fit height is one line's share. Word only charges
-    // the line's natural single-spacing extent at the page bottom (probe 20260901: a
-    // double-spaced Calibri 11pt break line absorbs at 14pt remaining, while an exact
-    // line demands its full exact height), so auto multiples above 1 are divided out.
-    const breakOnly = hasBreak && !(el.textContent ?? '').trim() && !el.querySelector('img')
-    const brLines = breakOnly ? el.querySelectorAll('br').length : 0
+    // break-only paragraph: marked for dedicated placement — Word pushes it into a
+    // deliberate blank page when its line doesn't fit at the page bottom. Word
+    // renders a single break line; the DOM lays out one line box per break (the
+    // trailing-break phantom after the last one is hidden by CSS, as its mark
+    // shares the break's line), so the fit height is one line's share. Word only
+    // charges the line's natural single-spacing extent at the page bottom (probe
+    // 20260901: a double-spaced Calibri 11pt break line absorbs at 14pt remaining,
+    // while an exact line demands its full exact height), so auto multiples above
+    // 1 are divided out.
+    // ProseMirror's separator img (a layout stub before the trailing break) is not content
+    const breakOnly =
+      hasBreak &&
+      !(el.textContent ?? '').trim() &&
+      !(imgsByBlock.get(el) ?? []).some((i) => !i.classList.contains('ProseMirror-separator'))
+    const brLines = breakOnly ? el.querySelectorAll('br:not(.ProseMirror-trailingBreak)').length : 0
     let breakOnlyLineH: number | undefined
     if (breakOnly) {
       const box = brLines > 1 ? height / brLines : height
-      // per-paragraph declarations live in the inline style; the document-level
-      // multiple cascades through the computed style. Fixed-height lines demand
-      // their full box: direct exact/atLeast carries the doc-lh-fixed class, a
-      // style-level exact/atLeast is marked by --doc-line-fixed (doc-style-css)
-      // — unless a direct auto override re-declares the inline multiple.
-      const inlineMult = el.style.getPropertyValue('--doc-line-mult')
-      const fixed =
-        el.classList.contains('doc-lh-fixed') ||
-        (!inlineMult &&
-          (
-            el.style.getPropertyValue('--doc-line-fixed') ||
-            getComputedStyle(el).getPropertyValue('--doc-line-fixed')
-          ).trim() === '1')
-      const mult = fixed
-        ? 1
-        : parseFloat(inlineMult || getComputedStyle(el).getPropertyValue('--doc-line-mult')) || 1
-      breakOnlyLineH = box / Math.max(1, mult)
+      breakOnlyLineH = box / Math.max(1, autoLineMultOf(el))
     }
-    // a single break with no text before it: Word starts this block's own content
-    // on a new page, so it maps to breakBefore (breakAfter only pushes the next block)
-    let leadingBreak = false
-    if (breakEls.length === 1 && (el.textContent ?? '').trim()) {
-      const r = document.createRange()
-      r.setStart(el, 0)
-      r.setEndBefore(breakEls[0])
-      leadingBreak = !r.toString().trim()
-    }
+    // breaks with no text before them lead the block: the break line stays on
+    // the current page and the block's text starts the next one (Word), so the
+    // last leading break cuts like a mid-paragraph break; a field break has no
+    // line of its own and maps to breakBefore. Breaks with no text after it
+    // trail (breakAfter pushes the next block). Every break character turns the
+    // page, so a run of N adjacent breaks leaves N-1 blank sheets. Text is
+    // measured outside the break nodes (a field break carries its own label).
+    let hasText = false
+    let leadingCount = 0
+    let trailingCount = 0
+    let leadingCut = false
     // a column break with nothing before it moves the whole paragraph (its own
     // line included) to the next column top; a break-only paragraph likewise
     let leadingColBreak = false
@@ -143,69 +255,156 @@ export function measureBlocks(
     // the next block. Y = the post-break line's ink top, element-relative and
     // net of inline gaps a previous pass already inserted there
     const innerBreaks: number[] = []
-    let trailingBreak = hasBreak
-    if (hasBreak && !leadingBreak) {
-      const gapRects = Array.from(el.querySelectorAll('.page-gap-inline')).map((g) =>
-        g.getBoundingClientRect(),
-      )
+    if (hasBreak) {
+      const gapRects = (gapInlinesByBlock.get(el) ?? []).map((g) => g.getBoundingClientRect())
       const gapAbove = (y: number) => gapRects.reduce((s, g) => (g.top <= y ? s + g.height : s), 0)
       const r = document.createRange()
-      breakEls.forEach((b, i) => {
+      const brs = breakEls.map((b) => {
         r.setStart(el, 0)
         r.setEndBefore(b)
         const before = r.toString().trim() !== ''
         r.setStartAfter(b)
         r.setEnd(el, el.childNodes.length)
         const after = r.toString().trim() !== ''
-        if (i === breakEls.length - 1) trailingBreak = !after
-        if (!before || !after || !b.classList.contains('doc-page-br')) return
-        const first = Array.from(r.getClientRects()).find((c) => c.height > 0 && c.width > 0)
-        if (first) innerBreaks.push((first.top - rect.top - gapAbove(first.top)) / zoomFactor)
+        return { b, before, after }
+      })
+      hasText = brs.some((x) => x.before || x.after)
+      leadingCount = brs.filter((x) => !x.before).length
+      trailingCount = brs.filter((x) => !x.after).length
+      brs.forEach(({ b, before, after }, i) => {
+        if (!after || !b.classList.contains('doc-page-br')) return
+        if (!before && i !== leadingCount - 1) return
+        r.setStartAfter(b)
+        r.setEnd(el, el.childNodes.length)
+        const first = Array.from(r.getClientRects?.() ?? []).find(
+          (c) => c.height > 0 && c.width > 0,
+        )
+        if (!first) return
+        innerBreaks.push((first.top - rect.top - gapAbove(first.top)) / zoomFactor)
+        if (!before) leadingCut = true
       })
     }
-    const floated =
-      /(?:^|\s)img-wrap-(?:square|tight|through)-(?:left|right)(?:\s|$)/.test(el.className) ||
+    const leadingBreak = hasText && leadingCount > 0 && !leadingCut
+    const floatTable =
       el.classList.contains('doc-table-float-left') ||
       el.classList.contains('doc-table-float-right')
+    const floatFlowed = floatTable && el.classList.contains('doc-table-float-flow')
+    const lifted =
+      el.dataset.anchorLiftBase !== undefined && (parseFloat(el.style.marginTop) || 0) < 0
+    const floated =
+      /(?:^|\s)img-wrap-(?:square|tight|through)-(?:left|right)(?:\s|$)/.test(el.className) ||
+      el.classList.contains('doc-para-frame-float') ||
+      (floatTable && !floatFlowed)
     // page/margin-anchored floated table: strip the applied --tblp-dy shift so
     // the engine sees the natural flow position (float margins move only the
     // float's own box, so no gapAccum contribution)
     const relVy = floated ? parseFloat(el.dataset.tblpVy ?? '') : NaN
     const relVAnchor = el.dataset.tblpVanchor
+    const relVSpec = el.dataset.tblpVspec
     const relVApplied = Number.isFinite(relVy) ? parseFloat(el.dataset.tblpDy ?? '') || 0 : 0
-    const emptyPara = !(el.textContent ?? '').trim() && !el.querySelector('img')
+    const blockImgs = imgsByBlock.get(el) ?? []
+    const emptyPara = !(el.textContent ?? '').trim() && blockImgs.length === 0
+    const pictures = blockImgs.filter((i) => !i.classList.contains('ProseMirror-separator'))
+    const anchorOnly =
+      el.tagName === 'P' &&
+      !(el.textContent ?? '').trim() &&
+      pictures.length > 0 &&
+      pictures.every(
+        (i) => i.closest('.doc-inline-img-anchor') || /(?:^|\s)doc-inline-img--/.test(i.className),
+      )
+    const hasCellBreak = !!el.querySelector('tr p.page-break-before')
     // non-reflowable blocks keep their rendered width in any column (tables,
     // anchored/inline textbox shapes; protected text paragraphs still reflow)
     const fixedWidth =
       el.tagName === 'TABLE' ||
       el.classList.contains('doc-protected-textboxes') ||
-      !!el.querySelector('table')
-    const bandKeep = el.dataset.bandKeep === '1' && el.classList.contains('doc-protected-floating')
+      !!tablesByBlock.get(el)?.length
+    // a paragraph whose own column-spanning side-wrap picture runs past the
+    // page bottom keeps its line on that page (Word draws it below the paper
+    // edge); only a paragraph with no more than one line below the picture
+    let paraFloatBottom: number | undefined
+    if (el.tagName === 'P') {
+      const img = (imgsByBlock.get(el) ?? []).find((i) =>
+        i.matches(
+          'img.doc-inline-img--wrap-square-left, img.doc-inline-img--wrap-square-right, ' +
+            'img.doc-inline-img--wrap-tight-left, img.doc-inline-img--wrap-tight-right, ' +
+            'img.doc-inline-img--wrap-through-left, img.doc-inline-img--wrap-through-right',
+        ),
+      )
+      if (img) {
+        const b = img.getBoundingClientRect()
+        const lh = parseFloat(getComputedStyle(el).lineHeight) || 0
+        if (
+          b.height > 0 &&
+          b.width >= rect.width - 36 * zoomFactor &&
+          (rect.bottom - b.bottom) / zoomFactor <= 1.6 * lh
+        ) {
+          paraFloatBottom = (b.bottom - origin - gapAccum) / zoomFactor
+        }
+      }
+    }
+    const bandKeep =
+      paraFloatBottom !== undefined ||
+      (el.dataset.bandKeep === '1' && el.classList.contains('doc-protected-floating'))
+    const keepFloatBottom = wrapFloatBottom ?? paraFloatBottom
     const liftPx = parseFloat(el.dataset.tblpLift ?? '')
+    const padBeforePx =
+      additiveParagraphSpacing() && !el.matches('table')
+        ? parseFloat(getComputedStyle(el).paddingTop) || 0
+        : 0
     blocks.push({
       top: top - relVApplied,
       height,
+      domHeight: height,
+      ...(padBeforePx > 0.5 ? { padBeforePx } : {}),
       ...(floated ? { floated: true } : {}),
+      ...(floated && lifted ? { lifted: true } : {}),
+      ...(floatTable ? { floatTable: true } : {}),
+      ...(floatFlowed ? { floatFlowed: true } : {}),
       ...(liftPx > 0 ? { liftPx } : {}),
+      ...(el.dataset.tblpPush === '1' ? { floatPushWhole: true } : {}),
       ...(bandKeep ? { bandKeep: true } : {}),
-      ...(bandKeep && wrapFloatBottom !== undefined ? { floatBottom: wrapFloatBottom } : {}),
+      ...(bandKeep && keepFloatBottom !== undefined ? { floatBottom: keepFloatBottom } : {}),
+      ...(!bandKeep && el.dataset.obsBottom !== undefined && el.dataset.obsMaxh !== undefined
+        ? {
+            floatKeepWhole: true,
+            floatBottom: top - relVApplied + (parseFloat(el.dataset.obsBottom) || 0),
+            floatMaxH: parseFloat(el.dataset.obsMaxh) || 0,
+          }
+        : {}),
       ...(Number.isFinite(relVy) && (relVAnchor === 'page' || relVAnchor === 'margin')
-        ? { pageRelVyPx: relVy, pageRelVAnchor: relVAnchor }
+        ? {
+            pageRelVyPx: relVy,
+            pageRelVAnchor: relVAnchor,
+            ...(relVSpec === 'top' || relVSpec === 'center' || relVSpec === 'bottom'
+              ? { pageRelVSpec: relVSpec }
+              : {}),
+          }
         : {}),
       ...(emptyPara ? { emptyPara: true } : {}),
-      ...(fixedWidth ? { fixedWidthPx: rect.width / zoomFactor } : {}),
-      breakBefore: el.classList.contains('page-break-before') || leadingBreak || undefined,
+      ...(anchorOnly ? { anchorOnly: true } : {}),
+      ...(fixedWidth
+        ? { fixedWidthPx: rect.width / zoomFactor }
+        : { widthPx: rect.width / zoomFactor }),
+      breakBefore: pageBreakBefore || leadingBreak || undefined,
       breakBeforeBr: leadingBreak || undefined,
-      breakAfter: (hasBreak && !leadingBreak && trailingBreak) || undefined,
+      ...(hasText && leadingCount > 1 ? { extraBreaksBefore: leadingCount - 1 } : {}),
+      breakAfter: trailingCount > 0 || undefined,
+      ...(trailingCount > 1 ? { extraBreaksAfter: trailingCount - 1 } : {}),
       ...(innerBreaks.length > 0 ? { innerBreaks } : {}),
+      ...(hasCellBreak ? { hasCellBreak: true } : {}),
       colBreakBefore: leadingColBreak || undefined,
       colBreakAfter: (hasColBreak && !leadingColBreak) || undefined,
       breakForce: (hasBreak && rect.height <= 0) || undefined,
       el,
       ...(breakOnlyLineH !== undefined ? { breakOnlyLineH } : {}),
       ...(idxAttr ? { docxIndex: parseInt(idxAttr, 10) } : {}),
+      ...(carryApplied > 0 ? { carryAppliedPx: carryApplied } : {}),
     })
-    gapAccum += innerGap
+    carryApplied = 0
+    // a CSS float's in-table gaps grow only the float's own box: the blocks
+    // after it stack where they would without them
+    if (!floated) gapAccum += innerGap
     totalHeight = Math.max(totalHeight, top + height)
   }
   // inter-block CSS margin (space after): rect height excludes it, but it occupies
@@ -224,7 +423,7 @@ export function measureBlocks(
   // (space-before semantics: counted before the block's own lines)
   const first = blocks[0]
   const firstIsTable =
-    !!first?.el && (first.el.matches('table') || !!first.el.querySelector('table'))
+    !!first?.el && (first.el.matches('table') || !!tablesByBlock.get(first.el)?.length)
   if (blocks.length > 0 && first.top > 0.5 && !firstIsTable) {
     const lead = blocks[0].top
     blocks[0].spaceBeforePx = (blocks[0].spaceBeforePx ?? 0) + lead
@@ -244,17 +443,86 @@ export function measureBlocks(
 export function endnotesAnchorY(pm: HTMLElement, baseTop: number, factor: number): number | null {
   for (let i = pm.children.length - 1; i >= 0; i--) {
     const el = pm.children[i] as HTMLElement
-    if (el.classList.contains('page-gap') || el.classList.contains('page-float-host')) continue
+    if (
+      el.classList.contains('page-gap') ||
+      el.classList.contains('page-float-host') ||
+      el.classList.contains('page-float-carry')
+    )
+      continue
     const rect = el.getBoundingClientRect()
     if (rect.height <= 0) continue
-    return (rect.bottom - baseTop) / factor
+    return (
+      (rect.bottom - anchorShiftPx(el) * factor - baseTop) / factor +
+      (parseFloat(getComputedStyle(el).marginBottom) || 0)
+    )
   }
   return null
 }
 
 /**
+ * Space after of the flow's last text block (px). measureBlocks folds inter-block
+ * margins into the preceding block, but nothing follows the last one, while Word
+ * still lays a note area out below that paragraph's space after.
+ */
+export function trailingSpaceAfterPx(blocks: BlockBox[]): number {
+  let last: BlockBox | undefined
+  for (const b of blocks) {
+    if (!b.el || b.height <= 0) continue
+    if (!last || b.top + b.height > last.top + last.height) last = b
+  }
+  if (!last?.el || last.spaceAfterPx) return 0
+  return parseFloat(getComputedStyle(last.el).marginBottom) || 0
+}
+
+/**
+ * Per-page flow-coordinate bottom of the body text (w:footnotePr w:pos="beneathText":
+ * Word starts the note area right under the last line instead of at the page bottom).
+ * A block's footnote reservation is virtual space below its text and is excluded;
+ * virtual blocks (endnote area, float spill) are not text. The flow's last block
+ * contributes its space after (the page's window is clamped by the caller).
+ */
+export function pageTextEnds(blocks: BlockBox[], slices: PageSlice[]): number[] {
+  const text = blocks.filter((b) => b.el || b.docxIndex !== undefined)
+  const bottomOf = (b: BlockBox) => b.top + b.height - (b.footnoteExtraPx ?? 0)
+  const flowEnd = text.reduce((m, b) => Math.max(m, bottomOf(b)), 0)
+  const trailing = trailingSpaceAfterPx(blocks)
+  return slices.map((s) => {
+    let end = s.start
+    for (const b of text) {
+      const bottom = bottomOf(b)
+      if (b.top >= s.end || bottom <= s.start) continue
+      end = Math.max(end, Math.min(bottom, s.end))
+    }
+    if (flowEnd > s.start && flowEnd <= s.end + 0.5) end = Math.max(end, flowEnd + trailing)
+    return end
+  })
+}
+
+/**
+ * Page placement of the footnote area (height 0 = none on the page). top is null
+ * for Word's default bottom anchor; w:pos="beneathText" puts it right under the
+ * last body line (regioned pages keep the bottom anchor, their text end is per
+ * column). vOffset is the page's w:vAlign shift, which moves the body and the
+ * area alike. Endnote rows on a beneath-text page start below that footnote area
+ * (Word stacks footnotes, then endnotes): endnoteShift is added to their top; an
+ * area clamped to the content bottom shifts them only as far as its real bottom.
+ */
+export function noteAreaPlacement(
+  height: number,
+  textEnd: number | undefined,
+  slice: Pick<PageSlice, 'start' | 'regions'>,
+  geom: { pageH: number; mTop: number; mBottom: number; headerH: number; vOffset: number },
+): { top: number | null; endnoteShift: number } {
+  if (height <= 0 || textEnd === undefined || slice.regions) return { top: null, endnoteShift: 0 }
+  const beneath = geom.mTop + geom.headerH + geom.vOffset + (textEnd - slice.start)
+  const top = Math.min(beneath, geom.pageH - geom.mBottom - height)
+  return { top, endnoteShift: top + height - beneath }
+}
+
+/**
  * Endnote layout: endnotes gather at the end of the document
- * (or section) right after the body, flowing to later pages when they don't fit.
+ * (or section) right after the body (below its last space after), flowing to later
+ * pages when they don't fit.
  * Before slicing, the endnotes area is appended as a virtual block at flow end: one
  * line box per endnote (separator height merged into the first), widowControl off →
  * page breaks are allowed between any entries. Returns the endnotes area's top Y.
@@ -266,7 +534,7 @@ export function appendEndnotesBlock(
   separatorH: number,
 ): { totalHeight: number; top: number } | null {
   if (items.length === 0) return null
-  const top = totalHeight
+  const top = totalHeight + trailingSpaceAfterPx(blocks)
   const lineBoxes: Array<{ offsetInBlock: number; height: number }> = []
   let off = 0
   for (let i = 0; i < items.length; i++) {
@@ -307,7 +575,7 @@ export function appendFloatSpillBlock(
   // page — Word never opens a page for them, and their measured tops are not
   // flow extents (pinned = page coords, pageRelV = anchor + page offset)
   for (const f of floats) {
-    if (!f.pinned && !f.pageRelV) bottom = Math.max(bottom, f.top + f.height)
+    if (!f.pinned && !f.pageRelV && !f.noSpill) bottom = Math.max(bottom, f.top + f.height)
   }
   bottom -= bottomOverhangPx
   if (bottom <= totalHeight + 1) return null
@@ -331,13 +599,36 @@ export function appendFloatSpillBlock(
   return top + spill
 }
 
-/** Extract each tr's tblHeader/cantSplit/atLeast-trHeight flags from table XML (header repetition across breaks / unsplittable rows / reserved row heights) */
+/** Extract each tr's tblHeader/cantSplit/keepNext/atLeast-trHeight flags from table XML (header
+ *  repetition across breaks / unsplittable rows / rows kept with the next row / reserved row heights).
+ *  `styleKeepNext` resolves a cell paragraph's pStyle to its keepNext. Only the FIRST paragraph
+ *  of the row's FIRST cell counts (Word probes 2026-09-17 / 2026-10-13: its keepNext chains the
+ *  row to the next row; a keepNext on a later paragraph or in a later cell does nothing). */
 export function tableRowFlags(
   tableXml: string,
-): Array<{ isHeader: boolean; cantSplit: boolean; minHPx?: number }> {
-  const flags: Array<{ isHeader: boolean; cantSplit: boolean; minHPx?: number }> = []
+  styleKeepNext?: (styleId: string) => boolean,
+): Array<{ isHeader: boolean; cantSplit: boolean; keepNext?: boolean; minHPx?: number }> {
+  const flags: Array<{
+    isHeader: boolean
+    cantSplit: boolean
+    keepNext?: boolean
+    minHPx?: number
+  }> = []
   for (const m of tableXml.matchAll(/<w:tr[\s>][\s\S]*?(?=<w:tr[\s>]|<\/w:tbl>)/g)) {
     const trPr = m[0].match(/<w:trPr>[\s\S]*?<\/w:trPr>/)?.[0] ?? ''
+    let keepNext = false
+    const firstCell = /<w:tc[\s>]([\s\S]*?)(?=<w:tc[\s>]|<\/w:tr>|$)/.exec(m[0])?.[1] ?? ''
+    const firstP =
+      /<w:p(?:\s[^>]*)?\/>|<w:p[\s>][\s\S]*?(?=<\/w:p>|<w:p[\s>])/.exec(firstCell)?.[0] ?? ''
+    const pPr = /<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(firstP)?.[1]
+    if (pPr) {
+      const direct = /<w:keepNext\b[^>]*>/.exec(pPr)?.[0]
+      if (direct) keepNext = !/w:val="(?:0|false)"/.test(direct)
+      else {
+        const styleId = /<w:pStyle w:val="([^"]+)"/.exec(pPr)?.[1]
+        if (styleId && styleKeepNext?.(styleId)) keepNext = true
+      }
+    }
     // non-exact w:trHeight = atLeast (parse.ts semantics); exact rows keep the
     // split path (deliberate clip deviation, see _placeTable). Clamp mirrors
     // parse.ts (MS-OI29500 2.1.51: 31680 twips / 22in).
@@ -347,6 +638,7 @@ export function tableRowFlags(
     flags.push({
       isHeader: /<w:tblHeader(?!\s+w:val="(?:0|false)")/.test(trPr),
       cantSplit: /<w:cantSplit(?!\s+w:val="(?:0|false)")/.test(trPr),
+      ...(keepNext ? { keepNext } : {}),
       ...(atLeast ? { minHPx: Math.min(val, 31680) / 15 } : {}),
     })
   }
@@ -378,16 +670,23 @@ export function noteRefOffsets(el: HTMLElement, zoomFactor: number): number[] {
 }
 
 /** Inject parse-layer constraints into measured blocks (call before slicing; table row flags are applied by fillLineBoxes) */
-export function applyBlockMeta(blocks: BlockBox[], metaOf: BlockMetaOf, zoomFactor = 1): void {
+export function applyBlockMeta(
+  blocks: BlockBox[],
+  metaOf: BlockMetaOf | undefined,
+  zoomFactor = 1,
+): void {
   for (const b of blocks) {
-    if (b.docxIndex === undefined) continue
-    const meta = metaOf(b.docxIndex)
+    // flags edited in the dialog live on the element: they win over the parsed
+    // paragraph's meta so a change re-paginates before the document is saved
+    const meta = b.docxIndex === undefined ? undefined : metaOf?.(b.docxIndex)
+    const flags = effectiveParaFlags(b.el, meta)
+    if (flags.keepNext) b.keepNext = true
+    if (flags.keepLines) b.keepLines = true
+    if (flags.widowControl === false) b.widowControl = false
     if (!meta) continue
-    if (meta.keepNext) b.keepNext = true
     if (meta.modernTableHeaders) b.modernTableHeaders = true
-    if (meta.keepLines) b.keepLines = true
+    if (meta.cellWidowOff) b.cellWidowOff = true
     if (meta.breakBefore) b.breakBefore = true
-    if (meta.widowControl === false) b.widowControl = false
     if (meta.footnoteExtraPx) {
       // the reservation consumes page capacity through the block height only;
       // it must never ride spaceAfterPx (the page-bottom trailing-space
@@ -409,11 +708,4 @@ export function applyBlockMeta(blocks: BlockBox[], metaOf: BlockMetaOf, zoomFact
       }
     }
   }
-}
-
-/** Total height of in-block inline gaps (mid-paragraph page-break decorations) (screen px) */
-function innerGapHeight(el: HTMLElement): number {
-  let sum = 0
-  for (const g of el.querySelectorAll('.page-gap-inline')) sum += g.getBoundingClientRect().height
-  return sum
 }

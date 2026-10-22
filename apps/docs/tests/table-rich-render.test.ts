@@ -101,7 +101,7 @@ describe('renderTableSpec rich cell content', () => {
         ],
       ],
     }
-    const spans = renderTable(model).querySelectorAll('td span')
+    const spans = renderTable(model).querySelectorAll('td span:not(.doc-ltr-runs)')
     const arabic = spans[0].getAttribute('style')!
     expect(arabic).toMatch(/font-family:\s*['"]Traditional Arabic['"]/)
     expect(arabic).toContain('Calibri')
@@ -181,19 +181,28 @@ describe('renderTableSpec rich cell content', () => {
     expect(para.querySelector('img.doc-inline-img')).not.toBeNull()
   })
 
-  it('cell-level color/bold stay as td-level fallback', () => {
-    const model: TableModel = {
+  it('paints table-style color/bold on the td, never the run aggregates', () => {
+    const aggregated: TableModel = {
+      rows: [[{ ...cell(['t'], [{ runs: [{ text: 't' }] }]), color: '112233', bold: true }]],
+    }
+    const plain = renderTable(aggregated).querySelector('td')!.getAttribute('style') ?? ''
+    expect(plain).not.toMatch(/color:/)
+    expect(plain).not.toMatch(/font-weight/)
+
+    const styled: TableModel = {
       rows: [
         [
           {
             ...cell(['t'], [{ runs: [{ text: 't' }] }]),
             color: '112233',
             bold: true,
+            styleColor: '112233',
+            styleBold: true,
           },
         ],
       ],
     }
-    const td = renderTable(model).querySelector('td')!
+    const td = renderTable(styled).querySelector('td')!
     const tdStyle = td.getAttribute('style')!
     expect(tdStyle).toMatch(/color:\s*(#112233|rgb\(17,\s*34,\s*51\))/i)
     expect(tdStyle).toMatch(/font-weight:\s*600/)
@@ -236,11 +245,45 @@ describe('renderTableSpec paragraph line box', () => {
         ],
       ],
     })
-    expect(style).toContain('--doc-strut:7pt')
-    expect(style).toContain('font-size:min(var(--doc-strut), 1em)')
+    expect(style).toContain('--doc-strut:6pt')
+    expect(style).toContain('font-size:var(--doc-strut)')
     expect(style).toContain('--doc-line-factor:var(--doc-line-factor-latin,1.2)')
     // explicit w:line=240 (single): re-evaluated at the paragraph's own strut size
     expect(style).toContain(SINGLE_LH)
+  })
+
+  it('space-only runs never size the strut; a space-only cell paragraph takes the mark', () => {
+    const [mixed, spaceOnly, marked] = paraStyles({
+      rows: [
+        [
+          cell(
+            ['a  '],
+            [
+              {
+                runs: [
+                  { text: 'a', sizeHalfPoints: 14 },
+                  { text: '  ', sizeHalfPoints: 40 },
+                ],
+              },
+              { runs: [{ text: ' ', sizeHalfPoints: 8 }] },
+              { runs: [{ text: ' ', sizeHalfPoints: 8 }], emptyRunSizeHalfPoints: 8 },
+            ],
+          ),
+        ],
+      ],
+    })
+    expect(mixed).toContain('--doc-strut:7pt')
+    expect(spaceOnly).not.toContain('--doc-strut')
+    expect(spaceOnly).not.toContain('font-size')
+    expect(marked).not.toContain('--doc-strut')
+    expect(marked).toContain('font-size:4pt')
+  })
+
+  it('a tab-only paragraph is content, not a space-only spacer', () => {
+    const [tabOnly] = paraStyles({
+      rows: [[cell(['\t'], [{ runs: [{ text: '\t', sizeHalfPoints: 8 }] }])]],
+    })
+    expect(tabOnly).toContain('--doc-strut:4pt')
   })
 
   it('keeps the inherited strut when any run omits its size', () => {
@@ -311,14 +354,14 @@ describe('renderTableSpec paragraph line box', () => {
     const [style] = paraStyles({
       rows: [[cell(['宋体字'], [{ runs: [{ text: '宋体字', font: 'SimSun' }] }])]],
     })
-    expect(style).toContain('--doc-line-factor:1.3029')
+    expect(style).toContain('--doc-line-factor:1.3')
   })
 
   it('JP-variant Noto run fonts take the JA substitution factor', () => {
     const [style] = paraStyles({
       rows: [[cell(['日本語'], [{ runs: [{ text: '日本語', font: 'Noto Sans CJK JP' }] }])]],
     })
-    expect(style).toContain('--doc-line-factor:1.3029')
+    expect(style).toContain('--doc-line-factor:1.3')
   })
 
   it('plain-paras cells get script-based line factors per paragraph', () => {
@@ -476,7 +519,8 @@ describe('renderTableSpec cell inset variables', () => {
       cellMarTwips: { left: 108, right: 108 },
     }
     const table = renderTable(model)
-    expect(table.getAttribute('style')).toContain('width: min(227px,')
+    // outer half-lines: the first cell's 3px tcBorder on the left, the table's 1px on the right
+    expect(table.getAttribute('style')).toContain('width: min(228px,')
     expect(table.style.getPropertyValue('--doc-bw-v')).toBe('1px')
     expect(table.style.getPropertyValue('--doc-cell-pad-r')).toBe('7.2px')
     const td = table.querySelector('td') as HTMLElement

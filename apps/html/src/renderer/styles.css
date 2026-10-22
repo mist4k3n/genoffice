@@ -189,6 +189,12 @@ html.genoffice-popover-open .ribbon-tabs {
   color: var(--text-primary);
 }
 
+.qa-save-as {
+  width: auto;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
 .qa-btn svg {
   display: block;
   margin: 0 auto;
@@ -199,7 +205,7 @@ html.genoffice-popover-open .ribbon-tabs {
 }
 
 .qa-btn:disabled {
-  color: var(--text-muted);
+  color: var(--text-tertiary);
   cursor: default;
 }
 
@@ -302,6 +308,15 @@ html.genoffice-popover-open .ribbon-tabs {
   flex: 1;
 }
 
+/* muted verb leading a button row ("Insert  Heading Paragraph Image …"): the ribbon has no tabs to say it */
+.rb-group-lead {
+  flex-shrink: 0;
+  padding: 0 6px 0 4px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 .rb-big {
   display: flex;
   flex-direction: column;
@@ -367,6 +382,33 @@ html.genoffice-popover-open .ribbon-tabs {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.disk-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+}
+.disk-notice span {
+  flex: 1;
+  min-width: 0;
+}
+.disk-notice button {
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.disk-notice button:hover {
+  background: var(--hover);
 }
 
 /* ---- AI change highlight in the source pane ---- */
@@ -447,6 +489,142 @@ html.genoffice-popover-open .ribbon-tabs {
 
 .source-editor .cm-editor {
   height: 100%;
+}
+
+/* ---- source context menu (withholding a selection from the model) ---- */
+
+.source-ctx {
+  position: fixed;
+  z-index: 70;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-8);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+
+.source-ctx-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.source-ctx-item:hover {
+  background: var(--hover);
+}
+
+.source-ctx-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ---- redact dialog ---- */
+
+.redact-dialog-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-overlay);
+}
+
+.redact-dialog {
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-12);
+  background: var(--surface);
+  box-shadow: var(--shadow-modal-strong);
+}
+
+.redact-dialog-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.redact-dialog-desc {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* the marker as the model will see it, live as the label is typed */
+.redact-dialog-preview {
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-8);
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  word-break: break-all;
+}
+
+.redact-dialog-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-8);
+  background: var(--color-bg-page);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.redact-dialog-input:focus {
+  border-color: var(--accent);
+}
+
+.redact-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.redact-dialog-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.redact-dialog-btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.redact-dialog-btn.primary {
+  background: var(--color-btn-primary);
+  border-color: var(--color-btn-primary);
+  color: var(--color-btn-primary-text);
+  font-weight: 600;
+}
+
+.redact-dialog-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ---- status bar ---- */
@@ -555,6 +733,11 @@ html.genoffice-popover-open .ribbon-tabs {
   width: 34px;
 }
 
+/* "show the AI sidebar" off and panel closed: no rail, no sliver */
+.ai-dock.collapsed.ai-dock-off {
+  width: 0;
+}
+
 /* while dragging the resizer, follow the pointer without easing */
 .ai-dock:has(.ai-panel-resizing) {
   transition: none;
@@ -586,7 +769,8 @@ html.genoffice-popover-open .ribbon-tabs {
   width: 34px;
   padding: 12px 2px;
   border: none;
-  border-right: 1px solid var(--border);
+  border-left: var(--ai-panel-border-left, 0px) solid var(--border);
+  border-right: var(--ai-panel-border-right, 1px) solid var(--border);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
@@ -607,7 +791,8 @@ html.genoffice-popover-open .ribbon-tabs {
   overflow: hidden;
   /* the dock clips at its own width, so the divider must sit inside the 100% width */
   box-sizing: border-box;
-  border-right: 1px solid var(--color-border-strong);
+  border-left: var(--ai-panel-border-left, 0px) solid var(--color-border-strong);
+  border-right: var(--ai-panel-border-right, 1px) solid var(--color-border-strong);
   background: var(--color-bg-page);
   font-family: var(--gs-font-sans);
   color: var(--color-text-primary);
@@ -768,7 +953,7 @@ html.genoffice-popover-open .ribbon-tabs {
 .ai-msg {
   position: relative;
   margin: 0;
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -1702,7 +1887,7 @@ html.genoffice-popover-open .ribbon-tabs {
   background: none;
   border-radius: var(--radius-16) var(--radius-16) 0 0;
   padding: 12px 14px 4px;
-  font-size: 16px;
+  font-size: 14px;
   font-family: inherit;
   line-height: 24px;
   outline: none;
@@ -3002,7 +3187,10 @@ html.genoffice-popover-open .ribbon-tabs {
 
 /* ---- design canvas: floating toolbar + style panel over the preview ---- */
 
+/* the preview stays ltr under an RTL UI — the chrome mirrors, the content does not */
+
 .preview-stage {
+  direction: ltr;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -3279,6 +3467,26 @@ html.genoffice-popover-open .ribbon-tabs {
   min-width: 0;
 }
 
+.hx-panel-lock {
+  align-self: flex-end;
+  flex: 0 0 auto;
+  height: 28px;
+  width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.hx-panel-lock.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .hx-panel label {
   display: flex;
   flex-direction: column;
@@ -3361,7 +3569,8 @@ html.genoffice-popover-open .ribbon-tabs {
   anchor-name: --rb-menu-anchor;
   anchor-scope: --rb-menu-anchor;
 }
-.rb-menu {
+.rb-menu,
+.table-picker {
   position: fixed;
   position-anchor: --rb-menu-anchor;
   top: calc(anchor(bottom) + 4px);
@@ -3369,12 +3578,64 @@ html.genoffice-popover-open .ribbon-tabs {
   position-try-fallbacks: flip-inline;
   position-visibility: anchors-visible;
   z-index: 62;
-  min-width: 140px;
-  padding: 4px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow-menu);
+}
+.rb-menu {
+  min-width: 140px;
+  padding: 4px;
+}
+
+/* Insert: split button (main action + narrow caret), one pill on hover like the docs / slides ribbons */
+.rb-split .rb-split-main {
+  border-radius: 3px 0 0 3px;
+}
+.rb-split .rb-split-caret {
+  min-width: 16px;
+  width: 16px;
+  height: 30px;
+  padding: 0;
+  border-radius: 0 3px 3px 0;
+  color: var(--text-dim);
+}
+.rb-split:hover > .rb-btn:not(:disabled) {
+  background: var(--hover);
+}
+.rb-split > .rb-btn:hover:not(:disabled),
+.rb-split > .rb-split-caret.active {
+  background: var(--active-bg);
+}
+
+/* Insert: table size picker (hover grid) */
+.table-picker {
+  padding: 8px;
+}
+.table-picker-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  white-space: nowrap;
+}
+.table-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 18px);
+  gap: 3px;
+}
+.table-cell {
+  width: 18px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--surface);
+  cursor: pointer;
+}
+.table-cell.hot {
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 .rb-menu button {
   display: flex;
@@ -3394,6 +3655,35 @@ html.genoffice-popover-open .ribbon-tabs {
 }
 .rb-menu button:hover {
   background: var(--hover);
+}
+.rb-url-form {
+  display: flex;
+  gap: 6px;
+  min-width: 320px;
+  padding: 8px;
+}
+.rb-url-form input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.rb-menu .rb-url-submit {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  background: var(--accent);
+  color: var(--hx-on-accent);
+}
+.rb-menu .rb-url-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .rb-menu button svg {
   flex-shrink: 0;

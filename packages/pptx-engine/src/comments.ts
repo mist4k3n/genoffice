@@ -9,7 +9,7 @@
  */
 import type { OpenedPptx } from './index'
 import { resolveTarget, type PackageArchive } from './zip'
-import { escapeXmlAttr, escapeXmlText } from './xml-utils'
+import { escapeXmlAttr, escapeXmlText, hasContentTypeOverride } from './xml-utils'
 import { appendRelationship, unescapeXml } from './notes'
 import { removeRelationshipAndCollectOwnedTarget } from './resource-cleanup'
 
@@ -46,7 +46,7 @@ function addContentTypeOverride(
 ): void {
   const ctPath = '[Content_Types].xml'
   const ct = archive.readText(ctPath)
-  if (!ct || ct.includes(`PartName="/${partPath}"`)) return
+  if (!ct || hasContentTypeOverride(ct, partPath)) return
   setEntry(
     archive,
     ctPath,
@@ -140,8 +140,12 @@ function ensureAuthor(
     const nextIdx = lastIdx + 1
     const bumped = m[0].includes('lastIdx="')
       ? m[0].replace(/\blastIdx="\d+"/, `lastIdx="${nextIdx}"`)
-      : m[0].replace('/>', ` lastIdx="${nextIdx}"/>`)
-    setEntry(archive, AUTHORS_PATH, xml.replace(m[0], bumped))
+      : m[0].replace('/>', () => ` lastIdx="${nextIdx}"/>`)
+    setEntry(
+      archive,
+      AUTHORS_PATH,
+      xml.replace(m[0], () => bumped),
+    )
     return { authorId, nextIdx }
   }
   // New author
@@ -152,7 +156,11 @@ function ensureAuthor(
   const tag =
     `<p:cmAuthor id="${authorId}" name="${escapeXmlAttr(name)}"` +
     ` initials="${escapeXmlAttr(initials)}" lastIdx="1" clrIdx="${authorId}"/>`
-  setEntry(archive, AUTHORS_PATH, xml.replace('</p:cmAuthorLst>', `${tag}</p:cmAuthorLst>`))
+  setEntry(
+    archive,
+    AUTHORS_PATH,
+    xml.replace('</p:cmAuthorLst>', () => `${tag}</p:cmAuthorLst>`),
+  )
   return { authorId, nextIdx: 1 }
 }
 
@@ -198,7 +206,11 @@ export function addSlideComment(
     `<p:cm authorId="${authorId}" dt="${dt}" idx="${nextIdx}">` +
     `<p:pos x="${pos}" y="${pos}"/>` +
     `<p:text>${escapeXmlText(opts.text)}</p:text></p:cm>`
-  setEntry(archive, partPath, xml.replace('</p:cmLst>', `${cm}</p:cmLst>`))
+  setEntry(
+    archive,
+    partPath,
+    xml.replace('</p:cmLst>', () => `${cm}</p:cmLst>`),
+  )
 
   return { authorId, author: opts.author, initials, dt, idx: nextIdx, text: opts.text }
 }

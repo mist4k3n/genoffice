@@ -39,6 +39,32 @@ describe('inlineToRuns hard break after atomic runs', () => {
   })
 })
 
+describe('Zotero field conversion', () => {
+  it('preserves one field id and its cross-paragraph boundaries', () => {
+    const instruction = 'ADDIN ZOTERO_BIBL {} CSL_BIBLIOGRAPHY'
+    const parts = ['begin', 'inside', 'end'] as const
+    const inline = parts.map(
+      (part, index) =>
+        runsToInline([
+          {
+            text: `Reference ${index + 1}`,
+            instrField: instruction,
+            zoteroFieldId: 17,
+            zoteroFieldPart: part,
+          },
+        ])[0],
+    )
+
+    const marks = inline.map((node) => node.marks?.find((mark) => mark.type === 'instrField'))
+    expect(marks.map((mark) => mark?.attrs?.fieldId)).toEqual([17, 17, 17])
+    expect(marks.map((mark) => mark?.attrs?.fieldPart)).toEqual(parts)
+
+    const runs = inline.map((node) => inlineToRuns([node])[0])
+    expect(runs.map((run) => run.zoteroFieldId)).toEqual([17, 17, 17])
+    expect(runs.map((run) => run.zoteroFieldPart)).toEqual(parts)
+  })
+})
+
 describe('runsToInline image runs', () => {
   it('keeps sibling w:t text on a run that also carries a drawing', () => {
     const runs = [
@@ -54,6 +80,7 @@ describe('runsToInline image runs', () => {
       { type: 'text', text: 'caption', marks: [{ type: 'bold' }] },
       {
         type: 'docInlineImage',
+        marks: [{ type: 'bold' }],
         attrs: {
           dataUrl: 'data:image/png;base64,QUJD',
           widthPx: 96,
@@ -62,6 +89,8 @@ describe('runsToInline image runs', () => {
           wrap: null,
           offsetXEmu: null,
           offsetYEmu: null,
+          relV: null,
+          relH: null,
           wrapDistTopEmu: null,
           wrapDistBottomEmu: null,
           wrapDistLeftEmu: null,
@@ -107,6 +136,8 @@ describe('runsToInline image runs', () => {
           wrap: null,
           offsetXEmu: null,
           offsetYEmu: null,
+          relV: null,
+          relH: null,
           wrapDistTopEmu: null,
           wrapDistBottomEmu: null,
           wrapDistLeftEmu: null,
@@ -408,13 +439,14 @@ describe('paragraph border color/width round trip', () => {
     rawPPr:
       '<w:pPr><w:pBdr><w:bottom w:val="single" w:sz="18" w:space="1" w:color="4472C4"/></w:pBdr></w:pPr>',
     runs: [{ text: 'x' }],
-    format: { borders: 'b', borderLines: { b: { color: '4472C4', szPt: 2.25 } } },
+    // the parser keeps a declared positive w:space as spacePt (an omitted/0 one stays undeclared)
+    format: { borders: 'b', borderLines: { b: { color: '4472C4', szPt: 2.25, spacePt: 1 } } },
   }
 
   it('borderLines survive PM attrs and do not dirty the block', () => {
     const doc = blocksToPmDoc([block])
     expect(doc.content?.[0].attrs?.borderLines).toBe(
-      JSON.stringify({ b: { color: '4472C4', szPt: 2.25 } }),
+      JSON.stringify({ b: { color: '4472C4', szPt: 2.25, spacePt: 1 } }),
     )
     const plan = pmDocToSavePlan(doc, [block])
     expect(plan.changedCount).toBe(0)
@@ -430,7 +462,9 @@ describe('paragraph border color/width round trip', () => {
     const plan = pmDocToSavePlan(doc, [block])
     const saved = plan.saveBlocks[0]
     if (saved.kind !== 'generated') throw new Error(`expected generated, got ${saved.kind}`)
-    expect(saved.block.format?.borderLines).toEqual({ b: { color: '4472C4', szPt: 2.25 } })
+    expect(saved.block.format?.borderLines).toEqual({
+      b: { color: '4472C4', szPt: 2.25, spacePt: 1 },
+    })
     expect(saved.block.rawPPr).toContain(
       '<w:bottom w:val="single" w:sz="18" w:space="1" w:color="4472C4"/>',
     )
@@ -518,5 +552,82 @@ describe('paragraph direction inference (run w:rtl / RTL script, no w:bidi)', ()
     expect(plan.changedCount).toBe(0)
     expect(plan.saveBlocks[0]).toEqual({ kind: 'original', docxIndex: 0 })
     expect(pmNodeToGeneratedBlock(doc.content![0]).format?.bidi).toBeUndefined()
+  })
+})
+
+describe('protected block pageBreakBefore', () => {
+  it('carries the anchor paragraph flag onto the docProtected node', () => {
+    const block = {
+      id: 'b1',
+      docxIndex: 1,
+      type: 'image',
+      label: 'Image',
+      imageDataUrl: 'data:image/png;base64,AA==',
+      format: { pageBreakBefore: true },
+    } as unknown as Block
+    const doc = blocksToPmDoc([block])
+    expect(doc.content?.[0]?.type).toBe('docProtected')
+    expect(doc.content?.[0]?.attrs?.pageBreakBefore).toBe(true)
+  })
+})
+
+describe('centred floating table wider than the column (w:tblpXSpec="center")', () => {
+  const section: SectionInfo = {
+    settings: {
+      pageWidth: 12240,
+      pageHeight: 15840,
+      orientation: 'portrait',
+      marginTop: 1440,
+      marginRight: 1440,
+      marginBottom: 1440,
+      marginLeft: 1440,
+      pageBorder: false,
+      columns: 1,
+    },
+    startType: 'nextPage',
+    firstBlockIndex: 0,
+    lastBlockIndex: 0,
+    sectPrXml: '',
+    titlePg: false,
+    headerRefs: {},
+    footerRefs: {},
+  }
+  const block: Block = {
+    id: 'b0',
+    type: 'table',
+    docxIndex: 0,
+    originalXml: '<w:tbl/>',
+    table: {
+      rows: [
+        [{ paras: ['a'] }, { paras: ['b'] }],
+        [{ paras: ['c'] }, { paras: ['d'] }],
+      ],
+      colWidthsTwips: [4000, 6850],
+      floatSide: 'left',
+      floatPos: {
+        xTwips: 0,
+        yTwips: 635,
+        horzAnchor: 'margin',
+        vertAnchor: 'text',
+        xSpec: 'center',
+      },
+    },
+  }
+
+  it('keeps the declared width (Word centres it on the margin box, overhanging both sides)', () => {
+    const node = blocksToPmDoc([block], [section]).content![0]
+    expect(node.attrs!.widthPx).toBe(724)
+  })
+
+  it('a short table hung below its anchor stays a float so the anchor lines fill the band', () => {
+    const node = blocksToPmDoc([block], [section]).content![0]
+    expect(node.attrs!.tblFloat).toBe('left')
+    expect(node.attrs!.tblFloatSuppressed).toBe(false)
+    // without the offset the same over-wide text-anchored float still flows inline
+    const flush: Block = {
+      ...block,
+      table: { ...block.table!, floatPos: { ...block.table!.floatPos!, yTwips: 0 } },
+    }
+    expect(blocksToPmDoc([flush], [section]).content![0].attrs!.tblFloatSuppressed).toBe(true)
   })
 })

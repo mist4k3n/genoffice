@@ -109,6 +109,14 @@ describe('droppableFilePaths', () => {
     })
     expect(result).toEqual(['/tmp/good.docx'])
   })
+
+  it('caps resolved paths and skips overlong ones', () => {
+    const names = Array.from({ length: 150 }, (_, i) => `f${i}.docx`)
+    const result = droppableFilePaths(fileDrag(names) as never, () => '/tmp/x.docx')
+    expect(result).toHaveLength(100)
+    const overlong = droppableFilePaths(fileDrag(['a.docx']) as never, () => 'x'.repeat(5000))
+    expect(overlong).toEqual([])
+  })
 })
 
 describe('partitionDropPayload', () => {
@@ -127,6 +135,12 @@ describe('partitionDropPayload', () => {
   it('classifies openable extensions case-insensitively', () => {
     const result = partitionDropPayload(['REPORT.DOCX', 'data.CSV', 'notes.MarkDown'])
     expect(result.supported).toEqual(['REPORT.DOCX', 'data.CSV', 'notes.MarkDown'])
+  })
+
+  it('treats a dropped .tsv as openable, not as unsupported', () => {
+    const result = partitionDropPayload(['/data/variants.tsv', '/x/y.TSV'])
+    expect(result.supported).toEqual(['/data/variants.tsv', '/x/y.TSV'])
+    expect(result.unsupportedExts).toEqual([])
   })
 
   it('collects known-unsupported extensions uniquely, first-seen order', () => {

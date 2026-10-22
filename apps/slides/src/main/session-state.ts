@@ -63,8 +63,13 @@ export interface Session {
   aiSnapshots?: Map<number, HistorySnapshot>
   /** Edits that only touch archive entries (notes/comments; element-level dirty cannot detect them), reset after save */
   metaDirty?: boolean
+  /** Monotonic count of metaDirty transitions, so a save can tell a notes/comments
+      edit committed while its write was streaming from one the write carried. */
+  metaRev?: number
   /** Transform preview gesture in progress (the first preview already pushed an undo snapshot; later previews/final commit do not) */
   transformPreview?: boolean
+  /** Redo stack as it was before the preview gesture's pushHistory cleared it; a cancel puts it back */
+  previewRedo?: HistorySnapshot[]
   /** The part currently edited in master view (exception to the fidelity rule: only that part is written back) */
   masterEdit?: { partPath: string; slide: Slide } | null
   /** A history-state notification is already queued for this session (coalesces per task) */
@@ -77,6 +82,12 @@ export interface Session {
   opLog?: OpLogEntry[]
 }
 export const sessions = new Map<number, Session>()
+
+/** Flag an archive-only edit (notes/comments) and advance the save-snapshot counter. */
+export function markMetaDirty(session: Session): void {
+  session.metaDirty = true
+  session.metaRev = (session.metaRev ?? 0) + 1
+}
 
 // ── Op journal (collab groundwork) ──────────────────────────────────────
 // Every applied transaction appends its records here in order. Snapshot restores
@@ -123,6 +134,8 @@ export interface HistorySnapshot {
   slides: Slide[]
   entries: Map<string, Uint8Array>
   size: { cx: number; cy: number }
+  /** archive-only edits (notes, theme) flag the session, so undo must restore that too */
+  metaDirty: boolean
 }
 const MAX_HISTORY = 50
 
@@ -135,6 +148,7 @@ export function takeSnapshot(session: Session): HistorySnapshot {
     slides: structuredClone(session.opened.deck.slides),
     entries: new Map(session.opened.archive.entries),
     size: { ...session.opened.deck.size },
+    metaDirty: !!session.metaDirty,
   }
 }
 
@@ -144,6 +158,7 @@ function cloneSnapshot(snap: HistorySnapshot): HistorySnapshot {
     slides: structuredClone(snap.slides),
     entries: new Map(snap.entries),
     size: { ...snap.size },
+    metaDirty: snap.metaDirty,
   }
 }
 
@@ -295,6 +310,7 @@ export function restoreSnapshot(session: Session, snap: HistorySnapshot): void {
   const fresh = cloneSnapshot(snap)
   session.opened.deck.slides = fresh.slides
   session.opened.deck.size = fresh.size
+  session.metaDirty = fresh.metaDirty
   const entries = session.opened.archive.entries
   entries.clear()
   for (const [k, v] of fresh.entries) entries.set(k, v)
@@ -337,10 +353,29 @@ export function setSlidesShellWindow(win: BrowserWindow | null): void {
  *  windows have no tab strip and leave this null. */
 export const showChrome = {
   setBleed: null as ((wc: WebContents, on: boolean) => void) | null,
+  /** the window hosting a tab's WebContentsView when BrowserWindow.fromWebContents
+   *  cannot tell (a detached "Open in New Window" / torn-off editor) */
+  hostWindow: null as ((wc: WebContents) => BrowserWindow | undefined) | null,
 }
 
 export function setSlidesShowBleed(cb: (wc: WebContents, on: boolean) => void): void {
   showChrome.setBleed = cb
+}
+
+export function setSlidesHostWindowHook(
+  fn: ((wc: WebContents) => BrowserWindow | undefined) | null,
+): void {
+  showChrome.hostWindow = fn
+}
+
+/** the window a tab view lives in: its own BrowserWindow, the shell-registered
+ *  detached window, else the shell window */
+export function hostWindowFor(wc: WebContents): BrowserWindow | undefined {
+  const own = BrowserWindow.fromWebContents(wc) ?? showChrome.hostWindow?.(wc)
+  if (own && !own.isDestroyed()) return own
+  return windowRefs.shellWindow && !windowRefs.shellWindow.isDestroyed()
+    ? windowRefs.shellWindow
+    : undefined
 }
 
 export function setActiveSlidesWebContents(wc: WebContents | null): void {

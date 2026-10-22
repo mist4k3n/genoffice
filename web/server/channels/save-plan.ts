@@ -1,8 +1,8 @@
 import type { XlsxSidecarClient } from '../../../apps/sheets/src/main/xlsx-sidecar-client'
 import type { WorkbookSaveRequest } from '../../../apps/sheets/src/shared/desktop-api'
-import { saveWorkbookViaSidecar } from '../../../apps/sheets/src/gateway/xlsx-package-io'
-import type { CellEdit, SheetStructuralOps } from '../../../apps/sheets/src/gateway/xlsx-gateway'
-import type { SheetEditPlan } from '../../../apps/sheets/src/gateway/xlsx-sheets'
+import { saveWorkbookViaSidecar } from '@genoffice/xlsx-gateway/gateway/xlsx-package-io'
+import type { CellEdit, SheetStructuralOps } from '@genoffice/xlsx-gateway/gateway/xlsx-gateway'
+import type { SheetEditPlan } from '@genoffice/xlsx-gateway/gateway/xlsx-sheets'
 
 /**
  * VERBATIM MIRROR of `writeWorkbookTo` in
@@ -62,6 +62,7 @@ export async function writeWorkbookTo(
   const renames: { sheetName: string; newName: string }[] = []
   const removals: string[] = []
   const hiddenChanges: { sheetName: string; hidden: boolean }[] = []
+  const tabColorStates: { sheetName: string; color: string | null }[] = []
   let orderChanged = false
   for (const op of request.sheetOps) {
     if (op.kind === 'add-sheet') {
@@ -86,6 +87,8 @@ export async function writeWorkbookTo(
     if (op.kind === 'rename-sheet') renames.push({ sheetName, newName: op.newName })
     else if (op.kind === 'set-sheet-hidden') {
       hiddenChanges.push({ sheetName, hidden: op.hidden })
+    } else if (op.kind === 'set-sheet-tab-color') {
+      tabColorStates.push({ sheetName, color: op.color })
     } else removals.push(sheetName)
   }
   const renameByOriginal = new Map(renames.map((rename) => [rename.sheetName, rename.newName]))
@@ -95,7 +98,7 @@ export async function writeWorkbookTo(
     return sheetName
   }
   let sheetPlan: SheetEditPlan | undefined
-  if (request.sheetOps.length > 0) {
+  if (request.sheetOps.some((op) => op.kind !== 'set-sheet-tab-color')) {
     sheetPlan = {
       renames,
       additions: [...addedSheetNames].map(([sheetId, name]) => ({
@@ -144,6 +147,12 @@ export async function writeWorkbookTo(
         level: op.level,
         ...(op.collapsed === undefined ? {} : { collapsed: op.collapsed }),
       })
+    } else if ('summaryBelow' in op) {
+      sheetOps.push({
+        kind: op.kind,
+        summaryBelow: op.summaryBelow,
+        summaryRight: op.summaryRight,
+      })
     } else if ('hidden' in op) {
       sheetOps.push({ kind: op.kind, start: op.start, end: op.end, hidden: op.hidden })
     } else if ('style' in op) {
@@ -184,9 +193,9 @@ export async function writeWorkbookTo(
     sheetName: resolveSheetName(state.sheetId),
     rules: state.rules,
   }))
-  const sheetProtections = request.sheetProtections.map((state) => ({
-    sheetName: resolveSheetName(state.sheetId),
-    protected: state.protected,
+  const sheetProtections = request.sheetProtections.map(({ sheetId, ...state }) => ({
+    sheetName: resolveSheetName(sheetId),
+    ...state,
   }))
   const protectedRangeStates = request.protectedRangeStates.map((state) => ({
     sheetName: resolveSheetName(state.sheetId),
@@ -207,6 +216,10 @@ export async function writeWorkbookTo(
     shape: addition.shape,
     image: addition.image,
   }))
+  const cellImageAdditions = (request.cellImageAdditions ?? []).map(({ sheetId, ...addition }) => ({
+    sheetName: resolveSheetName(sheetId),
+    ...addition,
+  }))
   const tableAdditions = request.tableAdditions.map((table) => ({
     sheetName: resolveSheetName(table.sheetId),
     area: table.area,
@@ -214,6 +227,18 @@ export async function writeWorkbookTo(
     columnNames: table.columnNames,
     style: table.style,
     bandedRows: table.bandedRows,
+    options: {
+      headerRow: table.headerRow,
+      totalsRow: table.totalsRow,
+      firstColumn: table.firstColumn,
+      lastColumn: table.lastColumn,
+      bandedColumns: table.bandedColumns,
+      filterButton: table.filterButton,
+    },
+  }))
+  const tableEdits = (request.tableEdits ?? []).map(({ sheetId, ...edit }) => ({
+    ...edit,
+    sheetName: resolveSheetName(sheetId),
   }))
   const pivotAdditions = request.pivotAdditions.map((pivot) => ({
     sheetName: resolveSheetName(pivot.sheetId),
@@ -225,6 +250,8 @@ export async function writeWorkbookTo(
     rowFieldIndices: pivot.rowFieldIndices,
     columnFieldIndex: pivot.columnFieldIndex,
     pageFieldIndices: pivot.pageFieldIndices,
+    pageLevelItems: pivot.pageLevelItems,
+    pageItems: pivot.pageItems,
     rowItems: pivot.rowItems,
     rowLevelItems: pivot.rowLevelItems,
     rowLines: pivot.rowLines,
@@ -246,7 +273,7 @@ export async function writeWorkbookTo(
   // resolution the cell edits use.
   const formulaValuesBySheet = new Map<
     string,
-    { row: number; column: number; value: string | number | boolean | null }[]
+    { row: number; column: number; value: string | number | boolean | null | { error: string } }[]
   >()
   for (const cell of request.formulaValues) {
     const sheetName = resolveSheetName(cell.sheetId)
@@ -277,14 +304,17 @@ export async function writeWorkbookTo(
     cfStates,
     dvStates,
     sheetProtections,
+    tabColorStates,
     definedNamesState: request.definedNamesState,
     themeState: request.themeState,
     workbookProtectionState: request.workbookProtectionState,
     protectedRangeStates,
     visualAdditions,
+    cellImageAdditions,
     pageSetupStates,
     noteStates,
     tableAdditions,
+    tableEdits,
     pivotAdditions,
     sparklineAdditions,
     formulaValues,

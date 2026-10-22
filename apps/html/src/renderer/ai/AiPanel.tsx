@@ -1,22 +1,36 @@
+import {
+  aiPanelWidthAtPointer,
+  AiPanelSideButton,
+  AiModelPicker,
+  type AiModelPickerBridge,
+  AiSkillChips,
+  AiSkillsMenu,
+} from '@genoffice/ui'
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from 'react'
-import { AgentLoop, composeSkills } from '@genoffice/agent-core'
+import { AgentLoop, composeSkills, withAttachedSkills } from '@genoffice/agent-core'
 import type { AgentImage } from '@genoffice/agent-core'
 import type { AiSettings } from '@genoffice/ai-provider'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
 import type { AttachmentAddResult, AttachmentMeta } from '../../shared/ipc'
 import {
   AiComposer,
+  AiQueueStrip,
+  AI_QUEUE_LABELS,
   AiScopeQuote,
   AiTypingIndicator,
+  AiUsageChip,
+  addTokenUsage,
+  createFileNav,
   Markdown,
+  useChatRunQueue,
   type AiScopeQuoteData,
+  type AiTokenUsageView,
 } from '@genoffice/ui'
 import { aiLangDirective, t as tGlobal, useI18n } from '../i18n/locale'
 import sendEnterOn from '../assets/send-enter-on.png'
 import sendEnterOff from '../assets/send-enter-off.png'
 import sendStop from '../assets/send-stop.png'
-import attachIcon from '../assets/attach-icon.png'
 import fileDocumentIcon from '../assets/file-document.png'
 import fileExcelIcon from '../assets/file-excel.png'
 import fileGeneralIcon from '../assets/file-general.png'
@@ -33,12 +47,19 @@ import {
   type PageWriteResult,
   type PageWriteSpec,
 } from './page-writer'
+import {
+  buildBriefWriterRequest,
+  streamBrief,
+  type BriefPlanSpec,
+  type BriefPlanResult,
+} from './brief-writer'
 import type { BriefDecision, ClarifyQuestion, HtmlDocAccess } from './tools'
 import type { Brief } from '../document/brief'
 import { isDocEmpty } from '../document/blank'
 import { ClarifyCard } from '../components/ClarifyCard'
 import { BriefCard } from '../components/BriefCard'
 import { createSearchSkill } from './search-skill'
+import { pastedBase64Image } from './base64-paste'
 import { createElectronTransport } from './transport'
 import { DOC_NAV_SCHEME, parseDocNavHref } from './doc-nav'
 import { EditQueueCard } from './EditQueueCard'
@@ -49,6 +70,7 @@ import {
   resolveQueue,
   type EditQueueItem,
 } from './edit-queue'
+import { buildProjection } from './redact'
 
 /** [chip label, composer prefill]: blank page → design something new; page with content → rework it */
 const GENERATE_STARTERS = [
@@ -202,9 +224,13 @@ interface ChatEntry {
   queueRun?: boolean
   /** attachments consumed from the composer by this message (echoed read-only; retries resend them) */
   attachments?: AttachmentMeta[]
+  /** skills the user attached to this message from the composer menu */
+  skills?: string[]
   tools?: ToolActivity[]
   /** the element this user message targeted, frozen at send */
   scope?: AiScopeQuoteData
+  /** tokens the provider billed for this reply, summed across its turns (absent when unreported) */
+  usage?: AiTokenUsageView
 }
 
 /** the whole source text: one string is the exact rollback unit */
@@ -254,6 +280,14 @@ export interface HtmlAiDeps {
 /** how often the streaming draft is pushed into the preview mirror */
 const DRAFT_PREVIEW_MS = 400
 
+const MODEL_BRIDGE: AiModelPickerBridge = {
+  getSettings: () => window.htmlApi.getAiSettings(),
+  setSettings: (settings) => window.htmlApi.setAiSettings(settings),
+  onSettingsChanged: (handler) => window.htmlApi.onAiSettingsChanged(handler),
+  gskLoggedIn: () => window.htmlApi.aiGskStatus().then((s) => !!s?.loggedIn),
+  openModelSettings: () => window.htmlApi.openAiModelSettings().catch(() => {}),
+}
+
 export function AiPanel({
   deps,
   filePath,
@@ -283,6 +317,16 @@ export function AiPanel({
   const [chat, setChat] = useState<ChatEntry[]>([])
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
+  /** messages queued while a reply runs; the pump re-runs them through send on settle */
+  const msgQueue = useChatRunQueue<AttachmentMeta[]>({
+    busy,
+    submit: (text, atts) => {
+      const loop = loopRef.current
+      if (!loop || loop.busy) return false
+      send(text, text, false, atts, undefined)
+      return true
+    },
+  })
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   /** questionnaire / brief cards docked in the composer slot while a tool waits for the user */
@@ -308,6 +352,9 @@ export function AiPanel({
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([])
   const attachmentsRef = useRef(attachments)
   attachmentsRef.current = attachments
+  const [attachedSkills, setAttachedSkills] = useState<string[]>([])
+  const attachedSkillsRef = useRef(attachedSkills)
+  attachedSkillsRef.current = attachedSkills
   const sendSeqRef = useRef(0)
   const [attachNotice, setAttachNotice] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -370,6 +417,31 @@ export function AiPanel({
     showAttachNotice(result.rejected)
   }
   const pickAttachments = async () => mergeAttachments(await window.htmlApi.pickAttachments())
+
+  /** the attached skills' full text in front of the request; a skill that vanished is skipped */
+  const withSkillBodies = async (instruction: string, names: readonly string[]) => {
+    if (names.length === 0) return instruction
+    const bodies = await Promise.all(
+      names.map(async (name) => {
+        try {
+          return { name, body: await window.htmlApi.skillText(name) }
+        } catch {
+          return null
+        }
+      }),
+    )
+    return withAttachedSkills(
+      instruction,
+      bodies.filter((b): b is { name: string; body: string } => b !== null),
+    )
+  }
+
+  const listSkillsForMenu = async () =>
+    (await window.htmlApi.skillsList()).map(({ name, description }) => ({ name, description }))
+  const toggleSkill = (name: string) =>
+    setAttachedSkills((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    )
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
@@ -393,6 +465,15 @@ export function AiPanel({
     }
     if (paths.length > 0) mergeAttachments(await window.htmlApi.addAttachmentPaths(paths))
   }
+  /** a pasted base64 image (data: URL or a bare base64 dump) becomes a real attachment, not chat text */
+  const onPasteText = (text: string): boolean => {
+    const img = pastedBase64Image(text)
+    if (!img) return false
+    void window.htmlApi
+      .addPastedImage(img.bytes.buffer as ArrayBuffer, img.ext)
+      .then(mergeAttachments)
+    return true
+  }
   const removeAttachment = (path: string) =>
     setAttachments((prev) => prev.filter((a) => a.path !== path))
   /** image attachments ride along as multimodal input (≤5MB each, capped per message) */
@@ -413,6 +494,34 @@ export function AiPanel({
     }
     showAttachNotice(failures)
     return images
+  }
+  /** apply_ops `attachment://` references: land in the document's assets/ like a manually placed picture, or inline when that is not possible */
+  const resolveAttachmentSrc = async (
+    ref: string,
+  ): Promise<{ ok: true; src: string } | { ok: false; error: string }> => {
+    const name = ref.trim()
+    const atts = availableAttachments()
+    const att =
+      atts.find((a) => a.name === name) ??
+      atts.find((a) => a.name.toLowerCase() === name.toLowerCase())
+    if (!att) {
+      const names = atts.map((a) => a.name).join(', ') || '(none)'
+      return { ok: false, error: `no attachment named "${name}"; attached files: ${names}` }
+    }
+    if (!ATTACHMENT_IMAGE_EXTS.has(att.ext)) {
+      return {
+        ok: false,
+        error: `${att.name} is not an image attachment (png/jpg/gif/webp); ask the user to attach the image file itself`,
+      }
+    }
+    const img = await window.htmlApi.readAttachmentImage(att.path)
+    if (!img.ok || !img.base64 || !img.mime) {
+      return { ok: false, error: img.error ?? `could not read ${att.name}` }
+    }
+    // saveImage keeps webp out (assets must stay DOCX-exportable) and returns null for an unsaved document
+    const ext = att.ext === 'jpeg' ? 'jpg' : att.ext
+    const rel = ext === 'webp' ? null : await window.htmlApi.saveImage({ base64: img.base64, ext })
+    return { ok: true, src: rel ?? `data:${img.mime};base64,${img.base64}` }
   }
   // preferred = the user's chosen width (the only value persisted); panelWidth =
   // what fits the current window. Deriving the display width from the preference
@@ -447,6 +556,10 @@ export function AiPanel({
   const runMutatedRef = useRef(false)
   /** tool activity of the whole run, for transcript persistence */
   const runToolsRef = useRef<ToolActivity[]>([])
+  /** tokens billed so far in the in-flight run (summed across turns) */
+  const runUsageRef = useRef<AiTokenUsageView | undefined>(undefined)
+  /** tokens billed across the panel's session (the composer chip) */
+  const [sessionUsage, setSessionUsage] = useState<AiTokenUsageView | undefined>(undefined)
   const chatIdsRef = useRef<{ projectId: string; chatId: string } | null>(null)
   /** messages sent before resolveChat returned, flushed once the chat id is known */
   const pendingPersistRef = useRef<
@@ -571,6 +684,29 @@ export function AiPanel({
   const runPageWriterRef = useRef(runPageWriter)
   runPageWriterRef.current = runPageWriter
 
+  /** Brief drafting: one tool-less request over the conversation transcript; an empty reply is retried once. */
+  const runBriefWriter = async (
+    spec: BriefPlanSpec,
+    signal?: AbortSignal,
+  ): Promise<BriefPlanResult> => {
+    const { system, user } = buildBriefWriterRequest(
+      spec,
+      loopRef.current?.messages ?? [],
+      aiLangDirective(langRef.current),
+    )
+    patchLast((last) => ({
+      tools: last.tools?.map((tl) =>
+        tl.running ? { ...tl, summary: tGlobal('aiDraftingBrief') } : tl,
+      ),
+    }))
+    const attempt = () => streamBrief({ transport: transportRef.current!, system, user, signal })
+    let result = await attempt()
+    if (!result.ok && !signal?.aborted) result = await attempt()
+    return result
+  }
+  const runBriefWriterRef = useRef(runBriefWriter)
+  runBriefWriterRef.current = runBriefWriter
+
   const loopRef = useRef<AgentLoop<DocSnapshot> | null>(null)
   if (!loopRef.current) {
     loopRef.current = new AgentLoop<DocSnapshot>({
@@ -597,7 +733,10 @@ export function AiPanel({
               setActiveBrief(brief)
             }),
           writePage: (spec, signal) => runPageWriterRef.current(spec, signal),
+          planBrief: (spec, signal) => runBriefWriterRef.current(spec, signal),
           getInstruction: () => runInstructionRef.current,
+          resolveAttachmentSrc: (ref) => resolveAttachmentSrc(ref),
+          listAttachmentNames: () => availableAttachments().map((a) => a.name),
         }),
         createSearchSkill(),
         createFilesSkill(availableAttachments),
@@ -648,6 +787,11 @@ export function AiPanel({
         onTurnEnd: () => {
           patchLast({ streaming: false })
           setChat((prev) => [...prev, { role: 'assistant', text: '', streaming: true }])
+        },
+        onUsage: (usage) => {
+          runUsageRef.current = addTokenUsage(runUsageRef.current, usage)
+          setSessionUsage((prev) => addTokenUsage(prev, usage))
+          patchLast({ usage: runUsageRef.current })
         },
         onDone: ({ text, cancelled, turnLimit, truncated }) => {
           const base = turnLimit
@@ -809,6 +953,8 @@ export function AiPanel({
     queueRun = false,
     attachmentsOverride?: AttachmentMeta[],
     scope?: AiScopeQuoteData,
+    /** only the composer's own send takes the attached skills along */
+    attachSkills = false,
   ): boolean => {
     const instruction = text.trim()
     const loop = loopRef.current
@@ -823,6 +969,9 @@ export function AiPanel({
       ]
       if (!attachmentsOverride) setAttachments([])
     }
+    // skills ride with this one message only: the chips clear like attachments do
+    const sentSkills = attachSkills ? attachedSkillsRef.current : []
+    if (sentSkills.length > 0) setAttachedSkills([])
     stickToBottomRef.current = true
     queueRunRef.current = queueRun
     lastQueueRunRef.current = queueRun
@@ -832,6 +981,7 @@ export function AiPanel({
     runMutatedRef.current = false
     depsRef.current.onPrompt(displayText ?? instruction)
     runToolsRef.current = []
+    runUsageRef.current = undefined
     setChat((prev) => [
       ...prev,
       {
@@ -840,6 +990,7 @@ export function AiPanel({
         instruction: displayText ? instruction : undefined,
         queueRun: queueRun || undefined,
         attachments: sentAtts.length > 0 ? sentAtts : undefined,
+        skills: sentSkills.length > 0 ? sentSkills : undefined,
         scope,
       },
       { role: 'assistant', text: '', streaming: true },
@@ -856,7 +1007,9 @@ export function AiPanel({
         settingsRef.current = await window.htmlApi.getAiSettings()
         const images = sentAtts.length > 0 ? await collectImages(sentAtts) : []
         if (!mountedRef.current || seq !== sendSeqRef.current) return
-        await loop.run(instruction, images.length > 0 ? images : undefined)
+        const withSkills = await withSkillBodies(instruction, sentSkills)
+        if (!mountedRef.current || seq !== sendSeqRef.current) return
+        await loop.run(withSkills, images.length > 0 ? images : undefined)
       } catch (err) {
         // a send cancelled during its pre-run reads must not paint its error onto a later turn's bubble
         if (!mountedRef.current || seq !== sendSeqRef.current) return
@@ -875,7 +1028,9 @@ export function AiPanel({
   /** one run for the whole queue; every item is consumed up front, failures go through retry */
   const sendQueue = (): void => {
     const access = depsRef.current.access
-    const entries = liveItems(resolveQueue(access.getText(), access.getMap(), editQueue))
+    const entries = liveItems(
+      resolveQueue(buildProjection(access.getText(), access.getMap()), access.getMap(), editQueue),
+    )
     if (entries.length === 0) {
       onQueueClear()
       return
@@ -921,7 +1076,19 @@ export function AiPanel({
     setBusy(false)
   }
 
+  /** Enter while a reply runs: the draft joins the queue above the composer */
+  const enqueueDraft = () => {
+    const text = prompt.trim()
+    if (!text) return
+    // the queued message owns the composer attachments; pump time passes them as an override
+    const atts = attachmentsRef.current
+    if (atts.length > 0) setAttachments([])
+    msgQueue.enqueue(text, atts)
+    setPrompt('')
+  }
+
   const stop = (): void => {
+    msgQueue.hold()
     dismissCards()
     const loop = loopRef.current
     if (loop?.busy) loop.cancel()
@@ -946,6 +1113,10 @@ export function AiPanel({
       if (sid !== null) depsRef.current.navigateTo(sid)
     },
   }
+  // [name](filenav:///abs/path) citations open the cited file in its own app
+  const fileNav = createFileNav((path) => {
+    void window.htmlApi.openSourcePath(path)
+  })
 
   const draftNonceRef = useRef(0)
   useEffect(() => {
@@ -989,7 +1160,7 @@ export function AiPanel({
   const resizeCleanupRef = useRef<(() => void) | null>(null)
   useEffect(() => () => resizeCleanupRef.current?.(), [])
 
-  /** Drag the right edge to resize: the panel is flush with the window's left edge, so width = clientX */
+  /** Drag the inner panel edge to resize from the selected window side. */
   const startResize = (e: ReactPointerEvent<HTMLDivElement>): void => {
     e.preventDefault()
     const resizer = e.currentTarget
@@ -997,7 +1168,7 @@ export function AiPanel({
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
     const onMove = (ev: PointerEvent): void => {
-      const w = clampPanelWidth(ev.clientX)
+      const w = clampPanelWidth(aiPanelWidthAtPointer(ev.clientX))
       preferredWidthRef.current = w
       setPanelWidth(w)
     }
@@ -1048,7 +1219,7 @@ export function AiPanel({
         onPointerDown={startResize}
         role="separator"
         aria-orientation="vertical"
-        aria-label="Genspark"
+        aria-label={t('aiOpenAssistant')}
       />
       <header className="ai-panel-header">
         <span className="ai-panel-title">
@@ -1056,16 +1227,22 @@ export function AiPanel({
           Genspark
         </span>
         <div className="ai-panel-header-actions">
+          <AiPanelSideButton
+            lang={lang}
+            onMove={(side) => window.htmlApi.setAiPanelPrefs({ side })}
+          />
           {chat.length > 0 && (
             <button
               className="ai-header-btn"
               onClick={() => {
+                msgQueue.clear()
                 stop()
                 loopRef.current?.reset()
                 setBusy(false)
                 setChat([])
                 setReceipts([])
                 setAttachments([])
+                setAttachedSkills([])
                 setAttachNotice(null)
                 sentAttachmentsRef.current = []
               }}
@@ -1076,7 +1253,7 @@ export function AiPanel({
             </button>
           )}
           <button
-            className="ai-header-btn"
+            className="ai-header-btn ai-panel-collapse"
             onClick={onCollapse}
             data-tip={t('aiCollapsePanel')}
             aria-label={t('aiCollapsePanel')}
@@ -1139,6 +1316,7 @@ export function AiPanel({
                     <AttachmentList atts={entry.attachments} previews={attachmentPreviews} />
                   </div>
                 )}
+                {entry.skills && <AiSkillChips lang={lang} names={entry.skills} />}
                 <span dir="auto">{entry.text}</span>
                 {own.map((r, k) =>
                   r.qa ? (
@@ -1201,11 +1379,16 @@ export function AiPanel({
               ) : (
                 entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={docNav} />
+                    <Markdown text={entry.text} navs={[docNav, fileNav]} />
                   </div>
                 )
               )}
               {hasTools && <ToolChipList tools={entry.tools!} />}
+              {entry.usage && (
+                <div className="ai-message-usage">
+                  <AiUsageChip usage={entry.usage} lang={lang} />
+                </div>
+              )}
               {showToolbar && (
                 <div className="ai-msg-toolbar">
                   <button
@@ -1409,6 +1592,7 @@ export function AiPanel({
             onSend={sendQueue}
           />
         )}
+        <AiSkillChips lang={lang} names={attachedSkills} onRemove={toggleSkill} />
         {attachments.length > 0 && (
           <div className="ai-attachments">
             <AttachmentList
@@ -1421,6 +1605,20 @@ export function AiPanel({
         )}
         {attachNotice && <div className="ai-attach-notice">{attachNotice}</div>}
         <AiComposer
+          queueStrip={
+            <AiQueueStrip
+              items={msgQueue.queued}
+              labels={AI_QUEUE_LABELS[lang]}
+              onUpdate={msgQueue.update}
+              onRemove={msgQueue.remove}
+              onClear={msgQueue.clear}
+              paused={msgQueue.paused}
+              onTogglePause={msgQueue.togglePaused}
+              onMove={msgQueue.move}
+            />
+          }
+          onQueue={enqueueDraft}
+          queuePlaceholder={AI_QUEUE_LABELS[lang].queuePlaceholder}
           value={prompt}
           busy={busy}
           placeholder={t('aiComposerPlaceholder')}
@@ -1434,19 +1632,23 @@ export function AiPanel({
           stopIcon={<img src={sendStop} alt="" aria-hidden />}
           textareaRef={inputRef}
           onChange={setPrompt}
-          onSend={() => send(prompt)}
+          onSend={() => send(prompt, undefined, false, undefined, undefined, true)}
           onStop={stop}
           onPasteFiles={(files) => void onPasteFiles(files)}
+          onPasteText={onPasteText}
           footerStart={
-            <button
-              type="button"
-              className="ai-attach-btn"
-              onClick={() => void pickAttachments()}
-              data-tip={t('aiAttachTitle')}
-              aria-label={t('aiAttachTitle')}
-            >
-              <img src={attachIcon} alt="" aria-hidden />
-            </button>
+            <>
+              <AiModelPicker bridge={MODEL_BRIDGE} lang={lang} />
+              {sessionUsage && <AiUsageChip usage={sessionUsage} session lang={lang} />}
+              <AiSkillsMenu
+                lang={lang}
+                listSkills={listSkillsForMenu}
+                selected={attachedSkills}
+                onToggle={toggleSkill}
+                onAddFile={() => void pickAttachments()}
+                onManage={() => void window.htmlApi.openSkillsSettings?.()}
+              />
+            </>
           }
         />
       </div>

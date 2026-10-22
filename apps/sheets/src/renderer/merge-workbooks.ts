@@ -1,6 +1,6 @@
 /**
  * Merge workbooks: pick one or more spreadsheet files and append every sheet
- * to the current workbook (alpha: Olivia, #genoffice-7).
+ * to the current workbook.
  *
  * Each source opens as a secondary sidecar session (the tab's own session
  * stays untouched); cells arrive through the same readWorkbookRange pipeline
@@ -14,8 +14,7 @@
 import { CellValueType, ICommandService } from '@univerjs/core'
 import type { ICellData, IRange, Nullable } from '@univerjs/core'
 import { AddWorksheetMergeCommand, InsertSheetCommand } from '@univerjs/sheets'
-import type {
-  DesktopApi, WorkbookFile } from '../shared/desktop-api'
+import type { DesktopApi, WorkbookFile } from '../shared/desktop-api'
 import { t } from './i18n/locale'
 import type { LazyWorkbookState, UniverRuntime } from './univer-state'
 import { characterWidthToPixels, toUniverStyle, workbookStructureLocked } from './univer-sync'

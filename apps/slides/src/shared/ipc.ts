@@ -9,13 +9,38 @@ import type { AiPanelPrefs } from '@genoffice/ui'
  * them to the model and rebuilds the RenderSlide.
  */
 import type { RenderSlide } from '@genoffice/pptx-render'
-import type { SlideComment, SectionInfo } from '@genoffice/pptx-engine'
+import type { CustGeomPathCmd, SlideComment, SectionInfo } from '@genoffice/pptx-engine'
+import type { FontSizeStep } from '@genoffice/pptx-ops/font-size'
+// the font catalog's shape is the store's to declare, not a copy kept in step by hand
+import type { CatalogEntry as FontCatalogEntry } from '@genoffice/electron-utils/font-store'
+import type { LayoutSkeleton } from '../renderer/ai/layout-skeleton'
 import type {
   AiSettings,
   AiStreamChunk,
   AiStreamRequest,
   GenSparkAccountStatus,
 } from '@genoffice/ai-provider'
+
+import type {
+  EditRun,
+  EditParagraph,
+  ScriptBoxOp,
+  ScriptStylePatch,
+  ScriptEditOp,
+  ApplyEditScriptOp,
+  LinkTargetOp,
+} from '@genoffice/pptx-ops'
+
+// edit payload types moved to the op package; re-exported so IPC consumers keep one import site
+export type {
+  EditRun,
+  EditParagraph,
+  ScriptBoxOp,
+  ScriptStylePatch,
+  ScriptEditOp,
+  ApplyEditScriptOp,
+  LinkTargetOp,
+}
 
 export type { SlideComment, SectionInfo } from '@genoffice/pptx-engine'
 
@@ -128,79 +153,6 @@ export interface DesktopFilesApi {
   getPathForFile(file: File): string
 }
 
-/** One rich-text run (sent by the editor, with independent formatting). */
-export interface EditRun {
-  text: string
-  bold?: boolean
-  italic?: boolean
-  underline?: boolean
-  fontSize?: number
-  fontFamily?: string
-  color?: string
-  /** Strikethrough (DOM-authoritative boolean, like bold/italic/underline) */
-  strike?: boolean
-  /** Super/subscript baseline % (positive = superscript; 0 = none, used to disable explicitly) */
-  baseline?: number
-  /** Text outline (for WordArt), width in EMU */
-  outline?: { color: string; widthEmu: number }
-  /** Dynamic field (slidenum / datetime1…); text is the cached value */
-  field?: string
-  /** Source model run index (index into the original paragraph's runs); the main process uses it to backtrack unedited format fields */
-  srcRun?: number
-  /** Run hyperlink. undefined = keep the original run's link (programmatic paths that can't
-   * express links); null = explicitly none (the editor DOM is authoritative, link removed) */
-  link?: LinkTargetOp | null
-}
-
-/** One paragraph (with alignment). */
-export interface EditParagraph {
-  runs: EditRun[]
-  align?: 'left' | 'center' | 'right' | 'justify'
-  /** Indent level 0..8 (returned after editor Tab/⇧Tab adjustment; defaults to the original paragraph's) */
-  level?: number
-  /** Source model paragraph index; the main process uses it to inherit bullet/line spacing etc. (both halves of a split share a source) */
-  srcPara?: number
-  /** Per-paragraph format explicitly changed during this edit session (absent = keep the original) */
-  bullet?: 'char' | 'number' | 'none'
-  bulletChar?: string
-  lineSpacingPct?: number
-  spaceBeforePt?: number
-  spaceAfterPt?: number
-  /** Paragraph base direction toggled during this edit session (false = explicit LTR) */
-  rtl?: boolean
-}
-
-/** One geometry primitive collected by the edit-script sandbox (px, viewport space). */
-export interface ScriptBoxOp {
-  id: string
-  x: number
-  y: number
-  w: number
-  h: number
-  rotation: number
-  /** Group child: converted to child-space EMU by the main-process shim */
-  groupId?: string
-}
-
-/** setStyle's style-override fields (pass only what changes; align is paragraph-level, the rest override per run). */
-export interface ScriptStylePatch {
-  fontSize?: number
-  color?: string
-  bold?: boolean
-  italic?: boolean
-  underline?: boolean
-  fontFamily?: string
-  align?: 'left' | 'center' | 'right'
-}
-
-/** One non-geometry primitive collected by the edit-script sandbox, in script call order. */
-export type ScriptEditOp = (
-  | { kind: 'text'; paragraphs: EditParagraph[] }
-  | { kind: 'style'; style: ScriptStylePatch }
-  | { kind: 'fill'; fill: string }
-  | { kind: 'stroke'; stroke: { color: string; widthPt: number } | null }
-) & { id: string; groupId?: string }
-
 /** A raw op transaction from the AI batch surface (ops are validated by the registry; coordinates are document-space EMU). */
 export interface ApplyTxnOp {
   ops: unknown[]
@@ -217,7 +169,7 @@ export interface ApplyTxnResult {
   plan?: string[]
   failures?: Array<{ index: number; error: string }>
   /** compact journal echo: op name, target, ids minted by additive ops */
-  records?: Array<{ op: string; target?: string; created?: string[] }>
+  records?: Array<{ op: string; target?: string; created?: string[]; note?: string }>
   /** full deck after a mutation (a transaction may touch any slide) */
   slides?: RenderSlide[]
 }
@@ -238,13 +190,6 @@ export interface AiRunFailure {
   error?: string
   tools?: string[]
   durationMs?: number
-}
-
-export interface ApplyEditScriptOp {
-  slideIndex: number
-  fitWidthPx: number
-  boxes: ScriptBoxOp[]
-  edits: ScriptEditOp[]
 }
 
 /**
@@ -268,6 +213,8 @@ export interface SetElementFontOp {
   sourceIds: string[]
   fontFamily?: string
   fontSizePt?: number
+  /** Grow/shrink every run relative to its own size (keyboard ⇧⌘>/⇧⌘< and ⌘]/⌘[); exclusive with fontSizePt */
+  fontSizeStep?: FontSizeStep
   /** Bold/italic/underline/strike toggles (apply to all runs; selected shapes change directly without entering edit mode) */
   bold?: boolean
   italic?: boolean
@@ -287,10 +234,18 @@ export interface SetElementFontOp {
 export interface SetElementParagraphFormatOp {
   slideIndex: number
   sourceIds: string[]
-  /** 'char' bullet dot / 'number' numbered / 'none' explicitly none */
-  bullet?: 'char' | 'number' | 'none'
+  /** 'char' bullet dot / 'number' numbered / 'blip' picture / 'none' explicitly none */
+  bullet?: 'char' | 'number' | 'blip' | 'none'
   /** Custom bullet character (with bullet: 'char'; defaults to '•') */
   bulletChar?: string
+  /** <a:buFont> paired with the character (gallery presets carry Wingdings/Courier codes) */
+  bulletFont?: string
+  /** buAutoNum scheme (ST_TextAutonumberScheme) with bullet: 'number'; alone it re-schemes numbered paragraphs */
+  numType?: string
+  /** First number of the sequence; alone it only touches numbered paragraphs */
+  startAt?: number
+  /** Picture bullet source (with bullet: 'blip'); landed as a media part + slide rel */
+  bulletImage?: { base64: string; ext: string }
   /** Bullet hanging indent (EMU); alone it adjusts existing bullets' indent */
   bulletHangEmu?: number
   /** Bullet size (% of text size, 100 = same); alone it only touches bulleted paragraphs */
@@ -409,11 +364,19 @@ export interface AddElementOp {
   fillColor?: string
   /** Shape stroke (solid color + point width) */
   stroke?: { color: string; widthPt: number }
+  /** Text body wrap / autofit (click-to-type text boxes); absent = wrap="square", no autofit */
+  bodyPr?: { wrap?: 'square' | 'none'; autoFit?: 'shrink' | 'resize' }
 }
 
 export interface DeleteElementOp {
   slideIndex: number
   sourceId: string
+}
+
+/** Delete a whole selection as one undo step; ids missing from the slide are skipped. */
+export interface DeleteElementsOp {
+  slideIndex: number
+  sourceIds: string[]
 }
 
 /** Mirror an element across its own axis (a:xfrm flipH/flipV); toggles the current value. */
@@ -508,9 +471,13 @@ export type EditBackgroundOp = {
 export interface CopyElementsOp {
   slideIndex: number
   sourceIds: string[]
+  /** Renderer-generated token tying a delayed PNG export to this copy. */
+  clipboardToken?: string
+  /** The copy backs a cut: the originals are being removed, so pasting back onto the source page lands in place. */
+  cut?: boolean
 }
 
-/** Paste clipboard elements onto the given page (repeated pastes auto-cascade the offset). */
+/** Paste clipboard elements onto the given page (pastes land at the source position; occupied spots cascade the offset). */
 export interface PasteElementsOp {
   slideIndex: number
   fitWidthPx: number
@@ -551,6 +518,8 @@ export interface AddTableOp {
   yPx: number
   wPx: number
   hPx: number
+  /** Fixed per-row height (EMU); when set the frame is rows x this tall and hPx is ignored */
+  rowHeightEmu?: number
   fitWidthPx: number
 }
 
@@ -585,11 +554,15 @@ export type TransitionKind =
 
 // ── Shape animations (the "Animations" tab) ──────────────────────────
 
+/** Reveal direction for the directional effects. 'bottom' reveals upward (default). */
+export type AnimDirection = 'top' | 'bottom' | 'left' | 'right'
+
 export type AnimEffectKind =
   | 'appear'
   | 'fade'
   | 'flyIn'
   | 'wipe'
+  /** Write-compatible alias for wipe with direction 'top' (the same preset subtype). */
   | 'wipeDown'
   | 'splitIn'
   | 'bounce'
@@ -606,6 +579,9 @@ export type AnimEffectKind =
   | 'shrink'
   | 'zoomOut' // exit
   | 'motionPath' // motion path (move along a path)
+  | 'mediaPlay'
+  | 'mediaPause'
+  | 'mediaStop' // media commands on a video/audio shape
 
 export type AnimTrigger = 'onClick' | 'withPrev' | 'afterPrev'
 
@@ -620,6 +596,9 @@ export interface AnimationItem {
   delayMs: number
   /** Path when effect='motionPath' (SVG subset M/L/C/Z, coordinates 0..1 relative to slide width/height) */
   motionPath?: string
+  /** Wipe/fly direction (enters only when the engine models one); the player reads it
+   *  so a top wipe does not play bottom-up. Defaults per effect when absent. */
+  direction?: AnimDirection
   /** Per-paragraph animation: 0-based paragraph number; default = the whole shape */
   paragraph?: number
 }
@@ -648,6 +627,18 @@ export interface SetAdvanceTimesOp {
   times: Array<{ slideIndex: number; ms: number | null }>
 }
 
+/** What the show needs to play a slide by itself: its saved advance time and its narration. */
+export interface ShowTiming {
+  advanceMs: number | null
+  /** Element ids of the slide's recorded narration pictures, hidden during the show */
+  narrationIds: string[]
+}
+
+/** Slide Show > Record: each recorded slide's narration (16-bit WAV) and time on screen. */
+export interface SaveRecordingOp {
+  slides: Array<{ slideIndex: number; wavBase64: string; durationMs: number; advanceMs: number }>
+}
+
 // ── Section management ────────────────────────────────────────────────
 
 /** Add a section before slide atSlideIndex (the section covers this page to the end of its containing section). */
@@ -666,6 +657,11 @@ export interface RemoveSectionOp {
   id: string
 }
 
+/** Remove a section together with its slides; id null = the unsectioned lead group. */
+export interface RemoveSectionSlidesOp {
+  id: string | null
+}
+
 /** Move a whole section up/down (swapping together with its slides). */
 export interface MoveSectionOp {
   id: string
@@ -682,6 +678,35 @@ export interface MoveSlideOp {
 export interface SetSlideHiddenOp {
   slideIndex: number
   hidden: boolean
+}
+
+/** Hide/unhide a whole thumbnail selection as one undo step. */
+export interface SetSlidesHiddenOp {
+  slideIndexes: number[]
+  hidden: boolean
+}
+
+/** Delete a thumbnail selection as one undo step (refused when nothing would remain). */
+export interface DeleteSlidesOp {
+  slideIndexes: number[]
+}
+
+/** Duplicate a thumbnail selection; the copies land in order after the last selected slide (PowerPoint). */
+export interface DuplicateSlidesOp {
+  slideIndexes: number[]
+  fitWidthPx: number
+}
+
+/** Drag-reorder a thumbnail selection: the slides land as a block at gap insertAt (0..slides.length in the pre-move order). */
+export interface MoveSlidesOp {
+  slideIndexes: number[]
+  insertAt: number
+}
+
+/** Copy slides onto the app-wide slide clipboard; pngs (one per slide) feed 'picture'-mode pastes. */
+export interface CopySlidesOp {
+  slideIndexes: number[]
+  pngs?: string[]
 }
 
 /** Duplicate a page: copy slide sourceIndex and insert after it; clearText empties text yielding a layout-preserving blank page. */
@@ -712,10 +737,22 @@ export interface RepasteSlideOp {
   fitWidthPx: number
 }
 
+export interface PasteSlideResult {
+  slides: RenderSlide[]
+  /** First pasted slide ('picture': the anchor slide the bitmaps landed on) */
+  index: number
+  /** Slides inserted ('picture': 0) */
+  count: number
+  /** 'picture' mode: the placed picture elements */
+  sourceIds?: string[]
+}
+
 /** New blank page: inserted after slide sourceIndex, reusing its layout (background/decoration), content empty. */
 export interface AddBlankSlideOp {
   sourceIndex: number
   fitWidthPx: number
+  /** Land the new slide before sourceIndex instead of after (insert at position 0) */
+  before?: boolean
 }
 
 /** New blank page (with a specific layout): inserted after slide sourceIndex, rels pointing at layoutPath. */
@@ -876,11 +913,39 @@ export interface EditTransformOp {
 }
 
 /**
+ * Several editTransform commits as one undo step (arrow-key nudge, multi-rotate).
+ * Each item follows EditTransformOp exactly (group-local boxes, table grid resize).
+ */
+export interface EditTransformMultiOp {
+  slideIndex: number
+  fitWidthPx: number
+  items: Array<{
+    sourceId: string
+    groupId?: string
+    xPx: number
+    yPx: number
+    wPx: number
+    hPx: number
+    rotationDeg: number
+  }>
+}
+
+/**
  * Connector endpoint edit: new endpoint positions in viewport px,
  * plus optional attachment changes for either end (undefined = keep the current
  * attachment, null = detach, object = attach to targetId's connection point idx
  * — 0 top, 1 left, 2 bottom, 3 right).
  */
+/** Edit Points commit: freeform path in box-local px (w/h = the element box), converted to EMU in main. */
+export interface SetShapeGeometryOp {
+  slideIndex: number
+  sourceId: string
+  pathPx: { w: number; h: number; cmds: CustGeomPathCmd[] }
+  fitWidthPx: number
+  groupId?: string
+  preview?: boolean
+}
+
 export interface EditConnectorEndpointsOp {
   slideIndex: number
   sourceId: string
@@ -954,21 +1019,45 @@ export interface AddSmartArtOp {
   fitWidthPx: number
 }
 
-/** Insert a renderer-generated bitmap (rasterized icon library / screenshots etc.). */
-export interface AddImageBytesOp {
+/**
+ * Insert a bitmap, either at a renderer-chosen frame (rasterized icons etc.) or,
+ * given only its pixel size, at the PowerPoint size main derives from the bytes' dpi.
+ */
+export type AddImageBytesOp = {
   slideIndex: number
   /** base64 without the data: prefix */
   base64: string
   ext: string
-  xPx: number
-  yPx: number
-  wPx: number
-  hPx: number
   fitWidthPx: number
   name?: string
-}
+} & (
+  | { xPx: number; yPx: number; wPx: number; hPx: number }
+  | { naturalPx: { width: number; height: number }; centerPx?: { x: number; y: number } }
+)
 
 /** Swap a picture's backing image in place: frame, z-order, border and effects survive. */
+/** A 3D model the renderer read and rendered: inserted centred, half the slide high. */
+export interface AddModel3dOp {
+  slideIndex: number
+  /** glTF binary */
+  bytes: Uint8Array
+  name: string
+  /** The model's first rendering, base64 PNG without the data: prefix */
+  posterBase64?: string
+  /** Frame width / height */
+  aspect: number
+  fitWidthPx: number
+}
+
+/** Turn a 3D model (am3d:rot, 60,000ths of a degree) and store the rendering the renderer drew. */
+export interface SetModel3dViewOp {
+  slideIndex: number
+  sourceId: string
+  rot: { ax: number; ay: number; az: number }
+  /** base64 PNG without the data: prefix */
+  posterBase64?: string
+}
+
 export interface ReplacePictureBytesOp {
   slideIndex: number
   sourceId: string
@@ -979,18 +1068,29 @@ export interface ReplacePictureBytesOp {
   keepSrcRect?: boolean
 }
 
-/** Insert renderer-recorded media bytes (screen-recording webm etc.). */
-export interface AddMediaBytesOp {
+/**
+ * Insert media the renderer holds (screen-recording webm) or a media file it was
+ * handed a path for (drop). A path lets main derive the video poster from the
+ * system thumbnail; bytes get a solid placeholder.
+ */
+export type AddMediaBytesOp = {
   slideIndex: number
   kind: 'video' | 'audio'
-  base64: string
   ext: string
   fitWidthPx: number
   name?: string
-}
+  /** Frame size when the producer knows it (screen-recording track settings) */
+  natural?: { width: number; height: number }
+  /** Drop point to center on (fitWidthPx-scaled slide px); defaults to the slide center */
+  centerPx?: { x: number; y: number }
+} & ({ base64: string } | { path: string })
 
-/** Element hyperlink target. */
-export type LinkTargetOp = { kind: 'url'; url: string } | { kind: 'slide'; slideIndex: number }
+export interface AddMediaResult {
+  slide: RenderSlide
+  sourceId: string
+  /** Localized note when in-app playback will be broken (AVI, unsupported audio codec) */
+  warning?: string
+}
 
 export interface SetLinkOp {
   slideIndex: number
@@ -1092,15 +1192,51 @@ export interface ExportImagesResult {
   error?: string
 }
 
-/** Export as PDF: the main process loads each page PNG in a hidden window then printToPDF. */
+/** Save as Picture: one PNG of the selected elements, written where the save dialog points */
+export interface SavePictureOp {
+  /** base64 PNG (without the data: prefix) */
+  pngBase64: string
+  /** Suggested file name without extension */
+  defaultName: string
+}
+
+export interface SavePictureResult {
+  /** Cancel = ok:false without an error */
+  ok: boolean
+  path?: string
+  error?: string
+}
+
+/**
+ * Clickable link overlay on one exported PDF page: rect as fractions of the
+ * page box (0..1), href = URL or in-document page anchor ("#pgN"). The print
+ * window lays them over the page image as transparent <a> boxes, which
+ * printToPDF turns into PDF link annotations.
+ */
+export interface ExportPdfLink {
+  x: number
+  y: number
+  w: number
+  h: number
+  href: string
+}
+
+/** One exported page: vector SVG markup (text stays text) or a base64 PNG fallback. */
+export type ExportPdfPage = { svg: string } | { png: string }
+
+/** Export as PDF: the main process lays the pages out in a hidden window then printToPDF. */
 export interface ExportPdfOp {
   /** Target pdf absolute path (chosen via pickExportPdfPath) */
   filePath: string
-  /** base64 per page PNG (without the data: prefix), in page order */
-  pngsBase64: string[]
+  /** Pages in order */
+  pages: ExportPdfPage[]
   /** Rendered pixel width/height of the slide page (used to compute the PDF page aspect ratio) */
   widthPx: number
   heightPx: number
+  /** Per-page clickable link overlays (element + text-run hyperlinks), same order as pages */
+  links?: ExportPdfLink[][]
+  /** @font-face rules (data: URLs) for faces the SVG text uses that the print window lacks */
+  fontCss?: string
 }
 
 export interface ExportPdfResult {
@@ -1138,6 +1274,8 @@ export interface ShowSyncState {
   ended: boolean
   /** Presenter toggled black screen (B key/toolbar button) */
   black: boolean
+  /** Presenter toggled white screen (W key); absent from older presenters */
+  white?: boolean
 }
 
 /** Presenter ink/laser event; coordinates are 0..1 normalized relative to the slide area (laser x<0 = off) */
@@ -1186,6 +1324,7 @@ export interface SlidesApi {
   onAutoSaveDefaultChanged: (handler: (value: AutoSaveDefault) => void) => () => void
   /** AI panel text size + chat-input spellcheck (Settings → General in the shell) */
   getAiPanelPrefs: () => Promise<AiPanelPrefs>
+  setAiPanelPrefs(patch: Partial<AiPanelPrefs>): Promise<AiPanelPrefs>
   onAiPanelPrefsChanged: (handler: (prefs: AiPanelPrefs) => void) => () => void
   /** press on the shell chrome (tab strip is a sibling WebContentsView whose
    *  clicks produce no DOM event here) — dismiss open popovers */
@@ -1202,15 +1341,13 @@ export interface SlidesApi {
   >
   /** Single-face sfnt bytes for one private face (null = gone/unreadable) */
   privateFontData: (id: string) => Promise<ArrayBuffer | null>
-  /** Curated downloadable (OFL) font catalog with per-family install state */
-  fontCatalog: () => Promise<
-    Array<{
-      family: string
-      script: 'latin' | 'ja' | 'ko' | 'sc' | 'tc'
-      installed: boolean
-      downloading: boolean
-    }>
-  >
+  /**
+   * Curated downloadable (OFL) font catalog with per-family install state and
+   * what each family would cost. Typed from the store that produces it rather
+   * than restated here: `ipcMain.handle` is untyped, so a drifted copy of this
+   * shape passes typecheck and fails at the point of use.
+   */
+  fontCatalog: () => Promise<FontCatalogEntry[]>
   /** Download a catalog family into the user font store; layouts refresh via deck-changed */
   fontDownload: (family: string) => Promise<{ ok: boolean; error?: string }>
   /** File picker → install local font files into the user font store */
@@ -1220,9 +1357,13 @@ export interface SlidesApi {
   /** The user font store changed (download/local install): re-sync private FontFaces */
   onFontsChanged: (handler: () => void) => () => void
   consumePendingOpen: (fitWidthPx: number) => Promise<OpenResult | null>
+  /** Headless export mode: the PDF path this hidden renderer must export to, null in normal use */
+  consumeHeadlessExport: () => Promise<string | null>
+  /** Headless export mode: report the export outcome so the main process can quit */
+  headlessExportDone: (result: { ok: boolean; error?: string }) => void
   /** New blank presentation (single blank 16:9 page, untitled) */
   newBlank: (fitWidthPx: number) => Promise<OpenResult>
-  /** Land generated pages: each pageMarkers entry is a marker (cloudpptx:<path>) redeemable for a one-slide pptx.
+  /** Land generated pages: each pageMarkers entry is a marker (genpptx:<path>) redeemable for a one-slide pptx.
    *  mode="append" merges the new pages onto the existing deck (appendedFrom = existing page count);
    *  mode="replace_at" redoes page atIndex in place from a single marker (other pages untouched, undoable, replacedIndex = that page's index);
    *  mode="insert_at" inserts a new page at atIndex from a single marker (later pages shift back, undoable, insertedIndex = that page's index);
@@ -1244,19 +1385,7 @@ export interface SlidesApi {
       })
     | { error: string }
   >
-  /** Whether cloud single-page generation (gsk slide_generate) is available (GENOFFICE_CLOUD_SLIDE=1 + gsk login) */
-  cloudGenStatus: () => Promise<{ enabled: boolean }>
-  /** Cloud single-page generation: brief → one-slide pptx temp file; the marker goes into a landGeneratedPages pageMarkers slot */
-  cloudGeneratePage: (op: {
-    brief: string
-    title?: string
-    styleSkill?: string
-    deckContext?: Record<string, unknown>
-    images?: { url: string; caption?: string }[]
-    width?: number
-    height?: number
-  }) => Promise<{ ok: boolean; marker?: string; error?: string }>
-  /** Local single-page generation: a JSON slide spec (LLM output) built directly into a one-slide pptx; same marker kind as the cloud path */
+  /** Single-page generation: a JSON slide spec (LLM output) built directly into a one-slide pptx; the marker goes into a landGeneratedPages pageMarkers slot */
   localGeneratePage: (op: {
     specJson: string
   }) => Promise<{ ok: boolean; marker?: string; error?: string; imageFailures?: string[] }>
@@ -1276,6 +1405,10 @@ export interface SlidesApi {
   /** Current slide size (EMU) */
   getSlideSize: () => Promise<{ cx: number; cy: number } | null>
   editTransform: (op: EditTransformOp) => Promise<RenderSlide | null>
+  /** Multi-selection nudge/rotate: every item commits like editTransform, all in one undo step */
+  editTransformMulti: (op: EditTransformMultiOp) => Promise<RenderSlide | null>
+  /** Escape during a previewed resize: drop the gesture's preview frames and its undo snapshot */
+  cancelTransformPreview: (op: { slideIndex: number }) => Promise<RenderSlide | null>
   /** Connector endpoint drag: reposition ends and attach/detach shape anchors (stCxn/endCxn) */
   editConnectorEndpoints: (op: EditConnectorEndpointsOp) => Promise<RenderSlide | null>
   /** Batch position update (align/distribute); all items share one undo step */
@@ -1305,6 +1438,8 @@ export interface SlidesApi {
     groupId?: string
     preview?: boolean
   }) => Promise<RenderSlide | null>
+  /** Edit Points: replace the shape geometry with a freeform path. preview as setShapeAdjust. */
+  setShapeGeometry: (op: SetShapeGeometryOp) => Promise<RenderSlide | null>
   /** Text box vertical alignment */
   setTextAnchor: (op: {
     slideIndex: number
@@ -1343,25 +1478,29 @@ export interface SlidesApi {
   ungroupElement: (op: UngroupElementOp) => Promise<RenderSlide | null>
   addElement: (op: AddElementOp) => Promise<{ slide: RenderSlide; sourceId: string } | null>
   deleteElement: (op: DeleteElementOp) => Promise<RenderSlide | null>
+  /** Multi-selection delete in one undo step */
+  deleteElements: (op: DeleteElementsOp) => Promise<RenderSlide | null>
   addSlide: (op: AddSlideOp) => Promise<{ slides: RenderSlide[]; index: number } | null>
   /** New blank page (reuses slide sourceIndex's layout, content empty) */
   addBlankSlide: (op: AddBlankSlideOp) => Promise<{ slides: RenderSlide[]; index: number } | null>
-  /** Copy a slide onto the app-wide slide clipboard, so another open deck can paste it; pngBase64 is a rendering of the page for 'picture'-mode pastes */
-  copySlide: (slideIndex: number, pngBase64?: string) => Promise<boolean>
-  /** Paste the clipboard slide into this deck (mode: destination theme / source formatting / picture) */
-  pasteSlide: (
-    op: PasteSlideOp,
-  ) => Promise<{ slides: RenderSlide[]; index: number; sourceId?: string } | null>
+  /** Copy slides onto the app-wide slide clipboard, so another open deck can paste them */
+  copySlides: (op: CopySlidesOp) => Promise<boolean>
+  /** Paste the clipboard slides after afterIndex (mode: destination theme / source formatting / picture); index = first pasted slide, count = slides inserted */
+  pasteSlide: (op: PasteSlideOp) => Promise<PasteSlideResult | null>
   /** Redo the just-completed paste with another mode; null when anything else touched the deck since */
-  repasteSlide: (
-    op: RepasteSlideOp,
-  ) => Promise<{ slides: RenderSlide[]; index: number; sourceId?: string } | null>
+  repasteSlide: (op: RepasteSlideOp) => Promise<PasteSlideResult | null>
   /** Is there a slide on the clipboard? (drives the Paste Slide menu item) */
   hasSlideClipboard: () => Promise<boolean>
   /** Is there anything a paste would act on (internal elements/slide, or external image/text)? Drives the Paste menu item */
   clipboardProbe: () => Promise<boolean>
   /** Delete a slide (refused when only one page remains); returns the full RenderSlide array */
   deleteSlide: (slideIndex: number) => Promise<RenderSlide[] | null>
+  /** Delete a thumbnail selection in one undo step; returns the full RenderSlide array */
+  deleteSlides: (op: DeleteSlidesOp) => Promise<RenderSlide[] | null>
+  /** Duplicate a thumbnail selection in one undo step; index = first copy */
+  duplicateSlides: (
+    op: DuplicateSlidesOp,
+  ) => Promise<{ slides: RenderSlide[]; index: number } | null>
   /** Bring element to front/back or move one layer forward/backward */
   reorderElement: (op: ReorderElementOp) => Promise<RenderSlide | null>
   /** Table cell text edit */
@@ -1393,6 +1532,8 @@ export interface SlidesApi {
   >
   /** Copy elements to the in-app clipboard; returns the number actually copied */
   copyElements: (op: CopyElementsOp) => Promise<number>
+  /** Add the renderer's PNG to the matching current element copy for external applications. */
+  copyElementsImage: (clipboardToken: string, pngBase64: string) => Promise<boolean>
   /** Paste; empty clipboard or failure returns null. Note the whole page's element ids update, requiring a whole-page replace */
   pasteElements: (
     op: PasteElementsOp,
@@ -1423,18 +1564,19 @@ export interface SlidesApi {
     kind: 'video' | 'audio',
     fitWidthPx: number,
   ) => Promise<{ slide: RenderSlide; sourceId: string } | null>
-  /** Insert renderer-recorded media (screen recording); placed centered */
-  addMediaBytes: (op: AddMediaBytesOp) => Promise<{ slide: RenderSlide; sourceId: string } | null>
+  /** Insert renderer-recorded or dropped media; placed centered on the slide or the drop point */
+  addMediaBytes: (op: AddMediaBytesOp) => Promise<AddMediaResult | null>
   /** Read an audio/video element's media data (double-click playback); embedded media converts to dataUrl, external links return as-is */
   getMediaData: (
     slideIndex: number,
     sourceId: string,
   ) => Promise<{ kind: 'video' | 'audio'; dataUrl: string } | null>
-  /** Show a dialog to pick a 3D model (glb/gltf), embed + poster placeholder */
-  insertModel3d: (
-    slideIndex: number,
-    fitWidthPx: number,
-  ) => Promise<{ slide: RenderSlide; sourceId: string } | null>
+  /** Show a dialog to pick a 3D model (.glb) and read it */
+  pickModel3d: () => Promise<{ name: string; bytes: Uint8Array } | null>
+  addModel3d: (op: AddModel3dOp) => Promise<{ slide: RenderSlide; sourceId: string } | null>
+  /** A 3D model element's glTF binary */
+  getModel3dData: (slideIndex: number, sourceId: string) => Promise<Uint8Array | null>
+  setModel3dView: (op: SetModel3dViewOp) => Promise<RenderSlide | null>
   /** Set/clear an element hyperlink; the whole page's element ids update, requiring a whole-page replace and clearing the selection */
   setLink: (op: SetLinkOp) => Promise<RenderSlide | null>
   /** Read the element's current hyperlink (dialog echo) */
@@ -1459,8 +1601,14 @@ export interface SlidesApi {
   setTransition: (op: SetTransitionOp) => Promise<boolean>
   /** The current page's transition effect (echoed on page switch) */
   getTransition: (slideIndex: number) => Promise<TransitionKind>
+  getShowTiming: (slideIndex: number) => Promise<ShowTiming>
   /** Batch-write each page's auto-advance time (rehearsal timing save; the saved pptx auto-advances in PowerPoint shows); returns success */
   setAdvanceTimes: (op: SetAdvanceTimesOp) => Promise<boolean>
+  /** Replaces the recorded slides' narration and advance time in one undo step; the whole deck back. */
+  saveRecording: (op: SaveRecordingOp) => Promise<RenderSlide[] | null>
+  clearNarration: (slideIndexes: number[]) => Promise<RenderSlide[] | null>
+  /** Asks the OS for the microphone where it gates it (macOS); false when refused. */
+  microphoneAccess: () => Promise<boolean>
   /** The current page's animation list (read by the Animations tab / during shows) */
   getAnimations: (slideIndex: number) => Promise<AnimationItem[]>
   /** Morph pairing keys of the current page's elements (matched against same-name/same-id elements on the previous page during morph tweening) */
@@ -1469,6 +1617,8 @@ export interface SlidesApi {
   setAnimations: (op: SetAnimationsOp) => Promise<boolean>
   /** Hide/unhide a slide; returns the updated page's RenderSlide (hidden flag), null on failure */
   setSlideHidden: (op: SetSlideHiddenOp) => Promise<RenderSlide | null>
+  /** Hide/unhide a thumbnail selection in one undo step; returns the full RenderSlide array */
+  setSlidesHidden: (op: SetSlidesHiddenOp) => Promise<RenderSlide[] | null>
   /** The current document's section list ([] when there are no sections) */
   getSections: () => Promise<SectionInfo[]>
   /** Overwrite-write the section structure; returns the updated section list */
@@ -1478,12 +1628,20 @@ export interface SlidesApi {
   renameSection: (op: RenameSectionOp) => Promise<SectionInfo[] | null>
   /** Delete a section (keeping slides; pages merge into the adjacent section) */
   removeSection: (op: RemoveSectionOp) => Promise<SectionInfo[] | null>
+  /** Delete the section header and every slide in it (one undo step); null when it would empty the deck */
+  removeSectionSlides: (
+    op: RemoveSectionSlidesOp,
+  ) => Promise<{ slides: RenderSlide[]; sections: SectionInfo[] } | null>
   /** Move a whole section up/down; slide order changes, returns the full RenderSlide set + section list */
   moveSection: (
     op: MoveSectionOp,
   ) => Promise<{ slides: RenderSlide[]; sections: SectionInfo[] } | null>
   /** Drag to reorder slides; returns the full RenderSlide set + section list, null on failure */
   moveSlide: (op: MoveSlideOp) => Promise<{ slides: RenderSlide[]; sections: SectionInfo[] } | null>
+  /** Drag-reorder a thumbnail selection as one undo step */
+  moveSlides: (
+    op: MoveSlidesOp,
+  ) => Promise<{ slides: RenderSlide[]; sections: SectionInfo[] } | null>
   /** Plain text of the current page's speaker notes ('' when there are none) */
   getNotes: (slideIndex: number) => Promise<string>
   /** Overwrite-write notes (into the pptx's notesSlide part); returns success */
@@ -1503,7 +1661,7 @@ export interface SlidesApi {
   /** Apply an edit script's collected primitives as ONE atomic op transaction (the executor rolls back on any failure); returns the rebuilt slide or a guided error */
   applyEditScript: (
     op: ApplyEditScriptOp,
-  ) => Promise<{ slide: RenderSlide } | { error: string } | null>
+  ) => Promise<{ slide: RenderSlide; notes?: string[] } | { error: string } | null>
   /** AI batch surface: apply raw ops as one transaction (atomic/per_op, dry-run supported) */
   applyTxn: (op: ApplyTxnOp) => Promise<ApplyTxnResult | null>
   /** Roll the deck back to an AI rollback point; returns the restored full RenderSlide array, null when the id is unknown */
@@ -1546,6 +1704,8 @@ export interface SlidesApi {
   exportImages: (op: ExportImagesOp) => Promise<ExportImagesResult>
   /** Export as PDF: shows the save dialog for the target path, cancel returns null */
   pickExportPdfPath: (defaultName: string) => Promise<string | null>
+  /** Save as Picture: save dialog + write of the selection PNG */
+  savePicture: (op: SavePictureOp) => Promise<SavePictureResult>
   /** Main process printToPDF via a hidden window, written to disk */
   exportPdf: (op: ExportPdfOp) => Promise<ExportPdfResult>
   /** Print (system dialog; cancel counts as ok=false without an error) */
@@ -1573,6 +1733,16 @@ export interface SlidesApi {
   onRenamed: (handler: (newPath: string) => void) => () => void
   getAiSettings: () => Promise<AiSettings>
   setAiSettings: (settings: AiSettings) => Promise<void>
+  /** ai-settings.json was rewritten by any renderer; re-read it */
+  onAiSettingsChanged: (handler: () => void) => () => void
+  /** shell only: switch to Home and open Settings › AI Model (rejects in standalone) */
+  openAiModelSettings: () => Promise<void>
+  /** shell only: switch to Home and open Settings › Integrations (the skills list) */
+  openSkillsSettings: () => Promise<void>
+  /** the skills installed into GenOffice's own folder */
+  skillsList: () => Promise<UserSkillEntry[]>
+  /** one installed skill's body, by name; the main process resolves the path */
+  skillText: (name: string) => Promise<string>
   aiStream: (request: AiStreamRequest) => Promise<void>
   aiStreamCancel: (requestId: string) => Promise<void>
   /** Genspark account status (gsk login state); with withEmail also fetches the email (needs a network request, slower) */
@@ -1609,7 +1779,10 @@ export interface SlidesApi {
   }>
   insertImageUrl: (op: {
     slideIndex: number
-    url: string
+    url?: string
+    /** raw base64 of a user attachment (attachment:// reference) — no network fetch */
+    base64?: string
+    ext?: string
     xPx: number
     yPx: number
     wPx: number
@@ -1620,7 +1793,10 @@ export interface SlidesApi {
   replacePictureUrl: (op: {
     slideIndex: number
     sourceId: string
-    url: string
+    url?: string
+    /** raw base64 of a user attachment (attachment:// reference) — no network fetch */
+    base64?: string
+    ext?: string
     keepSrcRect?: boolean
   }) => Promise<RenderSlide | null>
   /** gsk (Genspark) AI image generation/editing, returns the image URL (error prompts login when logged out) */
@@ -1630,6 +1806,7 @@ export interface SlidesApi {
     referenceImageUrls?: string[]
     aspectRatio?: string
     imageSize?: string
+    transparentBackground?: boolean
   }) => Promise<{ url?: string; error?: string }>
   /** gsk (Genspark) media analysis: image/audio/video content understanding, returns analysis text */
   analyzeMedia: (op: {
@@ -1648,14 +1825,24 @@ export interface SlidesApi {
   /** Store styleSkill in userData/style-templates/<name>.json */
   saveStyleTemplate: (
     name: string,
-    data: { topic: string; styleSkill: string; createdAt: string },
+    data: {
+      topic: string
+      styleSkill: string
+      createdAt: string
+      /** Deck chrome skeleton extracted at save time (layout-skeleton.ts); absent in older templates */
+      layout?: LayoutSkeleton
+    },
   ) => Promise<{ ok: boolean; error?: string }>
   /** List saved Style templates */
   listStyleTemplates: () => Promise<Array<{ name: string; topic: string; createdAt: string }>>
   /** Load a given Style template's content */
-  loadStyleTemplate: (
-    name: string,
-  ) => Promise<{ ok: boolean; styleSkill?: string; topic?: string; error?: string }>
+  loadStyleTemplate: (name: string) => Promise<{
+    ok: boolean
+    styleSkill?: string
+    topic?: string
+    layout?: LayoutSkeleton
+    error?: string
+  }>
   /** New blank page (with a specific layout): inserted after slide sourceIndex, rels pointing at the chosen layout */
   addSlideWithLayout: (
     op: AddSlideWithLayoutOp,
@@ -1702,4 +1889,10 @@ declare global {
     slidesApi: SlidesApi
     desktop: DesktopFilesApi
   }
+}
+
+export interface UserSkillEntry {
+  name: string
+  description: string
+  relevant: boolean
 }

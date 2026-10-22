@@ -37,6 +37,8 @@ export const es = {
     'Problema de red: no se pudo conectar con el servicio de IA. Comprueba tu conexión e inténtalo de nuevo',
   aiNewChat: 'Nueva conversación',
   aiNoReply: '(sin respuesta)',
+  aiRegionError:
+    'El proveedor de este modelo no da servicio en tu región actual — elige otro modelo o cambia de red',
   aiOverloadedError:
     'El servicio de IA está saturado en este momento; inténtalo de nuevo en unos instantes',
   aiRegenerateTitle: 'Regenerar',
@@ -66,6 +68,7 @@ export const es = {
   aiClarifyDecideAnswer: '(decide por mí)',
   aiClarifyMulti: 'Selección múltiple',
   aiClarifyNext: 'Siguiente',
+  aiClarifyPrev: 'Anterior',
   aiClarifyOther: 'Otro (escríbelo)',
   aiClarifySelected: '{n} seleccionados',
   aiClarifySkip: 'Omitir encuesta',
@@ -74,6 +77,8 @@ export const es = {
   aiToolClarifySkipped: 'Cuestionario omitido',
   aiToolPlan: 'Brief confirmado ({n} secciones)',
   aiToolPlanRejected: 'Brief no confirmado',
+  aiToolPlanFailed: 'No se pudo redactar el brief',
+  aiDraftingBrief: 'Redactando el brief…',
   aiToolWritePage: 'Página generada',
   aiToolWritePageFailed: 'Falló la generación de la página',
   aiToolWritePagePartial: 'Página generada parcialmente',

@@ -1,5 +1,5 @@
 {
-  "baseline": "d2b898f",
+  "baseline": "58dfd0b5",
   "reason": "Per-instance host bridge, per-instance grid container, and a theme/language that the embedding page owns, so one browser page can hold several editors differing in document, theme and language. See web/UPSTREAM-CHANGES.md.",
   "files": [
     "apps/sheets/src/renderer/App.tsx",
@@ -15,42 +15,57 @@
     "apps/sheets/src/renderer/ai/image-skill.ts",
     "apps/sheets/src/renderer/ai/search-skill.ts",
     "apps/sheets/src/renderer/ai/transport.ts",
+    "apps/sheets/src/renderer/cell-context-menu.ts",
     "apps/sheets/src/renderer/clear-selection-keyboard.ts",
     "apps/sheets/src/renderer/csv-export.ts",
     "apps/sheets/src/renderer/host-api.ts",
     "apps/sheets/src/renderer/i18n/locale.tsx",
+    "apps/sheets/src/renderer/mcp-bridge.ts",
     "apps/sheets/src/renderer/merge-workbooks.ts",
     "apps/sheets/src/renderer/op-executor.ts",
+    "apps/sheets/src/renderer/outline-actions.ts",
     "apps/sheets/src/renderer/page-layout-actions.ts",
     "apps/sheets/src/renderer/plan-operations.ts",
     "apps/sheets/src/renderer/ribbon-actions.ts",
     "apps/sheets/src/renderer/save-actions.ts",
     "apps/sheets/src/renderer/shape-draw.ts",
+    "apps/sheets/src/renderer/sidecar-find.ts",
     "apps/sheets/src/renderer/styles.css",
     "apps/sheets/src/renderer/univer-state.ts",
     "apps/sheets/src/renderer/univer-sync.ts",
     "apps/sheets/src/renderer/visual-actions.ts",
+    "apps/sheets/src/renderer/visual-arrange-actions.ts",
+    "apps/sheets/src/renderer/workbook-media.ts",
     "apps/sheets/src/shared/desktop-api.ts",
     "apps/sheets/tests/aggregate-range.test.ts",
     "apps/sheets/tests/copy-source-direct.test.ts",
     "apps/sheets/tests/csv-save-streamed.test.ts",
+    "apps/sheets/tests/ensure-sheet-file-state.test.ts",
     "apps/sheets/tests/formula-audit.test.ts",
     "apps/sheets/tests/formula-closure-structural-race.test.ts",
     "apps/sheets/tests/image-skill.test.ts",
+    "apps/sheets/tests/lazy-find.test.ts",
+    "apps/sheets/tests/mcp-bridge-ops.test.ts",
+    "apps/sheets/tests/mcp-sheet-refs.test.ts",
     "apps/sheets/tests/read-sheet-range-batching.test.ts",
+    "apps/sheets/tests/save-chat-continuity.test.ts",
+    "apps/sheets/tests/save-late-edits-carry.test.ts",
     "apps/sheets/tests/save-recovery-mode.test.ts",
+    "apps/sheets/tests/sidecar-find.test.ts",
+    "apps/sheets/tests/sidecar-session-recovery.test.ts",
     "apps/sheets/tests/structural-delete-guard.test.ts",
+    "apps/sheets/tests/table-row-delete-precheck.test.ts",
+    "apps/sheets/tests/uncached-formula-workbook.test.ts",
     "apps/sheets/tests/univer-range-loading.test.ts",
+    "apps/sheets/tests/workbook-search.test.ts",
     "packages/ui/src/tokens.css"
   ],
   "fileGroups": [
     {
       "pattern": "apps/sheets/src/renderer/i18n/app/*.ts",
-      "reason": "One key, `appExportedCopy`, added to all 20 locale shards. Each shard carries `satisfies Record<keyof typeof zh, string>`, so the set can only change together -- a partial edit is a type error, not undeclared drift."
+      "reason": "One key, `appExportedCopy`, added to all 21 locale shards. Each shard carries `satisfies Record<keyof typeof zh, string>`, so the set can only change together -- a partial edit is a type error, not undeclared drift. Vietnamese arrived with the 2026-10 upstream merge and needed the key like the rest."
     }
   ],
-  "allowedFailures": [
-    "parseCsv ignores delimiters inside escaped quotes when sniffing"
-  ],
-  "allowedFailuresReason": "Fails at the baseline commit too, so it is upstream's, not ours. check-upstream.mjs fails if this list grows, or if a listed test starts passing."
+  "allowedFailures": [],
+  "allowedFailuresReason": "Empty, and worth keeping: upstream fixed the CSV delimiter-sniffing test this list used to allow (the 2026-10 merge). check-upstream.mjs fails if the list grows, or if a listed test starts passing."
 }

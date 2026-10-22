@@ -11,8 +11,21 @@ pub(crate) fn parse_text_paragraphs(
     body.children()
         .filter(|node| node.has_tag_name("p"))
         .map(|paragraph| {
-            let align = direct_child(paragraph, "pPr")
+            let properties = direct_child(paragraph, "pPr");
+            let align = properties
                 .and_then(|node| node.attribute("algn"))
+                .map(ToOwned::to_owned);
+            let emu_points = |name: &str| {
+                properties
+                    .and_then(|node| node.attribute(name))
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .map(|value| value / 12700.0)
+            };
+            let auto_num = properties.and_then(|node| direct_child(node, "buAutoNum"));
+            let bullet_char = properties
+                .and_then(|node| direct_child(node, "buChar"))
+                .and_then(|node| node.attribute("char"))
+                .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
             let mut runs = Vec::new();
             for child in paragraph.children() {
@@ -24,6 +37,7 @@ pub(crate) fn parse_text_paragraphs(
                         italic: false,
                         underline: false,
                         size: None,
+                        caps: None,
                     });
                     continue;
                 }
@@ -52,9 +66,28 @@ pub(crate) fn parse_text_paragraphs(
                         .and_then(|rpr| rpr.attribute("sz"))
                         .and_then(|value| value.parse::<f64>().ok())
                         .map(|value| value / 100.0),
+                    caps: properties
+                        .and_then(|rpr| rpr.attribute("cap"))
+                        .filter(|value| *value == "all" || *value == "small")
+                        .map(ToOwned::to_owned),
                 });
             }
-            ShapeParagraph { align, runs }
+            ShapeParagraph {
+                align,
+                margin_left: emu_points("marL"),
+                indent: emu_points("indent"),
+                bullet_scheme: auto_num
+                    .map(|node| node.attribute("type").unwrap_or("arabicPeriod").to_owned()),
+                bullet_start_at: auto_num
+                    .and_then(|node| node.attribute("startAt"))
+                    .and_then(|value| value.parse::<u32>().ok()),
+                bullet_char: if auto_num.is_some() {
+                    None
+                } else {
+                    bullet_char
+                },
+                runs,
+            }
         })
         .collect()
 }
@@ -67,6 +100,7 @@ pub(crate) fn read_drawing(
     colors: &ColorContext,
     ole_shape_ids: &HashSet<u32>,
     slicer_captions: &HashMap<String, String>,
+    formats: &mut SourceFormats,
 ) -> Result<Vec<VisualObject>, SidecarError> {
     let xml = read_xml(archive, drawing_path)?;
     let document = parse_document(&xml, drawing_path)?;
@@ -122,6 +156,7 @@ pub(crate) fn read_drawing(
                     drawing_path,
                     &relationships,
                     &mut visuals,
+                    0,
                 )?;
             }
             continue;
@@ -142,7 +177,7 @@ pub(crate) fn read_drawing(
                 sheet_id: sheet_id.to_owned(),
                 kind: "chart".into(),
                 anchor,
-                chart: Some(read_chart(archive, &chart_path, colors)?),
+                chart: Some(read_chart(archive, &chart_path, colors, formats)?),
                 chart_path: Some(chart_path.clone()),
                 media_path: None,
                 media_type: None,
@@ -174,6 +209,9 @@ pub(crate) fn read_drawing(
                 nv_id: None,
                 drawing_path: Some(drawing_path.to_owned()),
                 drawing_index: Some(index),
+                alt_text: None,
+                edit_as: None,
+                hyperlink: None,
             });
             continue;
         }
@@ -238,6 +276,9 @@ pub(crate) fn read_drawing(
                 nv_id: None,
                 drawing_path: Some(drawing_path.to_owned()),
                 drawing_index: Some(index),
+                alt_text: None,
+                edit_as: None,
+                hyperlink: None,
             });
             continue;
         }
@@ -288,6 +329,9 @@ pub(crate) fn read_drawing(
                 nv_id: None,
                 drawing_path: None,
                 drawing_index: None,
+                alt_text: None,
+                edit_as: None,
+                hyperlink: None,
             });
             continue;
         }
@@ -315,15 +359,82 @@ pub(crate) fn read_drawing(
             visuals.push(shape);
         }
     }
+    let anchors: Vec<Node<'_, '_>> = document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name("twoCellAnchor")
+                || node.has_tag_name("oneCellAnchor")
+                || node.has_tag_name("absoluteAnchor")
+        })
+        .collect();
+    for visual in &mut visuals {
+        if let Some(anchor_node) = visual.drawing_index.and_then(|index| anchors.get(index)) {
+            apply_anchor_properties(visual, *anchor_node, &relationships);
+        }
+    }
     // Chart children of expanded groups carry only their part path.
     for visual in &mut visuals {
         if visual.kind == "chart" && visual.chart.is_none() {
             if let Some(chart_path) = visual.chart_path.clone() {
-                visual.chart = Some(read_chart(archive, &chart_path, colors)?);
+                visual.chart = Some(read_chart(archive, &chart_path, colors, formats)?);
             }
         }
     }
     Ok(visuals)
+}
+
+/// Anchor-level properties shared by every object kind: editAs, alt text,
+/// hyperlink — and for pictures the xfrm rotation/flip the shape branch
+/// already reads for itself.
+pub(crate) fn apply_anchor_properties(
+    visual: &mut VisualObject,
+    anchor_node: Node<'_, '_>,
+    relationships: &HashMap<String, Relationship>,
+) {
+    if anchor_node.has_tag_name("twoCellAnchor") {
+        visual.edit_as = Some(
+            anchor_node
+                .attribute("editAs")
+                .unwrap_or("twoCell")
+                .to_owned(),
+        );
+    }
+    let nv = anchor_node
+        .descendants()
+        .find(|node| node.has_tag_name("cNvPr"));
+    visual.alt_text = nv
+        .and_then(|node| node.attribute("descr"))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    visual.hyperlink = nv
+        .and_then(|node| {
+            node.children()
+                .find(|child| child.has_tag_name("hlinkClick"))
+        })
+        .and_then(relationship_id)
+        .and_then(|id| relationships.get(&id))
+        .map(|relationship| relationship.target.clone());
+    if visual.kind != "image" {
+        return;
+    }
+    let xfrm = anchor_node
+        .descendants()
+        .find(|node| node.has_tag_name("xfrm"));
+    let flipped = |attribute: &str| {
+        xfrm.and_then(|node| node.attribute(attribute))
+            .is_some_and(|value| value == "1" || value == "true")
+    };
+    visual.flip_h = flipped("flipH");
+    visual.flip_v = flipped("flipV");
+    visual.rotation = xfrm
+        .and_then(|node| node.attribute("rot"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value / 60_000.0)
+        .filter(|value| *value != 0.0);
+    if visual.rotation.is_some() {
+        visual.frame_width = xfrm_value(xfrm, "ext", "cx").filter(|value| *value > 0.0);
+        visual.frame_height = xfrm_value(xfrm, "ext", "cy").filter(|value| *value > 0.0);
+    }
 }
 
 /// `sle:slicer` / `tsle:timeslicer` @name of a slicer graphicFrame anchor.
@@ -375,7 +486,7 @@ pub(crate) fn shape_visual(
             let fill_color = if has_no_fill {
                 Some("none".into())
             } else {
-                shape_sppr.and_then(|sppr| drawing_fill_color(sppr, colors))
+                shape_sppr.and_then(|sppr| area_fill_color(sppr, colors))
             };
             let fill_blip = shape_sppr
                 .and_then(|sppr| sppr.children().find(|node| node.has_tag_name("blipFill")))
@@ -447,10 +558,15 @@ pub(crate) fn shape_visual(
             let style_node = shape_node
                 .children()
                 .find(|node| node.has_tag_name("style"));
+            // idx 0 / 1000 reference the "no fill" slot (ECMA-376 20.1.4.2.10
+            // / 20.1.4.2.19); the schemeClr child is only a placeholder.
             let style_color = |name: &str| {
                 let reference = style_node?
                     .children()
                     .find(|node| node.has_tag_name(name))?;
+                if matches!(reference.attribute("idx"), Some("0" | "1000")) {
+                    return Some("none".into());
+                }
                 let scheme = reference
                     .children()
                     .find(|node| node.has_tag_name("schemeClr"))?;
@@ -464,13 +580,17 @@ pub(crate) fn shape_visual(
             };
             // An explicit spPr blipFill replaces the style fillRef entirely:
             // the frame stays transparent while the image loads.
-            let fill_color = fill_color.or_else(|| {
-                if fill_media_path.is_some() {
-                    Some("none".into())
-                } else {
-                    style_color("fillRef")
-                }
-            });
+            // No spPr fill, no blip and no style reference is DrawingML's
+            // "no fill": Excel draws the shape transparent.
+            let fill_color = fill_color
+                .or_else(|| {
+                    if fill_media_path.is_some() {
+                        Some("none".into())
+                    } else {
+                        style_color("fillRef")
+                    }
+                })
+                .or_else(|| fill_gradient.is_none().then(|| "none".into()));
             let line_node = shape_node
                 .children()
                 .find(|node| node.has_tag_name("spPr"))
@@ -482,7 +602,8 @@ pub(crate) fn shape_visual(
                     }
                     drawing_fill_color(ln, colors)
                 })
-                .or_else(|| style_color("lnRef"));
+                .or_else(|| style_color("lnRef"))
+                .or_else(|| Some("none".into()));
             let line_width = line_node
                 .and_then(|ln| ln.attribute("w"))
                 .and_then(|value| value.parse::<f64>().ok())
@@ -537,6 +658,9 @@ pub(crate) fn shape_visual(
                 nv_id,
                 drawing_path: Some(drawing_path.to_owned()),
                 drawing_index,
+                alt_text: None,
+                edit_as: None,
+                hyperlink: None,
             }
         }
     }
@@ -693,7 +817,16 @@ pub(crate) fn expand_group(
     drawing_path: &str,
     relationships: &HashMap<String, Relationship>,
     visuals: &mut Vec<VisualObject>,
+    depth: usize,
 ) -> Result<(), SidecarError> {
+    // A stack overflow is not a panic — catch_unwind cannot stop the process
+    // abort, and the file itself decides how deep this recursion goes. Excel
+    // nests groups a handful of levels deep; anything past MAX_GROUP_DEPTH is
+    // skipped, not followed.
+    const MAX_GROUP_DEPTH: usize = 32;
+    if depth > MAX_GROUP_DEPTH {
+        return Ok(());
+    }
     let (box_x, box_y, box_width, box_height) = group_box;
     let xfrm = group_xfrm(group);
     let ch_off_x = xfrm_value(xfrm, "chOff", "x").unwrap_or(0.0);
@@ -745,6 +878,7 @@ pub(crate) fn expand_group(
                 drawing_path,
                 relationships,
                 visuals,
+                depth + 1,
             )?;
             continue;
         }
@@ -768,7 +902,7 @@ pub(crate) fn expand_group(
             .and_then(|node| node.attribute("name"))
             .map(ToOwned::to_owned);
         if is_shape {
-            visuals.push(shape_visual(
+            let mut shape = shape_visual(
                 child,
                 child_anchor,
                 child_id,
@@ -778,7 +912,9 @@ pub(crate) fn expand_group(
                 drawing_path,
                 relationships,
                 None,
-            ));
+            );
+            apply_anchor_properties(&mut shape, child, relationships);
+            visuals.push(shape);
             continue;
         }
         if is_frame {
@@ -831,6 +967,9 @@ pub(crate) fn expand_group(
                 nv_id: None,
                 drawing_path: Some(drawing_path.to_owned()),
                 drawing_index: None,
+                alt_text: None,
+                edit_as: None,
+                hyperlink: None,
             });
             continue;
         }
@@ -847,7 +986,7 @@ pub(crate) fn expand_group(
             continue;
         }
         let media_path = resolve_part_target(drawing_path, &relationship.target)?;
-        visuals.push(VisualObject {
+        let mut picture = VisualObject {
             id: child_id,
             sheet_id: sheet_id.to_owned(),
             kind: "image".into(),
@@ -884,7 +1023,18 @@ pub(crate) fn expand_group(
             nv_id: None,
             drawing_path: Some(drawing_path.to_owned()),
             drawing_index: None,
-        });
+            alt_text: None,
+            edit_as: None,
+            hyperlink: None,
+        };
+        // Group children have no anchor of their own: the pic element is the
+        // scope, and its xfrm ext is in child space, so the frame rescales.
+        apply_anchor_properties(&mut picture, child, relationships);
+        if picture.rotation.is_some() {
+            picture.frame_width = Some(ext_x * scale_x);
+            picture.frame_height = Some(ext_y * scale_y);
+        }
+        visuals.push(picture);
     }
     Ok(())
 }

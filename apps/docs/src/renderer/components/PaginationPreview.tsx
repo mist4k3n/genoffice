@@ -11,6 +11,7 @@ import { decodeEntities } from '@genoffice/docx-engine'
 import {
   appendEndnotesBlock,
   appendFloatSpillBlock,
+  pageTextEnds,
   assignSections,
   effectiveBottomPx,
   effectiveHfRefs,
@@ -18,27 +19,42 @@ import {
   formatPageNumber,
   liveSections,
   measureBlocks,
+  noteAreaPlacement,
+  type HfSet,
+  hfVariantOf,
+  type PageHf,
+  pageHfStrips,
   pageNumbers,
   markTableSeamSlices,
   pinnedFloatPage,
   anchorBoxLift,
+  applyLeadSpills,
   applyLiftTops,
+  pageRelHang,
   anchorShiftPx,
   sectionBidi,
   sectionColGeom,
   sectionFirstPages,
   sectionGeoms,
+  outerTableRows,
+  sectionVertical,
+  verticalBlockShift,
   sectionPageBox,
+  rowSplitCss,
   sliceWithLineSplit,
-  TABLE_SEAM_PX,
+  seamWindow,
   type BlockBox,
   type BlockMetaOf,
   type FloatBox,
   type PageNoteItem,
   type PageSlice,
+  type SectionGeom,
   type SectionHfHeights,
+  type SliceOutputs,
 } from '../pagination'
+import { pageMargins } from '../page-margins'
 import { cssFontFamily, hfHeaderGeom, FOOTNOTE_SEPARATOR_H } from '../line-metrics'
+import { syncPreviewLineNumbers } from '../editor/line-numbers'
 import type { EditorView } from '@tiptap/pm/view'
 import {
   anchorPointFor,
@@ -47,15 +63,19 @@ import {
   type AnchorBlock,
   type AnchorPoint,
 } from '../editor/margin-annotations'
-import { pageBorderStyleOf } from '../editor/pagination-gaps'
+import { pageBorderArtStripStyle, pageBorderStyleOf } from '../editor/pagination-gaps'
 import { textColorValue } from '../editor/text-color'
-import { toRoman } from '../note-format'
+import { textOutlineCssValue } from '../editor/text-outline'
+import { noteMarkText } from '../note-format'
 import { useI18n } from '../i18n/locale'
 import {
-  HF_WASHOUT_FILTER,
   hfFloatPagePos,
+  hfImageHangsOnPara,
+  hfFloatTransform,
   hfReservedHeightPx,
   hfStripGeom,
+  hfWashoutFilter,
+  wordArtSvgMarkup,
 } from '../editor/hf-dom'
 import { HeaderFooterArea } from './HeaderFooterArea'
 
@@ -469,8 +489,21 @@ export interface CloneChild {
  * page window collapse into fixed-height spacers.
  */
 const CLONE_PRUNE_BUDGET = 150_000
+/**
+ * Blocks under-count a document whose blocks are individually huge (page-long
+ * tables, heavily run-split paragraphs): a 112-page report of 869 blocks but
+ * 87k elements stayed under the block budget, so the preview carried 9.7 M
+ * nodes and each chunked printToPDF took minutes. Elements are what Blink
+ * pays for, so they get their own budget.
+ */
+const CLONE_PRUNE_ELEMENT_BUDGET = 2_000_000
 /** window slack around a page (px): keeps neighbours whose floats/overflow bleed into the page */
 const CLONE_PRUNE_PAD = 2000
+
+/** Per-page clones of the whole document are affordable only within both budgets. */
+export function shouldPruneClones(pages: number, blocks: number, elements: number): boolean {
+  return pages * blocks >= CLONE_PRUNE_BUDGET || pages * elements >= CLONE_PRUNE_ELEMENT_BUDGET
+}
 
 /**
  * Canvas block → clone HTML. Phantom table rows (page-gap / repeated-header
@@ -560,6 +593,277 @@ export function hoistWindow(
   return null
 }
 
+/** Word keeps a paragraph-relative box on the paper: one whose top would land
+ *  above the page edge is pushed down to it (boxOffsets = box top - anchor top) */
+export function hoistPaperClamp(dy: number, topPx: number, boxOffsets: number[]): number {
+  const top = Math.min(...boxOffsets.map((o) => topPx + dy + o))
+  return top < 0 ? dy - top : dy
+}
+
+/** anchor-relative boxes the hoist re-pins. A wrapper mixing page-relative V
+ *  boxes with anchor-relative ones passes neither the all-page-relative nor the
+ *  spill gate and stays inside the pv-clip, which cut every box at the flow end
+ *  (a page holding only that anchor line exported blank): un-position it and
+ *  hoist the anchor-relative boxes whether or not they spill. */
+export function hoistPlan(wfs: FloatBox[]): { boxes: FloatBox[]; mixed: boolean } | null {
+  if (wfs.some((f) => f.pinned)) return null
+  const boxes = wfs.filter((f) => !f.pageRelV)
+  if (boxes.length === 0) return null
+  return { boxes, mixed: boxes.length < wfs.length }
+}
+
+/** horizontal slot of a floating box's inline position (hoist CSS corrects each slot from column to page) */
+export function hoistSlotOf(f: { el: HTMLElement }): 'left' | 'center' | 'right' | null {
+  const st = f.el.getAttribute('style') ?? ''
+  // a paper-edge X renders as calc(<px> - var(--doc-margin-left)), a column X
+  // clamped onto the paper as clamp(<floor>, <px>, <cap>): both are left slots
+  if (/(?:^|;)\s*left:\s*(?:calc\(|clamp\([^,]*,\s*)?-?[\d.]+px/.test(st)) return 'left'
+  if (/(?:^|;)\s*left:\s*50%/.test(st)) return 'center'
+  if (/(?:^|;)\s*right:\s*0(?:px)?\s*(?:;|$)/.test(st)) return 'right'
+  return null
+}
+
+/**
+ * Vertical-text pages: every window clone carries the canvas' own-page translate
+ * (--col-dx/dy), so per-page rules re-place each block against THIS page's
+ * start (a paragraph continued from the previous page gets a negative offset and
+ * its already-shown lines fall outside the clip) and hide the ride-along copies
+ * that belong to other pages. The measured horizontal height stands in for the
+ * sideways extent (same line count, same line pitch).
+ */
+export function verticalPageCss(
+  blocks: BlockBox[],
+  slices: PageSlice[],
+  sections: SectionInfo[],
+  geoms: SectionGeom[],
+): string {
+  const rules: string[] = []
+  slices.forEach((slice, i) => {
+    const si = Math.max(0, Math.min(slice.section, sections.length - 1))
+    const mode = sectionVertical(sections[si]?.settings)
+    const g = geoms[Math.min(si, geoms.length - 1)]
+    if (!mode || !g || slice.regions) return
+    const page = `.pv-page[data-pv-page="${i}"]`
+    // the clip is the full body height (lines span it), so the window pad's
+    // ride-along neighbours must not show: hide the addressable blocks and
+    // reveal those intersecting this page (floated frames and other
+    // horizontal blocks included; blocks without an index stay visible).
+    // Canvas gap chrome (page / hf / notes gaps, cut marks, float hosts) has
+    // no index and would paint inside the sheet: hide it too.
+    rules.push(
+      `${page} .pv-content > [data-idx],` +
+        `${page} .pv-content > :is([class*="page-gap"],.page-float-host){visibility:hidden;}`,
+    )
+    for (const b of blocks) {
+      if (!b.el || b.top >= slice.end - 0.5 || b.top + b.height <= slice.start + 0.5) continue
+      const idx = b.el.dataset.idx
+      if (idx === undefined) continue
+      const sel = `${page} .pv-content > [data-idx="${idx}"]`
+      if (!b.el.classList.contains('doc-vert-block')) {
+        rules.push(`${sel}{visibility:visible;}`)
+        continue
+      }
+      const { dx, dy } = verticalBlockShift(mode, g.contentHeight, b.top - slice.start, b.height)
+      rules.push(
+        `${sel}{visibility:visible;--pv-vdx:${dx.toFixed(2)}px;--pv-vdy:${dy.toFixed(2)}px;}`,
+      )
+    }
+  })
+  return rules.join('\n')
+}
+
+/**
+ * Glyph ink may overflow its line box (CJK or bold faces whose content area
+ * exceeds a tight line height), so the block that opens the next page paints a
+ * few pixels above its own top: inside the window of the page before it, which
+ * ends exactly there. Word paints nothing of a page's first line on the page
+ * before it. Hide that lead block on the preceding page (visibility keeps the
+ * flow height); blocks further down cannot reach the window, straddling
+ * blocks must stay visible, and floated / anchored carriers are left alone
+ * because their boxes may own the page through the pin rules.
+ */
+export const EDGE_LEAK_PX = 12
+
+export function leadLeakCss(blocks: BlockBox[], slices: PageSlice[]): string {
+  const rules: string[] = []
+  const pinCarrier = '[data-pin-page],[data-pv-hoist]'
+  const root = blocks[0]?.el?.parentElement
+  for (const el of root?.querySelectorAll('[data-pv-lead]') ?? [])
+    el.removeAttribute('data-pv-lead')
+  let leadRows = 0
+  slices.forEach((slice, i) => {
+    if (i === slices.length - 1 || slice.regions) return
+    for (const b of blocks) {
+      if (b.top < slice.end - 0.5 || b.top >= slice.end + EDGE_LEAK_PX) continue
+      if (b.floated || b.floatTable || b.liftPx || b.pageRelVyPx !== undefined || b.isFloatSpill)
+        continue
+      const idx = b.el?.dataset.idx
+      if (idx === undefined || b.el!.matches(pinCarrier) || b.el!.querySelector(pinCarrier))
+        continue
+      rules.push(
+        `.pv-page[data-pv-page="${i}"] .pv-content > [data-idx="${idx}"]{visibility:hidden;}`,
+      )
+    }
+    // a table cut at a row seam: the seam allowance keeps the collapsed border
+    // whole and with it the next row's glyph tops; hide that row's cell
+    // contents (its borders and fills stay for the seam)
+    for (const b of blocks) {
+      if (!b.tableRows || !b.el || b.top >= slice.end - 0.5 || b.top + b.height <= slice.end + 0.5)
+        continue
+      // slice.end came from these same row heights: the nearest row top matches
+      // exactly or the cut is mid-row
+      let y = b.top
+      let lead = -1
+      b.tableRows.forEach((row, k) => {
+        if (k > 0 && Math.abs(y - slice.end) <= 0.5) lead = k
+        y += row.height
+      })
+      const tr = lead > 0 ? outerTableRows(b.el)[lead] : undefined
+      if (!tr) continue
+      tr.dataset.pvLead = String(leadRows)
+      rules.push(
+        `.pv-page[data-pv-page="${i}"] .pv-content tr[data-pv-lead="${leadRows}"] > * > *{visibility:hidden;}`,
+      )
+      leadRows++
+    }
+    // a page-anchored table lifted into the next page's top margin starts
+    // inside this page's window (a negative margin pulls a float over the
+    // flow before it); it belongs to the page whose window opens for it
+    for (const b of blocks) {
+      const hang = pageRelHang(b)
+      if (hang >= 0 || b.top < slice.end - 0.5 || b.top + hang >= slice.end - 0.5) continue
+      const next = slices[i + 1]
+      if (b.top >= next.end - 0.5 && next.end > next.start) continue
+      const idx = b.el?.dataset.idx
+      if (idx === undefined) continue
+      rules.push(
+        `.pv-page[data-pv-page="${i}"] .pv-content > [data-idx="${idx}"]{visibility:hidden;}`,
+      )
+    }
+  })
+  // a window opened into the top margin for a hanging table also shows the
+  // previous page's blocks ending in that band: hide them (floats included);
+  // only lifted tables hang there by design and pinned carriers are owned by
+  // the pin rules
+  slices.forEach((slice, i) => {
+    if (i === 0 || !slice.liftTop || slice.regions) return
+    for (const b of blocks) {
+      if (b.top + b.height > slice.start + 0.5 || b.top + b.height <= slice.start - slice.liftTop)
+        continue
+      if (b.liftPx) continue
+      const idx = b.el?.dataset.idx
+      if (idx === undefined || b.el!.matches(pinCarrier) || b.el!.querySelector(pinCarrier))
+        continue
+      rules.push(
+        `.pv-page[data-pv-page="${i}"] .pv-content > [data-idx="${idx}"]{visibility:hidden;}`,
+      )
+    }
+  })
+  return rules.join('\n')
+}
+
+/**
+ * Height of a page's (or column's) body window (px): the slice span capped at the
+ * content height (`full` opens the whole capacity: last page, vertical text), grown by
+ * the kept last line's spilled leading so its glyphs are not clipped — unless
+ * footnotes own that band.
+ */
+export function bodyWindowHeight(
+  slice: Pick<PageSlice, 'start' | 'end' | 'repeatHeader' | 'leadSpill'>,
+  contentH: number,
+  opts: { full: boolean; hasNotes: boolean; seamExtend: number },
+): number {
+  const cap =
+    contentH - (slice.repeatHeader?.height ?? 0) + (opts.hasNotes ? 0 : (slice.leadSpill ?? 0))
+  if (opts.full) return cap
+  return Math.max(0, Math.min(slice.end - slice.start, cap) + opts.seamExtend)
+}
+
+/** layoutInCell="0" page-positioned cell box (pinCellBoxesToPage stamped its
+ *  page): the preview draws a copy at page coordinates on the owning page and
+ *  hides the in-flow clones — inside a positioned table the box could neither
+ *  escape the pv-clip window nor resolve against the page box */
+export interface CellPageBox {
+  page: number
+  offX: number
+  offY: number
+  /** X measures from the paper edge (relativeFrom="page"), else from the column start */
+  fromPaperEdge: boolean
+  fromPage: boolean
+  /** behindDoc: the overlay sinks under the page clone like the in-flow box */
+  behind: boolean
+  html: string
+}
+
+export function collectCellPageBoxes(pm: HTMLElement): CellPageBox[] {
+  const out: CellPageBox[] = []
+  for (const box of pm.querySelectorAll<HTMLElement>(
+    '.doc-cell-boxes-page > .doc-textbox[data-cell-page]',
+  )) {
+    const page = parseInt(box.dataset.pinPage ?? '', 10)
+    if (!Number.isFinite(page)) continue
+    out.push({
+      page,
+      offX: parseFloat(box.dataset.cellPageX ?? '') || 0,
+      offY: parseFloat(box.dataset.cellPageY ?? '') || 0,
+      fromPaperEdge: box.dataset.pageRelXFrom === 'page',
+      fromPage: box.dataset.pageRelFrom === 'page',
+      behind: (parseInt(box.style.zIndex, 10) || 0) < 0,
+      html: box.outerHTML,
+    })
+  }
+  return out
+}
+
+/** run-anchored front/behind picture with a page/margin-relative X, drawn once
+ *  per owning page at page coordinates (the column clone would clip it) */
+export interface PageRelXPicture {
+  page: number
+  offX: number
+  fromPaperEdge: boolean
+  /** content-area Y of the picture top on its page (unclamped; the render pins it to the paper) */
+  topY: number
+  behind: boolean
+  html: string
+}
+
+/** the inline transform's leading translate(...) (anchor offset, may nest calc()) */
+export function stripLeadingTranslate(transform: string): string {
+  const m = /^\s*translate\(/.exec(transform)
+  if (!m) return transform
+  let depth = 0
+  for (let i = m[0].length - 1; i < transform.length; i++) {
+    if (transform[i] === '(') depth++
+    else if (transform[i] === ')' && --depth === 0) return transform.slice(i + 1).trim()
+  }
+  return ''
+}
+
+export function pageRelXPictureHtml(img: HTMLElement): string {
+  const copy = img.cloneNode(false) as HTMLElement
+  // the overlay sits at the page position: drop the anchor offset, keep rotation/flip
+  const xf = stripLeadingTranslate(copy.style.transform)
+  if (xf) copy.style.transform = xf
+  else copy.style.removeProperty('transform')
+  copy.style.left = '0px'
+  copy.style.top = '0px'
+  delete copy.dataset.pvOverlaid
+  return copy.outerHTML
+}
+
+/** hoisted boxes show in the body window owning their anchor only (data-pin-win
+ *  stamped at hoist time, data-pv-win on each body clone of a regioned page) */
+export function hoistWindowCss(wins: ReadonlyMap<number, ReadonlySet<string>>): string {
+  const rules: string[] = []
+  for (const [pg, keys] of wins) {
+    for (const key of keys) {
+      const w = `.pv-page[data-pv-page="${pg}"] .pv-content[data-pv-win]:not([data-pv-win="${key}"]) [data-pv-hoist='1'][data-pin-win="${key}"]`
+      rules.push(`${w} > .doc-textbox,${w} > .doc-img-wrap{visibility:hidden;}`)
+    }
+  }
+  return rules.join('\n')
+}
+
 export function pinnedCloneCss(pageCount: number): string {
   const rules: string[] = []
   for (let i = 0; i < pageCount; i++) {
@@ -577,24 +881,6 @@ export function pinnedCloneCss(pageCount: number): string {
   return rules.join('\n')
 }
 
-export interface HfSet {
-  header: HeaderFooter | null
-  footer: HeaderFooter | null
-  headerFirst: HeaderFooter | null
-  footerFirst: HeaderFooter | null
-  headerEven: HeaderFooter | null
-  footerEven: HeaderFooter | null
-  titlePg: boolean
-  evenOddHf: boolean
-  /** images in each variant part (logos etc., display-only) */
-  images?: Partial<
-    Record<
-      'header' | 'footer' | 'headerFirst' | 'footerFirst' | 'headerEven' | 'footerEven',
-      HfImage[]
-    >
-  >
-}
-
 /**
  * Pagination preview: a read-only snapshot of real page slicing over the canvas's continuous
  * flow. Each page = a full content clone + overflow clipping + negative-margin offset; the
@@ -603,20 +889,79 @@ export interface HfSet {
  * sections is real). Headers/footers render per page by Word variant rules (first page /
  * odd-even), with real page numbers.
  */
+/** anchored header/footer picture on a preview page; an a:srcRect crop becomes
+ *  an overflow-hidden window over the scaled image (mirrors hfImgNode) */
+function FloatHfImg({
+  img,
+  pos,
+}: {
+  img: HfImage
+  pos: ReturnType<typeof hfFloatPagePos>
+}): React.JSX.Element {
+  const base: React.CSSProperties = {
+    left: pos.x,
+    top: pos.y,
+    transform: hfFloatTransform(img, pos),
+    ...(img.widthPx ? { width: img.widthPx } : {}),
+    ...(img.heightPx ? { height: img.heightPx } : {}),
+    ...(img.washout ? { filter: hfWashoutFilter(img.washout) } : {}),
+    ...(img.behind ? {} : { zIndex: 1 }),
+  }
+  if (img.wordArt) {
+    return (
+      <span
+        className="pv-watermark-img"
+        aria-hidden="true"
+        style={base}
+        dangerouslySetInnerHTML={{ __html: wordArtSvgMarkup(img) }}
+      />
+    )
+  }
+  const c = img.crop
+  if (c && img.widthPx && img.heightPx) {
+    const span = (a: number, b: number) => Math.max(0.01, 1 - a - b)
+    const sw = img.widthPx / span(c.l, c.r)
+    const sh = img.heightPx / span(c.t, c.b)
+    return (
+      <span className="pv-watermark-img" aria-hidden="true" style={{ ...base, overflow: 'hidden' }}>
+        <img
+          src={img.dataUrl}
+          alt=""
+          style={{
+            position: 'absolute',
+            left: -c.l * sw,
+            top: -c.t * sh,
+            width: sw,
+            height: sh,
+            maxWidth: 'none',
+          }}
+        />
+      </span>
+    )
+  }
+  return (
+    <img className="pv-watermark-img" src={img.dataUrl} alt="" aria-hidden="true" style={base} />
+  )
+}
+
 export function PaginationPreview({
   section,
   canvasTop,
   sections,
+  mirrorMargins = false,
   delSectBreaks,
   hfParts,
   colFlow,
   colMode,
   hf,
   watermark,
+  watermarkDirty,
+  watermarkPicture,
   blockMetaOf,
   pageFootnotesOf,
+  footnotesBeneathText,
   endnoteItems,
-  sectionHfOverride,
+  resolveHf,
   clearPageGaps,
   comments,
   anchorBlocks,
@@ -631,6 +976,8 @@ export function PaginationPreview({
   canvasTop: number
   /** All sections: for per-page paper geometry (empty array = single section per `section`) */
   sections: SectionInfo[]
+  /** settings.xml w:mirrorMargins: even pages swap the side margins */
+  mirrorMargins?: boolean
   /** section-break paragraphs whose mark is a tracked deletion (no break in markup views) */
   delSectBreaks?: Set<number>
   /** rId → header/footer parts (multi-section picks by each section's references) */
@@ -641,14 +988,25 @@ export function PaginationPreview({
   colMode: 'none' | 'uniform' | 'mixed'
   hf: HfSet
   watermark: string | null
+  /** unsaved Design → Watermark edit: draw `watermark` as the ghost text and hide the parsed WordArt shape */
+  watermarkDirty?: boolean
+  /** unsaved picture watermark (set_watermark image): drawn in place of the parsed watermark shape */
+  watermarkPicture?: HfImage | null
   /** docxIndex → parse-layer pagination constraints (keepNext/widow/table-row flags) */
   blockMetaOf?: BlockMetaOf
   /** Per-page footnote collection (referencing page → entry list), for page-bottom rendering */
   pageFootnotesOf?: (blocks: BlockBox[], slices: PageSlice[]) => PageNoteItem[][]
+  /** w:footnotePr w:pos="beneathText": the note area follows the last body line instead of sitting at the page bottom */
+  footnotesBeneathText?: boolean
   /** Endnote entries (placed together at the document end, take part in slicing, may continue across pages) */
   endnoteItems?: PageNoteItem[]
-  /** Multi-section: unsaved per-section header/footer edit overrides (default variant) */
-  sectionHfOverride?: (sectionIndex: number, kind: 'header' | 'footer') => HeaderFooter | null
+  /** Multi-section: the strip a section shows (pending edits, Link to Previous, inheritance) */
+  resolveHf?: (
+    sections: SectionInfo[],
+    sectionIndex: number,
+    kind: 'header' | 'footer',
+    variant: 'default' | 'first' | 'even',
+  ) => { value: HeaderFooter | null; images?: HfImage[] }
   /**
    * Clears the canvas page-gap decorations before the snapshot measure. In-table
    * gap/repeated-header widgets are extra <tr>s that consume rowspan slots, so a
@@ -670,12 +1028,20 @@ export function PaginationPreview({
 }) {
   const { t } = useI18n()
   const [slices, setSlices] = useState<PageSlice[]>([])
+  const [splitCss, setSplitCss] = useState('')
+  const [hoistWinCss, setHoistWinCss] = useState('')
+  const [vertCss, setVertCss] = useState('')
+  const [leakCss, setLeakCss] = useState('')
   const [pageNotes, setPageNotes] = useState<PageNoteItem[][]>([])
+  /** per-page flow-coordinate bottom of the body text (beneathText footnote anchor) */
+  const [textEnds, setTextEnds] = useState<number[]>([])
   /** Top Y of the endnote area (virtual coordinates); null = no endnotes */
   const [endnotesTop, setEndnotesTop] = useState<number | null>(null)
   const [html, setHtml] = useState('')
   /** non-null = pruned-clone mode (large documents): per-page windows instead of full clones */
   const [cloneKids, setCloneKids] = useState<CloneChild[] | null>(null)
+  const [cellPageBoxes, setCellPageBoxes] = useState<CellPageBox[]>([])
+  const [relXPictures, setRelXPictures] = useState<PageRelXPicture[]>([])
   /** Live section list: a section whose break block was deleted (unsaved) merges into the next, matching the canvas */
   const [secs, setSecs] = useState<SectionInfo[]>(sections)
   /** open comment threads' anchors (clone flow coordinates), in document order */
@@ -715,7 +1081,12 @@ export function PaginationPreview({
       colMode !== 'none' ||
       section.vAlign === 'center' ||
       section.vAlign === 'bottom' ||
-      sections.some((s) => s.settings.vAlign === 'center' || s.settings.vAlign === 'bottom')
+      sections.some(
+        (s) =>
+          s.settings.vAlign === 'center' ||
+          s.settings.vAlign === 'bottom' ||
+          sectionVertical(s.settings),
+      )
     if (measureNeutralize) pm.classList.add('measuring-columns')
     try {
       const origin = pm.getBoundingClientRect().top + canvasTop * factor
@@ -741,8 +1112,11 @@ export function PaginationPreview({
       const flowH = flowWithFloats ?? withEndnotes?.totalHeight ?? totalHeight
       setEndnotesTop(withEndnotes?.top ?? null)
       let computed: PageSlice[]
+      const splitOut: SliceOutputs = { rowSplits: [] }
       /** flow-coordinate bottom of page i's clip window (the last page opens to full capacity unless vertically aligned) */
       let winEndOf: (s: PageSlice, i: number) => number
+      let liveGeoms: SectionGeom[] = []
+      let liveHfHs: SectionHfHeights[] = []
       if (live.length > 0) {
         // each section's default-variant header/footer estimated heights → body push-down (matching the canvas)
         const refs = effectiveHfRefs(live)
@@ -750,9 +1124,8 @@ export function PaginationPreview({
           const set = s.settings
           const w = twipsToPx(set.pageWidth - set.marginLeft - set.marginRight)
           const pick = (kind: 'header' | 'footer'): HeaderFooter | null => {
+            if (resolveHf) return resolveHf(live, i, kind, 'default').value
             if (i === live.length - 1) return kind === 'header' ? hf.header : hf.footer
-            const ov = sectionHfOverride?.(i, kind)
-            if (ov) return ov
             const rId = refs[i]?.[kind]?.default
             const part = rId ? hfParts[rId] : undefined
             return part
@@ -760,6 +1133,7 @@ export function PaginationPreview({
               : null
           }
           const imagesOf = (kind: 'header' | 'footer') => {
+            if (resolveHf) return resolveHf(live, i, kind, 'default').images
             const rId = refs[i]?.[kind]?.default
             const fromPart = rId ? hfParts[rId]?.images : undefined
             if (fromPart?.length) return fromPart
@@ -769,6 +1143,7 @@ export function PaginationPreview({
           // these strips (hfFor), so its slice capacity must match or the taller
           // variant's push-down clips slice content off the page (prod100r4/43)
           const firstPart = (kind: 'header' | 'footer') => {
+            if (resolveHf) return resolveHf(live, i, kind, 'first').value
             const rId = refs[i]?.[kind]?.first
             const part = rId ? hfParts[rId] : undefined
             return part
@@ -776,6 +1151,7 @@ export function PaginationPreview({
               : null
           }
           const firstImagesOf = (kind: 'header' | 'footer') => {
+            if (resolveHf) return resolveHf(live, i, kind, 'first').images
             const rId = refs[i]?.[kind]?.first
             return rId ? hfParts[rId]?.images : undefined
           }
@@ -788,7 +1164,9 @@ export function PaginationPreview({
               hfHeaderGeom(set),
             ),
             footerPx: hfReservedHeightPx('footer', pick('footer'), w, imagesOf('footer')),
-            ...(s.titlePg
+            // a single-section preview follows the live "different first page"
+            // toggle (hfFor), so its first-page geometry must too
+            ...((live.length === 1 ? hf.titlePg : s.titlePg)
               ? {
                   firstHeaderPx: hfReservedHeightPx(
                     'header',
@@ -807,10 +1185,12 @@ export function PaginationPreview({
               : {}),
           }
         })
-        const geoms = sectionGeoms(live, hfHs)
+        const geoms = sectionGeoms(live, hfHs, hf.evenOddHf)
+        liveGeoms = geoms
+        liveHfHs = hfHs
         // when the canvas column layout is inactive, measure as full-width single flow; the geometry drops column flow to match
         if (colMode === 'none') for (const g of geoms) if (g.cols) g.cols = undefined
-        computed = sliceWithLineSplit(blocks, geoms, flowH, factor, blockMetaOf)
+        computed = sliceWithLineSplit(blocks, geoms, flowH, factor, blockMetaOf, splitOut)
         const firsts = sectionFirstPages(computed)
         const last = computed.length - 1
         winEndOf = (s, i) => {
@@ -869,6 +1249,7 @@ export function PaginationPreview({
           flowH,
           factor,
           blockMetaOf,
+          splitOut,
         )
         const last = computed.length - 1
         winEndOf = (s, i) => {
@@ -927,16 +1308,23 @@ export function PaginationPreview({
       // and resolve against the page box at their page-relative offsets
       for (const f of floats) {
         if (!f.pageRelV) continue
-        const wrap = f.el.closest<HTMLElement>('.doc-protected-floating, .doc-img-float')
+        const wrap = f.el.closest<HTMLElement>(
+          '.doc-protected-floating, .doc-img-float, .doc-anchor-origin',
+        )
         if (!wrap) continue
         const boxes = Array.from(
-          wrap.querySelectorAll<HTMLElement>(':scope > .doc-textbox, :scope > .doc-img-wrap'),
+          wrap.querySelectorAll<HTMLElement>(
+            ':scope > .doc-textbox, :scope > .doc-img-wrap, :scope .doc-inline-img-anchor > img',
+          ),
         )
         // static siblings (an inline drawing sharing the paragraph) neither
         // need the shared containing block nor ride the page-margin translate:
-        // only absolutely positioned siblings gate the un-positioning
-        const absBoxes = boxes.filter((b) =>
-          /position:\s*absolute/.test(b.getAttribute('style') ?? ''),
+        // only absolutely positioned siblings gate the un-positioning; zero-height
+        // ones (degenerate guide lines) are invisible and not measured as floats
+        const absBoxes = boxes.filter(
+          (b) =>
+            /position:\s*absolute/.test(b.getAttribute('style') ?? '') &&
+            b.getBoundingClientRect().height > 0,
         )
         if (absBoxes.length > 0 && absBoxes.every((b) => b.dataset.pageRelV === '1')) {
           wrap.dataset.pvPagerel = '1'
@@ -952,9 +1340,44 @@ export function PaginationPreview({
       // owning page lets other clones hide the ride-along copies.
       for (const el of pm.querySelectorAll<HTMLElement>('[data-pv-hoist]')) {
         delete el.dataset.pvHoist
+        delete el.dataset.pvHoistSlot
         delete el.dataset.pinPage
+        delete el.dataset.pinWin
         el.style.removeProperty('--pv-hoist-dy')
       }
+      const hoistWins = new Map<number, Set<string>>()
+      // the hoist translate uses each page's own top margin (a titlePg first page
+      // renders the first-variant header), so the paper clamp must too
+      const hoistFirsts = sectionFirstPages(computed)
+      const hoistPageTopPx = (pg: number, section: number): number => {
+        const first = liveHfHs[section]?.firstHeaderPx
+        return hoistFirsts[pg] && first !== undefined && live[section]
+          ? effectiveTopPx(live[section].settings, first)
+          : (liveGeoms[section]?.topPx ?? 0)
+      }
+      // run-anchored pictures with a page-relative X: the anchor paragraph
+      // keeps its position (and lead shift) in the clone; the picture itself
+      // draws once per owning page as a page overlay, every clone copy hidden
+      const relXPics: PageRelXPicture[] = []
+      for (const f of floats) {
+        if (!f.el.matches('.doc-inline-img-anchor > img[data-page-rel-x]') || f.pageRelV) continue
+        delete f.el.dataset.pvOverlaid
+        const pg = pinnedFloatPage(computed, f.anchorTop)
+        const slice = computed[pg]
+        if (!slice || slice.repeatHeader) continue
+        const win = hoistWindow(slice, f.anchorTop)
+        if (!win) continue
+        f.el.dataset.pvOverlaid = '1'
+        relXPics.push({
+          page: pg,
+          offX: parseFloat(f.el.dataset.pageRelXPx ?? '') || 0,
+          fromPaperEdge: f.el.dataset.pageRelXFrom === 'page',
+          topY: win.dy + f.top - f.anchorTop,
+          behind: f.el.classList.contains('doc-inline-img--behind'),
+          html: pageRelXPictureHtml(f.el),
+        })
+      }
+      setRelXPictures(relXPics)
       const wrapFloats = new Map<HTMLElement, FloatBox[]>()
       for (const f of floats) {
         const wrap = f.el.closest<HTMLElement>('.doc-protected-floating, .doc-img-float')
@@ -963,17 +1386,17 @@ export function PaginationPreview({
         if (list) list.push(f)
         else wrapFloats.set(wrap, [f])
       }
-      for (const [wrap, wfs] of wrapFloats) {
+      for (const [wrap, all] of wrapFloats) {
         // pinned / page-relative wrappers already position against the page
         if (wrap.dataset.pvPagerel === '1' || wrap.classList.contains('doc-protected-pagepinned'))
           continue
-        if (!wfs.every((f) => !f.pinned && !f.pageRelV)) continue
-        // the hoist CSS re-pins by inline left/top: boxes on the right/center
-        // slots (right:0 / left:50%) resolve against the column and must stay
-        if (
-          !wfs.every((f) => /(?:^|;)\s*left:\s*-?[\d.]+px/.test(f.el.getAttribute('style') ?? ''))
-        )
-          continue
+        const plan = hoistPlan(all)
+        if (!plan) continue
+        const { boxes: wfs, mixed } = plan
+        // the hoist CSS re-pins against the page box, so each slot (left px,
+        // left:50%, right:0) gets its own column-to-page correction
+        const slot = hoistSlotOf(wfs[0])
+        if (!slot || !wfs.every((f) => hoistSlotOf(f) === slot)) continue
         const pg = pinnedFloatPage(computed, wfs[0].anchorTop)
         const slice = computed[pg]
         if (!slice || slice.repeatHeader) continue
@@ -985,14 +1408,35 @@ export function PaginationPreview({
         const pageRelX = wfs.every((f) => f.el.dataset.pageRelX === '1')
         if (win.multiCol && !pageRelX) continue
         const spills = wfs.some((f) => f.top + f.height > win.end + 1 || f.top < win.start - 1)
-        if (!spills && !win.multiCol) continue
+        if (!spills && !win.multiCol && !mixed) continue
         wrap.dataset.pvHoist = '1'
+        wrap.dataset.pvHoistSlot = slot
         wrap.dataset.pinPage = String(pg)
-        wrap.style.setProperty('--pv-hoist-dy', `${win.dy}px`)
+        // a regioned page clones the flow once per column window; the escaped
+        // boxes would paint once per window, each copy over the earlier
+        // windows' text, so only the anchor's own window keeps them
+        const winKey = win.start.toFixed(1)
+        wrap.dataset.pinWin = winKey
+        ;(hoistWins.get(pg) ?? hoistWins.set(pg, new Set()).get(pg)!).add(winKey)
+        if (mixed) wrap.dataset.pvPagerel = '1'
+        const dy = hoistPaperClamp(
+          win.dy,
+          hoistPageTopPx(pg, slice.section),
+          wfs.map((f) => f.top - f.anchorTop),
+        )
+        wrap.style.setProperty('--pv-hoist-dy', `${dy}px`)
       }
       applyLiftTops(computed, blocks)
+      applyLeadSpills(computed, blocks, liveGeoms)
+      setSplitCss(rowSplitCss(splitOut.rowSplits ?? [], blocks, computed))
+      setHoistWinCss(hoistWindowCss(hoistWins))
+      setVertCss(
+        liveGeoms.some((g) => g.vertical) ? verticalPageCss(blocks, computed, live, liveGeoms) : '',
+      )
+      setLeakCss(leadLeakCss(blocks, computed))
       setSlices(computed)
       setPageNotes(pageFootnotesOf ? pageFootnotesOf(blocks, computed) : [])
+      setTextEnds(footnotesBeneathText ? pageTextEnds(blocks, computed) : [])
       // comment anchors, measured in the same neutralized geometry as the blocks;
       // content-relative X: the pm element is the padded .doc-page, but the
       // preview clones strip that padding and sit inside the sheet's own
@@ -1012,7 +1456,8 @@ export function PaginationPreview({
       // renderer OOM / "Promise was collected" during printToPDF). Past the
       // budget, snapshot per-block geometry and render pruned windows instead.
       const kidEls = Array.from(pm.children) as HTMLElement[]
-      if (computed.length * kidEls.length >= CLONE_PRUNE_BUDGET) {
+      setCellPageBoxes(collectCellPageBoxes(pm))
+      if (shouldPruneClones(computed.length, kidEls.length, pm.getElementsByTagName('*').length)) {
         const metas: CloneChild[] = []
         let gapAccum = 0
         for (const el of kidEls) {
@@ -1021,13 +1466,19 @@ export function PaginationPreview({
             gapAccum += rect.height
             continue
           }
+          if (el.classList.contains('page-float-carry')) continue
           let innerGap = 0
           for (const g of el.querySelectorAll('.page-gap-inline'))
             innerGap += g.getBoundingClientRect().height
           const cs = window.getComputedStyle(el)
           const vTop = (rect.top - anchorShiftPx(el) * factor - origin - gapAccum) / factor
           const h = (rect.height - innerGap) / factor
-          gapAccum += innerGap
+          // a CSS float's in-table gaps grow only the float's own box (measureBlocks)
+          const cssFloat =
+            (el.classList.contains('doc-table-float-left') ||
+              el.classList.contains('doc-table-float-right')) &&
+            !el.classList.contains('doc-table-float-flow')
+          if (!cssFloat) gapAccum += innerGap
           metas.push({
             html: cloneBlockHtml(el),
             vTop,
@@ -1066,6 +1517,13 @@ export function PaginationPreview({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onClose, suppressEscape])
 
+  // line numbers (w:lnNumType) ride the cloned pages: measured after the sheets mount;
+  // markup spots rescale the sheets, so they re-measure too
+  useEffect(() => {
+    const root = document.querySelector<HTMLElement>('.pv-scroll')
+    if (root) syncPreviewLineNumbers(root, secs, blockMetaOf)
+  }, [secs, blockMetaOf, slices, commentSpots, revSpots])
+
   const multiSection = secs.length > 1
   const commentById = useMemo(() => new Map((comments ?? []).map((c) => [c.id, c])), [comments])
   const effRefs = useMemo(() => effectiveHfRefs(secs), [secs])
@@ -1098,53 +1556,27 @@ export function PaginationPreview({
     }
   }
 
-  /** Single section: reuse the editing state (unsaved header edits are visible); multi-section: pick parts by each section's references */
-  const hfFor = (
-    i: number,
-  ): {
-    header: HeaderFooter | null
-    footer: HeaderFooter | null
-    headerImages?: HfImage[]
-    footerImages?: HfImage[]
-  } => {
+  /** Single section: the resolver's pending state (strip edits land there, not in `hf`); multi-section: pick by each section's references */
+  const hfFor = (i: number): PageHf => {
     const pageNo = nums[i]
     if (!multiSection) {
-      if (hf.titlePg && i === 0) {
-        return {
-          header: hf.headerFirst,
-          footer: hf.footerFirst,
-          headerImages: hf.images?.headerFirst,
-          footerImages: hf.images?.footerFirst,
-        }
-      }
-      if (hf.evenOddHf && pageNo % 2 === 0) {
-        return {
-          header: hf.headerEven,
-          footer: hf.footerEven,
-          headerImages: hf.images?.headerEven,
-          footerImages: hf.images?.footerEven,
-        }
-      }
-      return {
-        header: hf.header,
-        footer: hf.footer,
-        headerImages: hf.images?.header,
-        footerImages: hf.images?.footer,
-      }
+      const variant = hfVariantOf(hf.titlePg, i === 0, hf.evenOddHf, pageNo)
+      return pageHfStrips(variant, resolveHf && ((kind) => resolveHf(secs, 0, kind, variant)), hf)
     }
     const slice = slices[i]
     const sec = secs[Math.min(slice.section, secs.length - 1)]
     const refs = effRefs[Math.min(slice.section, effRefs.length - 1)]
-    const variant =
-      sec.titlePg && firsts[i] ? 'first' : hf.evenOddHf && pageNo % 2 === 0 ? 'even' : 'default'
-    // unsaved per-section header/footer edits take priority over document parts (default variant)
-    const ovHeader = variant === 'default' ? sectionHfOverride?.(slice.section, 'header') : null
-    const ovFooter = variant === 'default' ? sectionHfOverride?.(slice.section, 'footer') : null
+    const variant = hfVariantOf(sec.titlePg, firsts[i], hf.evenOddHf, pageNo)
+    if (resolveHf) {
+      const h = resolveHf(secs, slice.section, 'header', variant)
+      const f = resolveHf(secs, slice.section, 'footer', variant)
+      return { header: h.value, footer: f.value, headerImages: h.images, footerImages: f.images }
+    }
     const headerRId = refs.header[variant]
     const footerRId = refs.footer[variant]
     return {
-      header: ovHeader ?? toHf(headerRId),
-      footer: ovFooter ?? toHf(footerRId),
+      header: toHf(headerRId),
+      footer: toHf(footerRId),
       headerImages: headerRId ? hfParts[headerRId]?.images : undefined,
       footerImages: footerRId ? hfParts[footerRId]?.images : undefined,
     }
@@ -1164,6 +1596,10 @@ export function PaginationPreview({
         </button>
       </div>
       <style>{pinnedCloneCss(slices.length)}</style>
+      {splitCss && <style>{splitCss}</style>}
+      {hoistWinCss && <style>{hoistWinCss}</style>}
+      {vertCss && <style>{vertCss}</style>}
+      {leakCss && <style>{leakCss}</style>}
       {/* aria-hidden: the cloned page stack is a visual print preview; exposing
           its full-document DOM to the accessibility tree overflows Blink's AX
           update queue on long documents and crashes the renderer */}
@@ -1171,6 +1607,10 @@ export function PaginationPreview({
         {slices.map((slice, i) => {
           const parts = hfFor(i)
           const s = settingsOf(slice)
+          // this page's side margins: a mirrored document swaps them on even pages
+          const sideMargins = pageMargins(s, nums[i], mirrorMargins)
+          const mL = twipsToPx(sideMargins.left)
+          const mR = twipsToPx(sideMargins.right)
           const pageBox = sectionPageBox(s)
           const pageW = pageBox.width
           const pageH = pageBox.height
@@ -1186,23 +1626,48 @@ export function PaginationPreview({
               hfHeaderGeom(s),
             ),
           )
-          const mBottom = effectiveBottomPx(
-            s,
-            hfReservedHeightPx('footer', parts.footer, secContentW, parts.footerImages),
+          const footerReservedPx = hfReservedHeightPx(
+            'footer',
+            parts.footer,
+            secContentW,
+            parts.footerImages,
           )
+          const mBottom = effectiveBottomPx(s, footerReservedPx)
           const contentH = pageH - mTop - mBottom
+          const notes = pageNotes[i] ?? []
+          const notesH =
+            notes.length > 0
+              ? notes.reduce((sum, n) => sum + n.height, 0) + FOOTNOTE_SEPARATOR_H
+              : 0
           // page vertical alignment (sectPr w:vAlign): content of non-full pages shifts down as a whole
           const usedH = Math.min(slice.end - slice.start, contentH)
           const vSpare = Math.max(0, contentH - usedH)
-          const vOffset = s.vAlign === 'center' ? vSpare / 2 : s.vAlign === 'bottom' ? vSpare : 0
+          // (vertical-text pages: the slice span is the sideways fill, not leftover height)
+          const vOffset = sectionVertical(s)
+            ? 0
+            : s.vAlign === 'center'
+              ? vSpare / 2
+              : s.vAlign === 'bottom'
+                ? vSpare
+                : 0
+          const noteArea = noteAreaPlacement(notesH, textEnds[i], slice, {
+            pageH,
+            mTop,
+            mBottom,
+            headerH: slice.repeatHeader?.height ?? 0,
+            vOffset,
+          })
           // the window opens up into the top margin: fully on the first page (nothing
           // precedes the flow there, so a side-wrapped picture anchored above its
           // paragraph paints into the margin like Word), else by a lifted table's hang
           const openTop = i === 0 ? mTop : Math.min(slice.liftTop ?? 0, mTop)
           // a cut table's incoming edge: the first window on the page grows one pixel
-          // up into the top margin so the whole straddling border shows in place
-          const seamLift = slice.cutTable ? TABLE_SEAM_PX : 0
-          const bodyLift = slice.repeatHeader ? 0 : seamLift
+          // up into the top margin so the whole straddling border shows in place;
+          // a page opening on a table's bottom edge drops that pixel instead (the
+          // previous page's window keeps the whole bottom border)
+          const seam = seamWindow(slice, slices[i + 1])
+          const seamLift = Math.max(seam.lift, 0)
+          const bodyLift = slice.repeatHeader ? 0 : seam.lift
           // page numbers display in the owning section's number format (w:pgNumType w:fmt)
           const pageNoText = formatPageNumber(
             nums[i],
@@ -1229,6 +1694,7 @@ export function PaginationPreview({
               key={i}
               className="pv-page"
               data-pv-page={i}
+              data-pv-section={slice.section}
               // inert: cloned pages carry natively focusable nodes (links,
               // contenteditable cells); keyboard focus must not enter the
               // aria-hidden subtree. Kept off .pv-scroll so it stays scrollable.
@@ -1243,8 +1709,8 @@ export function PaginationPreview({
                   '--section-content-w': `${secContentW}px`,
                   '--header-dist': `${pageBox.headerDist}px`,
                   '--footer-dist': `${pageBox.footerDist}px`,
-                  '--pv-mr': `${twipsToPx(s.marginRight)}px`,
-                  '--pv-ml': `${twipsToPx(s.marginLeft)}px`,
+                  '--pv-mr': `${mR}px`,
+                  '--pv-ml': `${mL}px`,
                   '--pv-mt': `${mTop}px`,
                   '--pv-mt-page': `${twipsToPx(s.marginTop)}px`,
                 } as React.CSSProperties
@@ -1253,18 +1719,18 @@ export function PaginationPreview({
               <div
                 className="pv-sheet"
                 style={{
-                  padding: `${mTop}px ${twipsToPx(s.marginRight)}px ${mBottom}px ${twipsToPx(s.marginLeft)}px`,
+                  padding: `${mTop}px ${mR}px ${mBottom}px ${mL}px`,
                   ...(markupOn ? markupTransform : {}),
                 }}
               >
-                {watermark && (
+                {watermark && watermarkDirty && (
                   <div className="page-watermark" aria-hidden="true">
                     {watermark}
                   </div>
                 )}
                 {drawPageBorder && (
                   <div
-                    className="pv-page-border"
+                    className={`pv-page-border${pageBorder.zOrder === 'back' ? ' pv-page-border-back' : ''}`}
                     aria-hidden="true"
                     style={{
                       top: pageBorder.sides.top?.insetPx ?? 0,
@@ -1276,47 +1742,104 @@ export function PaginationPreview({
                       borderBottom: pageBorder.sides.bottom?.css,
                       borderLeft: pageBorder.sides.left?.css,
                     }}
-                  />
+                  >
+                    {(['top', 'right', 'bottom', 'left'] as const).map((name) => {
+                      const art = pageBorder.sides[name]?.art
+                      return art ? (
+                        <div
+                          key={name}
+                          className="page-border-art"
+                          style={pageBorderArtStripStyle(name, art) as React.CSSProperties}
+                        />
+                      ) : null
+                    })}
+                  </div>
                 )}
-                {(parts.headerImages ?? [])
-                  .filter((img) => img.floating)
+                {[
+                  ...(watermarkDirty && watermarkPicture ? [watermarkPicture] : []),
+                  ...(parts.headerImages ?? []).filter(
+                    (img) =>
+                      img.floating &&
+                      !hfImageHangsOnPara(img) &&
+                      !(watermarkDirty && (img.wordArt || img.watermark)),
+                  ),
+                ].map((img, k) => {
+                  // picture watermark (anchored image in the header): drawn once
+                  // per page behind the body (negative z-index; .pv-page isolates)
+                  const pos = hfFloatPagePos(img, {
+                    pageW,
+                    pageH,
+                    marginLeft: mL,
+                    marginRight: mR,
+                    marginTop: mTop,
+                    marginBottom: mBottom,
+                    headerDist: pageBox.headerDist,
+                    sectMarginTop: twipsToPx(s.marginTop),
+                    sectMarginBottom: twipsToPx(s.marginBottom),
+                  })
+                  return <FloatHfImg key={`wm${k}`} img={img} pos={pos} />
+                })}
+                {cellPageBoxes
+                  .filter((b) => b.page === i)
+                  .map((b, k) => (
+                    <div
+                      key={`cpb${k}`}
+                      className="pv-cell-page-box"
+                      aria-hidden="true"
+                      style={{
+                        left: b.fromPaperEdge ? b.offX : mL + b.offX,
+                        top: b.fromPage ? b.offY : mTop + b.offY,
+                        // the isolated page clone renders after the overlay:
+                        // front boxes need a level above it, behind ones below
+                        zIndex: b.behind ? -1 : 1,
+                      }}
+                      dangerouslySetInnerHTML={{ __html: b.html }}
+                    />
+                  ))}
+                {relXPictures
+                  .filter((b) => b.page === i)
+                  .map((b, k) => (
+                    <div
+                      key={`rxp${k}`}
+                      className="pv-cell-page-box"
+                      aria-hidden="true"
+                      style={{
+                        left: b.fromPaperEdge ? b.offX : mL + b.offX,
+                        // paragraph-relative Y rides the body window's vAlign shift;
+                        // Word keeps the picture on the paper (hoistPaperClamp)
+                        top: Math.max(0, mTop + (slice.regions ? 0 : vOffset) + b.topY),
+                        zIndex: b.behind ? -1 : 1,
+                      }}
+                      dangerouslySetInnerHTML={{ __html: b.html }}
+                    />
+                  ))}
+                {(parts.footerImages ?? [])
+                  .filter((img) => img.floating && !hfImageHangsOnPara(img))
                   .map((img, k) => {
-                    // picture watermark (anchored image in the header): drawn once
-                    // per page behind the body (negative z-index; .pv-page isolates)
+                    // anchored footer picture (seal beside the address block):
+                    // paragraph-relative offsets measure from the footer strip top
                     const pos = hfFloatPagePos(img, {
                       pageW,
                       pageH,
-                      marginLeft: twipsToPx(s.marginLeft),
-                      marginRight: twipsToPx(s.marginRight),
+                      marginLeft: mL,
+                      marginRight: mR,
                       marginTop: mTop,
                       marginBottom: mBottom,
                       headerDist: pageBox.headerDist,
                       sectMarginTop: twipsToPx(s.marginTop),
+                      sectMarginBottom: twipsToPx(s.marginBottom),
+                      paraOriginY: pageH - pageBox.footerDist - footerReservedPx,
                     })
-                    return (
-                      <img
-                        key={`wm${k}`}
-                        className="pv-watermark-img"
-                        src={img.dataUrl}
-                        alt=""
-                        aria-hidden="true"
-                        style={{
-                          left: pos.x,
-                          top: pos.y,
-                          transform: `translate(${pos.translateX}%, ${pos.translateY}%)`,
-                          ...(img.widthPx ? { width: img.widthPx } : {}),
-                          ...(img.heightPx ? { height: img.heightPx } : {}),
-                          ...(img.washout ? { filter: HF_WASHOUT_FILTER } : {}),
-                        }}
-                      />
-                    )
+                    return <FloatHfImg key={`fwm${k}`} img={img} pos={pos} />
                   })}
                 {/* image-only parts (logo headers) have a null text value but must still render */}
                 {(parts.header || parts.headerImages?.some((img) => !img.floating)) && (
                   <HeaderFooterArea
                     kind="header"
                     value={parts.header ?? { text: '' }}
-                    images={parts.headerImages?.filter((img) => !img.floating)}
+                    images={parts.headerImages?.filter(
+                      (img) => !img.floating || hfImageHangsOnPara(img),
+                    )}
                     readOnly
                     onCommit={() => {}}
                     pageNo={pageNoText}
@@ -1434,12 +1957,11 @@ export function PaginationPreview({
                               <div
                                 className="pv-clip"
                                 style={{
-                                  height: tailWindow
-                                    ? region.height - (col.repeatHeader?.height ?? 0)
-                                    : Math.min(
-                                        col.end - col.start,
-                                        region.height - (col.repeatHeader?.height ?? 0),
-                                      ),
+                                  height: bodyWindowHeight(col, region.height, {
+                                    full: tailWindow,
+                                    hasNotes: notes.length > 0,
+                                    seamExtend: 0,
+                                  }),
                                 }}
                               >
                                 <div
@@ -1448,6 +1970,8 @@ export function PaginationPreview({
                                 >
                                   <div
                                     className="doc-page pv-content"
+                                    data-pv-body=""
+                                    data-pv-win={col.start.toFixed(1)}
                                     dangerouslySetInnerHTML={{
                                       __html: cloneKids
                                         ? prunedCloneHtml(
@@ -1477,17 +2001,11 @@ export function PaginationPreview({
                       height:
                         openTop +
                         bodyLift +
-                        (i === slices.length - 1 && vOffset <= 0.5
-                          ? contentH - (slice.repeatHeader?.height ?? 0)
-                          : Math.max(
-                              0,
-                              Math.min(
-                                slice.end - slice.start,
-                                contentH - (slice.repeatHeader?.height ?? 0),
-                              ) -
-                                (slices[i + 1]?.leadTable ? TABLE_SEAM_PX : 0) +
-                                (slices[i + 1]?.cutTable ? TABLE_SEAM_PX : 0),
-                            )),
+                        bodyWindowHeight(slice, contentH, {
+                          full: (i === slices.length - 1 && vOffset <= 0.5) || !!sectionVertical(s),
+                          hasNotes: notes.length > 0,
+                          seamExtend: seam.extend,
+                        }),
                       ...(vOffset > 0.5 || openTop > 0 || bodyLift
                         ? { marginTop: (vOffset > 0.5 ? vOffset : 0) - openTop - bodyLift }
                         : {}),
@@ -1505,6 +2023,8 @@ export function PaginationPreview({
                     >
                       <div
                         className="doc-page pv-content"
+                        data-pv-body=""
+                        data-pv-win={slice.start.toFixed(1)}
                         dangerouslySetInnerHTML={{
                           __html: cloneKids
                             ? prunedCloneHtml(
@@ -1519,19 +2039,19 @@ export function PaginationPreview({
                     </div>
                   </div>
                 )}
-                {(pageNotes[i]?.length ?? 0) > 0 && (
-                  // page-bottom footnotes (Word behavior: placed at the bottom of the page's content area, separator on top)
+                {notes.length > 0 && (
                   <div
                     className="pv-footnotes"
                     style={{
-                      left: twipsToPx(s.marginLeft),
-                      width: pageW - twipsToPx(s.marginLeft) - twipsToPx(s.marginRight),
-                      bottom: twipsToPx(s.marginBottom),
-                      height:
-                        pageNotes[i]!.reduce((sum, n) => sum + n.height, 0) + FOOTNOTE_SEPARATOR_H,
+                      left: mL,
+                      width: pageW - mL - mR,
+                      height: notesH,
+                      ...(noteArea.top === null
+                        ? { bottom: twipsToPx(s.marginBottom) }
+                        : { top: noteArea.top }),
                     }}
                   >
-                    {pageNotes[i]!.map((n) => (
+                    {notes.map((n) => (
                       // entries get reserved heights (DOM-measured at these exact styles);
                       // min-height lets a residual long entry spill into the bottom margin
                       // instead of overprinting the next entry
@@ -1545,7 +2065,7 @@ export function PaginationPreview({
                           ...(n.fontFamily ? { fontFamily: n.fontFamily } : {}),
                         }}
                       >
-                        {!n.noRefMark && <sup>{n.no}</sup>}
+                        {!n.noRefMark && <sup>{noteMarkText('footnote', n.no)}</sup>}
                         {n.richParas
                           ? n.richParas.map((para, pi) => (
                               <span key={pi}>
@@ -1566,6 +2086,9 @@ export function PaginationPreview({
                                         : undefined,
                                       fontFamily: run.fontAscii
                                         ? cssFontFamily(run.fontAscii)
+                                        : undefined,
+                                      WebkitTextStroke: run.textOutline
+                                        ? textOutlineCssValue(run.textOutline)
                                         : undefined,
                                       textTransform: run.caps === 'all' ? 'uppercase' : undefined,
                                       fontVariantCaps:
@@ -1592,9 +2115,14 @@ export function PaginationPreview({
                     <div
                       className={`pv-endnotes${rows[0].withSeparator ? ' with-separator' : ''}`}
                       style={{
-                        left: twipsToPx(s.marginLeft),
-                        width: pageW - twipsToPx(s.marginLeft) - twipsToPx(s.marginRight),
-                        top: mTop + (slice.repeatHeader?.height ?? 0) + (rows[0].top - slice.start),
+                        left: mL,
+                        width: pageW - mL - mR,
+                        top:
+                          mTop +
+                          (slice.regions ? 0 : vOffset) +
+                          (slice.repeatHeader?.height ?? 0) +
+                          (rows[0].top - slice.start) +
+                          noteArea.endnoteShift,
                       }}
                     >
                       {rows.map(({ item: n, height, withSeparator }) => (
@@ -1609,7 +2137,7 @@ export function PaginationPreview({
                           }}
                         >
                           {withSeparator && <div className="pv-endnote-separator" />}
-                          {!n.noRefMark && <sup>{toRoman(n.no)}</sup>}
+                          {!n.noRefMark && <sup>{noteMarkText('endnote', n.no)}</sup>}
                           {n.richParas
                             ? n.richParas.map((para, pi) => (
                                 <span key={pi}>
@@ -1634,6 +2162,9 @@ export function PaginationPreview({
                                         fontFamily: run.fontAscii
                                           ? cssFontFamily(run.fontAscii)
                                           : undefined,
+                                        WebkitTextStroke: run.textOutline
+                                          ? textOutlineCssValue(run.textOutline)
+                                          : undefined,
                                         textTransform: run.caps === 'all' ? 'uppercase' : undefined,
                                         fontVariantCaps:
                                           run.caps === 'small' ? 'small-caps' : undefined,
@@ -1654,7 +2185,9 @@ export function PaginationPreview({
                   <HeaderFooterArea
                     kind="footer"
                     value={parts.footer ?? { text: '' }}
-                    images={parts.footerImages?.filter((img) => !img.floating)}
+                    images={parts.footerImages?.filter(
+                      (img) => !img.floating || hfImageHangsOnPara(img),
+                    )}
                     readOnly
                     onCommit={() => {}}
                     pageNo={pageNoText}
@@ -1666,7 +2199,7 @@ export function PaginationPreview({
               </div>
               {markupOn &&
                 (() => {
-                  const contentRight = pageW - twipsToPx(s.marginRight)
+                  const contentRight = pageW - mR
                   const bubbleLeft = contentRight + BUBBLE_ENTRY
                   const bubbleW = pageW + MARKUP_EXTRA_W - BUBBLE_RIGHT_PAD - bubbleLeft
                   const headerH = slice.repeatHeader?.height ?? 0
@@ -1798,7 +2331,7 @@ export function PaginationPreview({
                               !slice.regions &&
                               p.endY >= slice.start - 0.5 &&
                               p.endY < sliceEnd + 0.5
-                            const ex = endsHere ? twipsToPx(s.marginLeft) + p.endX : contentRight
+                            const ex = endsHere ? mL + p.endX : contentRight
                             const ey = endsHere
                               ? mTop + vOffset + headerH + (p.endY - slice.start)
                               : p.anchorTop + BUBBLE_LINE_H - 4

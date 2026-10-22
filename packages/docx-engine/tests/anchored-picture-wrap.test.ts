@@ -9,20 +9,25 @@ const TIGHT =
   '<wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>'
 
 function picture(o: {
-  x: number
-  y: number
+  x?: number
+  y?: number
   cx: number
   cy: number
   behind?: boolean
   wrap?: string
   relH?: string
+  relV?: string
+  alignH?: string
+  alignV?: string
 }): string {
+  const posH = o.alignH ? `<wp:align>${o.alignH}</wp:align>` : `<wp:posOffset>${o.x}</wp:posOffset>`
+  const posV = o.alignV ? `<wp:align>${o.alignV}</wp:align>` : `<wp:posOffset>${o.y}</wp:posOffset>`
   return (
     `<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" ` +
     `relativeHeight="251658240" behindDoc="${o.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1">` +
     `<wp:simplePos x="0" y="0"/>` +
-    `<wp:positionH relativeFrom="${o.relH ?? 'column'}"><wp:posOffset>${o.x}</wp:posOffset></wp:positionH>` +
-    `<wp:positionV relativeFrom="paragraph"><wp:posOffset>${o.y}</wp:posOffset></wp:positionV>` +
+    `<wp:positionH relativeFrom="${o.relH ?? 'column'}">${posH}</wp:positionH>` +
+    `<wp:positionV relativeFrom="${o.relV ?? 'paragraph'}">${posV}</wp:positionV>` +
     `<wp:extent cx="${o.cx}" cy="${o.cy}"/>${o.wrap ?? TIGHT}<wp:docPr id="1" name="Picture 1"/>` +
     `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
     `<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Picture 1"/><pic:cNvPicPr/></pic:nvPicPr>` +
@@ -65,7 +70,7 @@ describe('anchored picture wrapping', () => {
       expect(box.bandBottomPx).toBeGreaterThan(0)
     }
     expect(boxes[0].bandTopPx).toBe(38)
-    expect(boxes[0].bandBottomPx).toBe(38 + 261)
+    expect(boxes[0].bandBottomPx).toBe(38 + 261.2)
   })
 
   it('bands a column-spanning photo row that shares its paragraph with text', async () => {
@@ -115,13 +120,64 @@ describe('anchored picture wrapping', () => {
     )
     const [left, right] = withTable.blocks[0].textboxes!
     expect(left.bandTopPx).toBe(1)
-    expect(left.bandBottomPx).toBe(1 + 174)
-    expect(right.bandBottomPx).toBe(26 + 136)
+    expect(left.bandBottomPx).toBe(1 + 173.67)
+    expect(right.bandBottomPx).toBe(26 + 135.8)
 
     const withText = await parseDocx(
       await buildDocx({ bodyXml: pics + '<w:p><w:r><w:t>text</w:t></w:r></w:p>', withImage: true }),
     )
     for (const box of withText.blocks[0].textboxes!) expect(box.bandBottomPx).toBeUndefined()
+  })
+
+  it('bands a side-wrapped picture overhanging the column with no text room beside it', async () => {
+    const square = '<wp:wrapSquare wrapText="bothSides"/>'
+    // A4 cover pinned to the paper: x = -left margin, extent = page width
+    const cover = `<w:p><w:r>${picture({ x: -914400, y: -571500, cx: 7560310, cy: 10692130, wrap: square })}</w:r></w:p>`
+    const doc = await parseDocx(await buildDocx({ bodyXml: cover, withImage: true }))
+    expect(doc.blocks[0].type).toBe('image')
+    expect(doc.blocks[0].imageBand).toBe(true)
+    expect(doc.blocks[0].anchorLine).toBeUndefined()
+
+    // overhanging the right edge alone still leaves no sliver
+    const wide = `<w:p><w:r>${picture({ x: 300000, y: 0, cx: 5731510, cy: 952500, wrap: square })}</w:r></w:p>`
+    expect(
+      (await parseDocx(await buildDocx({ bodyXml: wide, withImage: true }))).blocks[0].imageBand,
+    ).toBe(true)
+
+    // inside the column: text wraps beside it (CSS float route)
+    const inside = `<w:p><w:r>${picture({ x: 0, y: 0, cx: 2868295, cy: 2487930, wrap: square })}</w:r></w:p>`
+    const inColumn = await parseDocx(await buildDocx({ bodyXml: inside, withImage: true }))
+    expect(inColumn.blocks[0].imageBand).toBeUndefined()
+    expect(inColumn.blocks[0].anchorLine).toBeDefined()
+
+    // past the left edge but with text room on the right
+    const logo = `<w:p><w:r>${picture({ x: -457200, y: 0, cx: 1828800, cy: 952500, wrap: square })}</w:r></w:p>`
+    expect(
+      (await parseDocx(await buildDocx({ bodyXml: logo, withImage: true }))).blocks[0].imageBand,
+    ).toBeUndefined()
+  })
+
+  it('resolves wp:align (no posOffset) so a margin-centred page-sized cover takes the band', async () => {
+    const tight = '<wp:wrapTight wrapText="bothSides"/>'
+    const cover = `<w:p><w:r>${picture({ cx: 7522210, cy: 10691196, wrap: tight, behind: true, alignH: 'center', relH: 'margin', alignV: 'top', relV: 'page' })}</w:r></w:p>`
+    const doc = await parseDocx(
+      await buildDocx({
+        bodyXml: cover + '<w:p><w:r><w:t>text</w:t></w:r></w:p>',
+        withImage: true,
+      }),
+    )
+    expect(doc.blocks[0].type).toBe('image')
+    expect(doc.blocks[0].imageBand).toBe(true)
+    // column 9026 twips; the extent is 592 pt wide: centred on the margin box -> x = (451.3 - 592) / 2
+    expect(doc.blocks[0].imageOffsetXEmu).toBeCloseTo((9026 * 635 - 7522210) / 2, -3)
+    expect(doc.blocks[0].imageOffsetYEmu).toBe(0)
+    expect(doc.blocks[0].imageRelV).toBe('page')
+
+    // a right-aligned logo inside the column still floats (text room on the left)
+    const logo = `<w:p><w:r>${picture({ cx: 1828800, cy: 952500, wrap: '<wp:wrapSquare wrapText="bothSides"/>', alignH: 'right', relH: 'margin' })}</w:r></w:p>`
+    const small = await parseDocx(await buildDocx({ bodyXml: logo, withImage: true }))
+    expect(small.blocks[0].imageBand).toBeUndefined()
+    expect(small.blocks[0].imageOffsetXEmu).toBeUndefined()
   })
 
   it('bands a side-wrapped picture that cannot sit beside a floating table', async () => {
@@ -202,6 +258,32 @@ describe('anchor paragraph line', () => {
     const doc = await parseDocx(await buildDocx({ bodyXml: behind + inline, withImage: true }))
     expect(doc.blocks[0].anchorLine).toBeUndefined()
     expect(doc.blocks[1].anchorLine).toBeUndefined()
+  })
+
+  it('keeps an inline picture that shares its paragraph with one floating picture', async () => {
+    const inline =
+      `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+      `<wp:extent cx="1535430" cy="654050"/><wp:docPr id="2" name="Picture 2"/>` +
+      `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Picture 2"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip r:embed="rId10"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1535430" cy="654050"/></a:xfrm>` +
+      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>` +
+      `</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`
+    // logo row: a right-hugging floating logo and an inline logo in one
+    // textless paragraph; the single-image block kept only the floating blip
+    const para =
+      `<w:p><w:r>` +
+      picture({ x: 5082785, y: 90951, cx: 815340, cy: 678815, behind: true }) +
+      `</w:r>${inline}</w:p>`
+    const doc = await parseDocx(await buildDocx({ bodyXml: para, withImage: true }))
+    const block = doc.blocks[0]
+    expect(block.type).toBe('paragraph')
+    const images = block.runs!.filter((r) => r.image).map((r) => r.image!)
+    expect(images.map((im) => im.widthPx)).toEqual([85.6, 161.2])
+    expect(images[0].wrap).toBe('tight-right')
+    expect(images[0].offsetYEmu).toBe(90951)
+    expect(images[1].wrap).toBeUndefined()
   })
 
   it('keeps the line of a paragraph holding only VML shapetype definitions', async () => {

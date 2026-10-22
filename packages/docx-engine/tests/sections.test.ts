@@ -7,6 +7,7 @@ import {
   readSections,
   readSectionSettings,
   saveDocx,
+  sectionSettingsFromXml,
   type SaveBlock,
 } from '../src/index'
 import { buildDocx } from './helpers/build-docx'
@@ -58,6 +59,104 @@ describe('readSections enumerates all sections', () => {
     expect(sections[1].settings.pageWidth).toBe(11906)
     expect(sections[1].settings.marginTop).toBe(1440)
     expect(sections[1].firstBlockIndex).toBe(sections[0].lastBlockIndex + 1)
+  })
+
+  it('fractional pgMar / pgSz / cols values round to whole twips instead of falling back', () => {
+    const settings = sectionSettingsFromXml(
+      '<w:sectPr><w:pgSz w:w="12240.4" w:h="15840.6"/>' +
+        '<w:pgMar w:top="686.39404296875" w:right="1344.12" w:bottom="769.61" w:left="1987.19970703125" w:header="708.5" w:footer="707.4" w:gutter="0"/>' +
+        '<w:cols w:num="3" w:space="0.5" w:equalWidth="0"><w:col w:w="2140.2" w:space="0"/><w:col w:w="2140.2" w:space="0"/><w:col w:w="2140.2"/></w:cols></w:sectPr>',
+    )
+    expect(settings.pageWidth).toBe(12240)
+    expect(settings.pageHeight).toBe(15841)
+    expect(settings.marginTop).toBe(686)
+    expect(settings.marginRight).toBe(1344)
+    expect(settings.marginBottom).toBe(770)
+    expect(settings.marginLeft).toBe(1987)
+    expect(settings.headerDist).toBe(709)
+    expect(settings.footerDist).toBe(707)
+    expect(settings.colSpace).toBe(1)
+    expect(settings.colWidths).toEqual([2140, 2140, 2140])
+  })
+
+  it('applySectionSettings rewrites fractional pgMar / cols attributes in place', () => {
+    const sectPr =
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
+      '<w:pgMar w:top="686.39" w:right="1344.12" w:bottom="769.61" w:left="1987.2" w:header="708.5" w:footer="707.4" w:gutter="0"/>' +
+      '<w:cols w:num="2.0" w:space="425.6"/></w:sectPr>'
+    const settings = sectionSettingsFromXml(sectPr)
+    const out = applySectionSettings(sectPr, { ...settings, marginLeft: 1800, colSpace: 300 })
+    expect(out).toContain(
+      '<w:pgMar w:top="686" w:right="1344" w:bottom="770" w:left="1800" w:header="709" w:footer="707" w:gutter="0"/>',
+    )
+    expect(out).toContain('<w:cols w:num="2" w:space="300"/>')
+    expect(out.match(/w:space=/g)).toHaveLength(1)
+
+    const paired =
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="708" w:footer="708" w:gutter="0"/>' +
+      '<w:cols w:num="3.0" w:space="0.4" w:equalWidth="0"><w:col w:w="2140.2" w:space="0"/><w:col w:w="2140.2" w:space="0"/><w:col w:w="2140.2"/></w:cols></w:sectPr>'
+    const kept = applySectionSettings(paired, sectionSettingsFromXml(paired))
+    expect(kept).toContain(
+      '<w:cols w:num="3" w:space="0" w:equalWidth="0"><w:col w:w="2140" w:space="0"/><w:col w:w="2140" w:space="0"/><w:col w:w="2140"/></w:cols>',
+    )
+  })
+
+  it('negative pgMar top/bottom: absolute value, marked fixed, sign restored on save; gutter widens the left margin', () => {
+    const sectPr =
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="-1530" w:right="1710" w:bottom="-1710" w:left="4003" w:header="720" w:footer="720" w:gutter="245"/></w:sectPr>'
+    const settings = sectionSettingsFromXml(sectPr)
+    expect(settings).toMatchObject({
+      marginTop: 1530,
+      marginBottom: 1710,
+      marginTopFixed: true,
+      marginBottomFixed: true,
+      marginLeft: 4003 + 245,
+      gutter: 245,
+      headerDist: 720,
+      footerDist: 720,
+    })
+    expect(applySectionSettings(sectPr, settings)).toContain(
+      '<w:pgMar w:top="-1530" w:right="1710" w:bottom="-1710" w:left="4003"',
+    )
+    const plain = sectionSettingsFromXml(
+      sectPr.replace('-1530', '1530').replace('-1710', '1710').replace('w:gutter="245"', ''),
+    )
+    expect(plain.marginTopFixed).toBeUndefined()
+    expect(plain.marginBottomFixed).toBeUndefined()
+    expect(plain.gutter).toBeUndefined()
+    expect(plain.marginLeft).toBe(4003)
+    const atTop = sectionSettingsFromXml(sectPr, { gutterAtTop: true })
+    expect(atTop).toMatchObject({ marginTop: 1530 + 245, marginLeft: 4003, gutterAtTop: true })
+    expect(applySectionSettings(sectPr, atTop)).toContain(
+      '<w:pgMar w:top="-1530" w:right="1710" w:bottom="-1710" w:left="4003"',
+    )
+    // a user margin smaller than the folded gutter writes 0, never a negative value
+    expect(applySectionSettings(sectPr, { ...settings, marginLeft: 100 })).toContain('w:left="0"')
+    expect(applySectionSettings(sectPr, { ...atTop, marginTop: 100 })).toContain('w:top="0"')
+    expect(applySectionSettings(sectPr, { ...settings, marginTopFixed: false })).toContain(
+      'w:top="1530"',
+    )
+  })
+
+  it('single-quoted page attributes are read, not silently defaulted', () => {
+    // XML permits ' as the attribute delimiter; the old pattern only matched "
+    // and quietly substituted the 1-inch US Letter defaults for the real page
+    const sectPr =
+      "<w:sectPr><w:pgSz w:w='11906' w:h='16838'/>" +
+      "<w:pgMar w:top='720' w:right='900' w:bottom='1080' w:left='1440' w:header='360' w:footer='360' w:gutter='0'/>" +
+      "<w:cols w:num='2' w:space='240'/></w:sectPr>"
+    expect(sectionSettingsFromXml(sectPr)).toMatchObject({
+      pageWidth: 11906,
+      pageHeight: 16838,
+      marginTop: 720,
+      marginRight: 900,
+      marginBottom: 1080,
+      marginLeft: 1440,
+      headerDist: 360,
+      footerDist: 360,
+      columns: 2,
+      colSpace: 240,
+    })
   })
 
   it('a section-break paragraph with visible text stays an editable paragraph (tdf#159032)', async () => {
@@ -188,6 +287,47 @@ describe('readSections enumerates all sections', () => {
     )
   })
 
+  it('self-closing w:sectPr is expanded so a rewritten child lands inside it', async () => {
+    // The open-tag anchor also matched <w:sectPr/> whole, so the new child was
+    // written after the element: a sibling of w:sectPr, not a CT_SectPr child.
+    const settings = sectionSettingsFromXml(
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>',
+    )
+    const rewritten = applySectionSettings('<w:sectPr/>', settings)
+    expect(rewritten).toBe(
+      '<w:sectPr>' +
+        '<w:pgSz w:w="11906" w:h="16838"/>' +
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>' +
+        '</w:sectPr>',
+    )
+    expect(applySectionStartType('<w:sectPr/>', 'continuous')).toBe(
+      '<w:sectPr><w:type w:val="continuous"/></w:sectPr>',
+    )
+
+    // same anchor on the save path, for the per-section reference injection
+    const parsed = await parseDocx(
+      await buildDocx({ bodyXml: P('a') + '<w:p><w:pPr><w:sectPr/></w:pPr></w:p>' + P('b') }),
+    )
+    const sections = readSections(parsed)
+    const visible: SaveBlock[] = parsed.blocks
+      .filter((b) => !b.hidden && b.docxIndex !== null)
+      .map((b) => ({ kind: 'original', docxIndex: b.docxIndex! }))
+    const saved = await saveDocx(parsed, visible, {
+      sectionHf: [
+        {
+          lastBlockIndex: sections[0].lastBlockIndex,
+          kind: 'header',
+          hf: { text: '\u7b2c\u4e00\u8282\u9875\u7709' },
+        },
+      ],
+    })
+    const zip = await (await import('jszip')).default.loadAsync(saved)
+    const docXml = await zip.file('word/document.xml')!.async('string')
+    expect(docXml).toMatch(/<w:pPr><w:sectPr><w:headerReference w:type="default"/)
+    expect(docXml).not.toContain('<w:sectPr/>')
+  })
+
   it('section edit round-trip: non-final sectPr rewritten via kind:xml, final section via options.section', async () => {
     const bytes = await buildDocx({
       bodyXml: P('第一节') + sectBreakPara({ landscape: true }) + P('第二节'),
@@ -272,7 +412,11 @@ describe('sectionHf per-section headers/footers', () => {
 
     const saved = await saveDocx(parsed, visibleBlocks(parsed), {
       sectionHf: [
-        { lastBlockIndex: sections[0].lastBlockIndex, kind: 'header', hf: { text: '第一节页眉' } },
+        {
+          lastBlockIndex: sections[0].lastBlockIndex,
+          kind: 'header',
+          hf: { text: '\u7b2c\u4e00\u8282\u9875\u7709' },
+        },
       ],
     })
     const reparsed = await parseDocx(saved)
@@ -326,6 +470,49 @@ describe('sectionHf per-section headers/footers', () => {
     expect(docXml.match(/<w:headerReference/g)).toHaveLength(1)
   })
 
+  it('section with a paired reference: rewrites that part, injects no duplicate', async () => {
+    // the loop matched only the self-closing double-quoted form, so this
+    // reference read as absent and a second footerReference was written
+    const FTR =
+      '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:p><w:r><w:t>\u65e7\u9875\u811a</w:t></w:r></w:p></w:ftr>'
+    const bytes = await buildDocx({
+      bodyXml:
+        P('\u7b2c\u4e00\u8282') +
+        sectBreakPara({
+          extra: '<w:footerReference w:type="default" r:id="rId61"></w:footerReference>',
+        }) +
+        P('\u7b2c\u4e8c\u8282'),
+      extraRels:
+        '<Relationship Id="rId61" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>',
+      extraParts: [
+        {
+          path: 'word/footer1.xml',
+          xml: FTR,
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml',
+        },
+      ],
+    })
+    const parsed = await parseDocx(bytes)
+    const sections = readSections(parsed)
+    expect(sections[0].footerRefs.default).toBe('rId61')
+
+    const saved = await saveDocx(parsed, visibleBlocks(parsed), {
+      sectionHf: [
+        {
+          lastBlockIndex: sections[0].lastBlockIndex,
+          kind: 'footer',
+          hf: { text: '\u65b0\u9875\u811a' },
+        },
+      ],
+    })
+    const zip = await (await import('jszip')).default.loadAsync(saved)
+    expect(await zip.file('word/footer1.xml')!.async('string')).toContain('\u65b0\u9875\u811a')
+    expect(zip.file('word/footer2.xml')).toBeNull()
+    const docXml = await zip.file('word/document.xml')!.async('string')
+    expect(docXml.match(/<w:footerReference/g)).toHaveLength(1)
+  })
+
   it('kind:xml section-break block (layout rewritten in the same pass) can also receive references', async () => {
     const bodyXml = P('第一节') + sectBreakPara({ landscape: true }) + P('第二节')
     const parsed = await parseDocx(await buildDocx({ bodyXml }))
@@ -357,6 +544,146 @@ describe('sectionHf per-section headers/footers', () => {
     const rId = secs[0].footerRefs.default
     expect(rId).toBeDefined()
     expect(reparsed.hfParts?.[rId!]?.text).toContain('第一节页脚')
+  })
+})
+
+describe('sectionHfUnlink (Link to Previous switched on)', () => {
+  const HDR = (text: string) =>
+    '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    `<w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:hdr>`
+  const headerRel = (rId: string, file: string) =>
+    `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="${file}"/>`
+  const part = (path: string, xml: string) => ({
+    path,
+    xml,
+    contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml',
+  })
+  const visibleBlocks = (parsed: Awaited<ReturnType<typeof parseDocx>>): SaveBlock[] =>
+    parsed.blocks
+      .filter((b) => !b.hidden && b.docxIndex !== null)
+      .map((b) => ({ kind: 'original', docxIndex: b.docxIndex! }))
+
+  it('removes a break-paragraph section reference so the section inherits again', async () => {
+    const bodyXml =
+      P('one') +
+      sectBreakPara({ extra: '<w:headerReference w:type="default" r:id="rId60"/>' }) +
+      P('two') +
+      sectBreakPara({ extra: '<w:headerReference w:type="default" r:id="rId61"/>' }) +
+      P('three')
+    const parsed = await parseDocx(
+      await buildDocx({
+        bodyXml,
+        extraRels: headerRel('rId60', 'header1.xml') + headerRel('rId61', 'header2.xml'),
+        extraParts: [
+          part('word/header1.xml', HDR('first')),
+          part('word/header2.xml', HDR('second')),
+        ],
+      }),
+    )
+    const sections = readSections(parsed)
+    expect(sections[1].headerRefs.default).toBe('rId61')
+    const saved = await saveDocx(parsed, visibleBlocks(parsed), {
+      sectionHfUnlink: [{ lastBlockIndex: sections[1].lastBlockIndex, kind: 'header' }],
+    })
+    const secs = readSections(await parseDocx(saved))
+    expect(secs[0].headerRefs.default).toBe('rId60')
+    expect(secs[1].headerRefs.default).toBeUndefined()
+    expect(secs[2].headerRefs.default).toBeUndefined()
+  })
+
+  it('removes the trailing sectPr reference and leaves first/even variants alone', async () => {
+    const parsed = await parseDocx(
+      await buildDocx({
+        bodyXml:
+          P('one') +
+          sectBreakPara({ extra: '<w:headerReference w:type="default" r:id="rId60"/>' }) +
+          P('two'),
+        sectPrExtra:
+          '<w:headerReference w:type="default" r:id="rId61"/><w:headerReference w:type="first" r:id="rId62"/>',
+        extraRels:
+          headerRel('rId60', 'header1.xml') +
+          headerRel('rId61', 'header2.xml') +
+          headerRel('rId62', 'header3.xml'),
+        extraParts: [
+          part('word/header1.xml', HDR('first')),
+          part('word/header2.xml', HDR('last')),
+          part('word/header3.xml', HDR('title')),
+        ],
+      }),
+    )
+    const sections = readSections(parsed)
+    const last = sections[sections.length - 1]
+    expect(last.headerRefs.default).toBe('rId61')
+    const saved = await saveDocx(parsed, visibleBlocks(parsed), {
+      sectionHfUnlink: [{ lastBlockIndex: last.lastBlockIndex, kind: 'header' }],
+    })
+    const secs = readSections(await parseDocx(saved))
+    expect(secs[1].headerRefs.default).toBeUndefined()
+    expect(secs[1].headerRefs.first).toBe('rId62')
+    expect(secs[0].headerRefs.default).toBe('rId60')
+  })
+})
+
+describe('sectionHf / sectionHfUnlink with first-page variants', () => {
+  const visibleBlocks = (parsed: Awaited<ReturnType<typeof parseDocx>>): SaveBlock[] =>
+    parsed.blocks
+      .filter((b) => !b.hidden && b.docxIndex !== null)
+      .map((b) => ({ kind: 'original', docxIndex: b.docxIndex! }))
+
+  it('a first-page edit on a non-final section creates a w:type="first" reference of its own', async () => {
+    const parsed = await parseDocx(
+      await buildDocx({ bodyXml: P('one') + sectBreakPara() + P('two') }),
+    )
+    const sections = readSections(parsed)
+    const saved = await saveDocx(parsed, visibleBlocks(parsed), {
+      sectionHf: [
+        {
+          lastBlockIndex: sections[0].lastBlockIndex,
+          kind: 'header',
+          variant: 'first',
+          hf: { text: 'title page' },
+        },
+      ],
+    })
+    const reparsed = await parseDocx(saved)
+    const secs = readSections(reparsed)
+    expect(secs[0].headerRefs.first).toBeDefined()
+    expect(secs[0].headerRefs.default).toBeUndefined()
+    expect(reparsed.hfParts?.[secs[0].headerRefs.first!]?.text).toContain('title page')
+  })
+
+  it('unlinking the first-page variant leaves the default reference in place', async () => {
+    const HDR = (t: string) =>
+      '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:p><w:r><w:t>${t}</w:t></w:r></w:p></w:hdr>`
+    const rel = (rId: string, file: string) =>
+      `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="${file}"/>`
+    const ct = 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'
+    const parsed = await parseDocx(
+      await buildDocx({
+        bodyXml:
+          P('one') +
+          sectBreakPara({
+            extra:
+              '<w:headerReference w:type="default" r:id="rId60"/><w:headerReference w:type="first" r:id="rId61"/>',
+          }) +
+          P('two'),
+        extraRels: rel('rId60', 'header1.xml') + rel('rId61', 'header2.xml'),
+        extraParts: [
+          { path: 'word/header1.xml', xml: HDR('default'), contentType: ct },
+          { path: 'word/header2.xml', xml: HDR('first'), contentType: ct },
+        ],
+      }),
+    )
+    const sections = readSections(parsed)
+    const saved = await saveDocx(parsed, visibleBlocks(parsed), {
+      sectionHfUnlink: [
+        { lastBlockIndex: sections[0].lastBlockIndex, kind: 'header', variant: 'first' },
+      ],
+    })
+    const secs = readSections(await parseDocx(saved))
+    expect(secs[0].headerRefs.first).toBeUndefined()
+    expect(secs[0].headerRefs.default).toBe('rId60')
   })
 })
 
@@ -397,6 +724,40 @@ describe('column widths + section bidi (P3 pdf2docx support)', () => {
     expect(applySectionSettings(once, parsed)).toBe(once)
   })
 
+  it('colWidths is read back from w:col written as an empty element pair', async () => {
+    const { sectionSettingsFromXml } = await import('../src/index')
+    // the old pattern required the self-closing spelling, so a paired w:col left
+    // colWidths undefined and the unequal widths were lost on the next save
+    const paired =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:cols w:num="3" w:space="425" w:equalWidth="0">' +
+      '<w:col w:w="2000"></w:col><w:col w:w="3000" w:space="425"/>' +
+      '<w:col w:w="4390"></w:col></w:cols></w:sectPr>'
+    const parsed = sectionSettingsFromXml(paired)
+    expect(parsed.columns).toBe(3)
+    expect(parsed.colWidths).toEqual([2000, 3000, 4390])
+    // the writer reads the current widths with the same pattern, so a paired
+    // w:cols element round-trips untouched instead of being rebuilt
+    const cols = /<w:cols[\s\S]*?<\/w:cols>/.exec(paired)![0]
+    expect(applySectionSettings(paired, parsed)).toContain(cols)
+  })
+
+  it('vAlign and bidi are read from the empty element pair spelling', async () => {
+    const { sectionSettingsFromXml } = await import('../src/index')
+    // both flags were matched self-closing only, so a paired spelling was read as
+    // "not set": the page lost its vertical alignment and an RTL section came back LTR
+    const paired =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:bidi></w:bidi><w:vAlign w:val="center"></w:vAlign></w:sectPr>'
+    expect(sectionSettingsFromXml(paired)).toMatchObject({ vAlign: 'center', bidi: true })
+    // the self-closing spelling still reads, and w:bidiVisual is not w:bidi
+    const selfClosing =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:bidiVisual/><w:vAlign w:val="both"/></w:sectPr>'
+    expect(sectionSettingsFromXml(selfClosing)).toMatchObject({ vAlign: 'both' })
+    expect(sectionSettingsFromXml(selfClosing).bidi).toBeUndefined()
+  })
+
   it('undefined bidi leaves an existing w:bidi untouched; false removes it', async () => {
     const { sectionSettingsFromXml } = await import('../src/index')
     const withBidi = BASE.replace('</w:sectPr>', '<w:bidi/></w:sectPr>')
@@ -405,6 +766,15 @@ describe('column widths + section bidi (P3 pdf2docx support)', () => {
     expect(kept).toContain('<w:bidi/>')
     const removed = applySectionSettings(withBidi, { ...base, bidi: false })
     expect(removed).not.toContain('<w:bidi/>')
+  })
+
+  it('bidi: true over an explicit w:val="0" turns the section RTL', async () => {
+    const { sectionSettingsFromXml } = await import('../src/index')
+    const off = BASE.replace('</w:sectPr>', '<w:bidi w:val="0"/></w:sectPr>')
+    const base = sectionSettingsFromXml(BASE)
+    const out = applySectionSettings(off, { ...base, bidi: true })
+    expect(out.match(/<w:bidi/g)).toHaveLength(1)
+    expect(sectionSettingsFromXml(out).bidi).toBe(true)
   })
 
   it('NewImage posOffsetEmu positions a floating image numerically', async () => {
@@ -465,6 +835,67 @@ describe('pgNumType page numbering', () => {
     const secs = readSections(await parseDocx(saved))
     expect(secs[0].pageNumberFmt).toBe('upperRoman')
     expect(secs[0].pageNumberStart).toBe(5)
+  })
+})
+
+describe('sectPr tags written as empty element pairs', () => {
+  it('applyPageNumType / applySectionStartType / applyTitlePg replace the pair, never both', async () => {
+    const { applyPageNumType, applyTitlePg } = await import('../src/index')
+    // <w:pgNumType ...></w:pgNumType> is as valid as the self-closing spelling; the
+    // strip only understood the latter, so the rewrite left the old copy in place and
+    // wrote the tag a second time into the same sectPr
+    const base =
+      '<w:sectPr><w:type w:val="continuous"></w:type>' +
+      '<w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgNumType w:fmt="lowerRoman" w:start="3"></w:pgNumType>' +
+      '<w:cols w:space="425"/><w:titlePg></w:titlePg></w:sectPr>'
+
+    const numbered = applyPageNumType(base, 'upperRoman', 5)
+    expect(numbered.match(/<w:pgNumType/g)).toHaveLength(1)
+    expect(numbered).toContain('<w:pgNumType w:fmt="upperRoman" w:start="5"/><w:cols')
+    const started = applySectionStartType(base, 'oddPage')
+    expect(started.match(/<w:type/g)).toHaveLength(1)
+    expect(started).toContain('<w:type w:val="oddPage"/><w:pgSz')
+    const titled = applyTitlePg(base, true)
+    expect(titled.match(/<w:titlePg/g)).toHaveLength(1)
+    expect(titled).toContain('<w:titlePg/>')
+
+    // the removal paths take the pair with them
+    expect(applyPageNumType(base, undefined, undefined)).not.toContain('pgNumType')
+    expect(applySectionStartType(base, 'nextPage')).not.toContain('<w:type')
+    expect(applyTitlePg(base, false)).not.toContain('titlePg')
+  })
+
+  it('section bidi round-trips a paired element once and honours an explicit w:val', async () => {
+    const { applySectionSettings, sectionSettingsFromXml } = await import('../src/index')
+    const base =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>' +
+      '<w:cols w:space="425"/></w:sectPr>'
+
+    // the reader learned the pair but the writer still probed for <w:bidi/>, so
+    // re-applying parsed settings wrote a second w:bidi into the same sectPr
+    const paired = base.replace('</w:sectPr>', '<w:bidi></w:bidi></w:sectPr>')
+    const once = applySectionSettings(paired, { ...sectionSettingsFromXml(paired), bidi: true })
+    expect(once.match(/<w:bidi/g)).toHaveLength(1)
+    // and the off path has to take the pair with it, not only a self-closing tag
+    const off = applySectionSettings(paired, { ...sectionSettingsFromXml(paired), bidi: false })
+    expect(off).not.toContain('bidi')
+
+    // ST_OnOff: an explicit off value is off, whichever quote style wrote it
+    for (const tag of ['<w:bidi w:val="0"/>', "<w:bidi w:val='0'/>", '<w:bidi w:val="false"/>']) {
+      expect(
+        sectionSettingsFromXml(base.replace('</w:sectPr>', tag + '</w:sectPr>')).bidi,
+      ).toBeUndefined()
+    }
+    expect(
+      sectionSettingsFromXml(base.replace('</w:sectPr>', '<w:bidi w:val="1"/></w:sectPr>')).bidi,
+    ).toBe(true)
+
+    // w:vAlign is read off its start tag, so it follows the same quote rule
+    expect(
+      sectionSettingsFromXml(base.replace('</w:sectPr>', "<w:vAlign w:val='bottom'/></w:sectPr>")),
+    ).toMatchObject({ vAlign: 'bottom' })
   })
 })
 
@@ -586,6 +1017,26 @@ describe('pgBorders details', () => {
     expect(s.pageBorderProps?.color).toBeUndefined()
   })
 
+  it('art borders keep w:sz as the pattern height in points and read zOrder', async () => {
+    const { sectionSettingsFromXml } = await import('../src/section')
+    const s = sectionSettingsFromXml(
+      '<w:sectPr><w:pgBorders w:offsetFrom="page" w:zOrder="back">' +
+        '<w:top w:val="gems" w:sz="16" w:space="24" w:color="auto"/>' +
+        '<w:left w:val="single" w:sz="16" w:space="24" w:color="auto"/>' +
+        '</w:pgBorders></w:sectPr>',
+    )
+    expect(s.pageBorderProps).toEqual({
+      offsetFrom: 'page',
+      zOrder: 'back',
+      spacePt: 24,
+      widthPt: 16,
+      sides: {
+        top: { val: 'gems', widthPt: 16, spacePt: 24, art: true },
+        left: { val: 'single', widthPt: 2, spacePt: 24 },
+      },
+    })
+  })
+
   it('none-only sides leave pageBorderProps unset', async () => {
     const { sectionSettingsFromXml } = await import('../src/section')
     const s = sectionSettingsFromXml(
@@ -593,5 +1044,78 @@ describe('pgBorders details', () => {
     )
     expect(s.pageBorder).toBe(false)
     expect(s.pageBorderProps).toBeUndefined()
+  })
+})
+
+describe('sectPr w:lnNumType', () => {
+  it('reads countBy/start/distance/restart; omitted restart is per page like Word', async () => {
+    const { sectionSettingsFromXml } = await import('../src/section')
+    const ln = (attrs: string) =>
+      sectionSettingsFromXml(`<w:sectPr><w:lnNumType ${attrs}/></w:sectPr>`).lineNumbers
+    expect(ln('w:countBy="1" w:restart="continuous"')).toEqual({
+      countBy: 1,
+      start: 1,
+      restart: 'continuous',
+    })
+    expect(ln('w:countBy="5" w:start="10" w:distance="720" w:restart="newSection"')).toEqual({
+      countBy: 5,
+      start: 11,
+      distance: 720,
+      restart: 'newSection',
+    })
+    expect(ln('w:countBy="1"')).toEqual({ countBy: 1, start: 1, restart: 'newPage' })
+    expect(ln('w:restart="bogus"')).toEqual({ countBy: 1, start: 1, restart: 'newPage' })
+  })
+
+  it('w:start counts skipped lines: the first visible number is start + 1', async () => {
+    const { lineNumberingOf } = await import('../src/section')
+    expect(lineNumberingOf('<w:lnNumType w:start="0"/>')?.start).toBe(1)
+    expect(lineNumberingOf('<w:lnNumType w:start="4"/>')?.start).toBe(5)
+    expect(lineNumberingOf('<w:lnNumType w:start="-3"/>')?.start).toBe(1)
+  })
+
+  it('is absent without the element and survives a settings round trip', async () => {
+    const { sectionSettingsFromXml, applySectionSettings } = await import('../src/section')
+    expect(
+      sectionSettingsFromXml('<w:sectPr><w:cols w:space="425"/></w:sectPr>').lineNumbers,
+    ).toBeUndefined()
+    const xml =
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="851" w:footer="992" w:gutter="0"/>' +
+      '<w:lnNumType w:countBy="1" w:restart="continuous"/><w:cols w:space="425"/></w:sectPr>'
+    const s = sectionSettingsFromXml(xml)
+    const out = applySectionSettings(xml, { ...s, marginLeft: 1000 })
+    expect(out).toContain('<w:lnNumType w:countBy="1" w:restart="continuous"/>')
+  })
+
+  it('paragraph w:suppressLineNumbers is parsed tri-state', async () => {
+    const { parseDocx } = await import('../src/index')
+    const bytes = await buildDocx({
+      bodyXml:
+        '<w:p><w:pPr><w:suppressLineNumbers/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:suppressLineNumbers w:val="0"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>' +
+        P('c'),
+    })
+    const doc = await parseDocx(bytes)
+    expect(doc.blocks.slice(0, 3).map((b) => b.format?.suppressLineNumbers)).toEqual([
+      true,
+      false,
+      undefined,
+    ])
+  })
+
+  it('style w:suppressLineNumbers is tri-state so a child style can re-enable numbering', async () => {
+    const { parseDocx } = await import('../src/index')
+    const bytes = await buildDocx({
+      bodyXml: P('a'),
+      extraStylesXml:
+        '<w:style w:type="paragraph" w:styleId="Quiet"><w:name w:val="Quiet"/><w:basedOn w:val="Normal"/>' +
+        '<w:pPr><w:suppressLineNumbers/></w:pPr></w:style>' +
+        '<w:style w:type="paragraph" w:styleId="Loud"><w:name w:val="Loud"/><w:basedOn w:val="Quiet"/>' +
+        '<w:pPr><w:suppressLineNumbers w:val="0"/></w:pPr></w:style>' +
+        '<w:style w:type="paragraph" w:styleId="Inherit"><w:name w:val="Inherit"/><w:basedOn w:val="Quiet"/></w:style>',
+    })
+    const doc = await parseDocx(bytes)
+    const flag = (id: string) => doc.styles.get(id)?.display?.suppressLineNumbers
+    expect([flag('Quiet'), flag('Loud'), flag('Inherit')]).toEqual([true, false, true])
   })
 })

@@ -438,13 +438,20 @@ async function siblingHtmlReferences(
         // Refuse to load an unexpectedly huge sibling just for GC. Preserving
         // all candidates is the safe fallback when its references are unknown.
         if (info.size > 16 * 1024 * 1024) return new Set(ownedNames)
-        const scan = scanImageSources(await readFile(path, 'utf8'))
+        const text = await readFile(path, 'utf8')
+        const scan = scanImageSources(text)
         // A browser may still recover an image source from malformed HTML in a
         // way this deliberately small parser cannot prove. Keep every owned
         // candidate rather than collecting a possibly referenced file.
         if (scan.ambiguousHtml) return new Set(ownedNames)
         for (const { source } of scan.ranges) {
           const name = ownedNameForSource(source)
+          if (name && ownedNames.has(name)) references.add(name)
+        }
+        // A sibling may hold an asset open from a CSS url() the <img> scan
+        // cannot see; the same reference set drives its survival here.
+        for (const match of scanCssUrls(text)) {
+          const name = ownedNameForSource(match.source)
           if (name && ownedNames.has(name)) references.add(name)
         }
       } catch {
@@ -838,8 +845,75 @@ function scanImageSources(markdown: string): ImageSourceScan {
   return { ranges, ambiguousHtml: html.ambiguousHtml }
 }
 
+/**
+ * html-asset:// serve gate. Root directories ("/", "C:\\") already end in a
+ * separator, so `dir + sep` would 403 every sibling image of a root document.
+ */
+export function isInDocDir(target: string, dir: string, separator: string = sep): boolean {
+  if (target === dir) return false
+  const prefix = dir.endsWith(separator) ? dir : dir + separator
+  return target.startsWith(prefix)
+}
+
 export function extractHtmlImageSources(markdown: string): string[] {
   return scanImageSources(markdown).ranges.map((range) => range.source)
+}
+
+/**
+ * The <img src> references of an HTML document, read with no Markdown
+ * semantics: an indented line is pretty-printed markup, not a code block, and
+ * `![alt](src)` is literal text. The Markdown-aware scan above skips every
+ * indented <img>, which is nearly all of them in formatted HTML.
+ */
+export function extractDocumentImageSources(html: string): string[] {
+  return htmlImageSourceRanges(html, []).ranges.map((range) => range.source)
+}
+
+export interface CssUrlMatch {
+  start: number
+  end: number
+  source: string
+  /** the delimiter as written, so a rewrite reproduces it (`&quot;` inside a style attribute) */
+  quote: string
+}
+
+/**
+ * Every CSS url(...) reference: <style> rules and inline style attributes
+ * alike. A DOM serializer escapes the quotes inside a style attribute, so
+ * `url(&quot;…&quot;)` / `url(&#39;…&#39;)` count as quoted too.
+ */
+export function scanCssUrls(text: string): CssUrlMatch[] {
+  const out: CssUrlMatch[] = []
+  const re =
+    /url\(\s*(?:"([^"\n]*)"|'([^'\n]*)'|(&quot;|&#34;|&#39;|&apos;)([^\n]*?)\3|([^)"'\s]+))\s*\)/gi
+  for (const match of text.matchAll(re)) {
+    const source = match[1] ?? match[2] ?? match[4] ?? match[5] ?? ''
+    if (!source) continue
+    out.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      source,
+      quote: match[1] !== undefined ? '"' : match[2] !== undefined ? "'" : (match[3] ?? ''),
+    })
+  }
+  return out
+}
+
+/**
+ * Every local source a document still points at: <img src> plus CSS url().
+ * A style rule or an inline background-image holds an owned asset just as
+ * firmly as an <img> does, and single-file-html.ts inlines exactly these
+ * sources, so a CSS reference is a supported form rather than an accident.
+ * The asset GC decides what to collect from this set, so a reference form
+ * missing here is deleted from disk while the saved text still points at it.
+ */
+export function extractHtmlAssetReferences(html: string): string[] {
+  const sources = new Set<string>()
+  for (const source of extractHtmlImageSources(html)) {
+    if (source) sources.add(source)
+  }
+  for (const match of scanCssUrls(html)) sources.add(match.source)
+  return [...sources]
 }
 
 function encodeHtmlAttributeReplacement(value: string, quote: '"' | "'" | null): string {
@@ -861,7 +935,23 @@ export function rewriteHtmlImageSources(
   rewrites: ReadonlyMap<string, string>,
 ): string {
   if (rewrites.size === 0) return markdown
-  const ranges = scanImageSources(markdown).ranges
+  return rewriteImageRanges(markdown, scanImageSources(markdown).ranges, rewrites)
+}
+
+/** `rewriteHtmlImageSources` for an HTML document: see `extractDocumentImageSources`. */
+export function rewriteDocumentImageSources(
+  html: string,
+  rewrites: ReadonlyMap<string, string>,
+): string {
+  if (rewrites.size === 0) return html
+  return rewriteImageRanges(html, htmlImageSourceRanges(html, []).ranges, rewrites)
+}
+
+function rewriteImageRanges(
+  markdown: string,
+  ranges: readonly DestinationRange[],
+  rewrites: ReadonlyMap<string, string>,
+): string {
   let cursor = 0
   let output = ''
   for (const range of ranges) {

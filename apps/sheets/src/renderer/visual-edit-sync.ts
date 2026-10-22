@@ -4,7 +4,7 @@
  * the App component passes a VisualSyncContext built fresh per call so refs
  * and state never go stale.
  */
-import { parseRange } from '../domain/cell-address'
+import { parseRange } from '@genoffice/xlsx-gateway/domain/cell-address'
 import { chartCategoryVector, seriesOrientation } from './chart-category-vector'
 import {
   applyChartStateEdit,
@@ -13,8 +13,8 @@ import {
   type CellBounds,
   type ChartVisualState,
   type SheetVisual,
-} from '../domain/chart-visual'
-import type { InMemoryWorkbookAdapter } from '../domain/in-memory-workbook'
+} from '@genoffice/xlsx-gateway/domain/chart-visual'
+import type { InMemoryWorkbookAdapter } from '@genoffice/xlsx-gateway/domain/in-memory-workbook'
 import type { WorkbookVisualObject } from '../shared/desktop-api'
 import {
   cacheLessRefs,
@@ -431,6 +431,12 @@ export function applyShapeEdit(
             ...(changes.frameSize
               ? { frameWidth: changes.frameSize.width, frameHeight: changes.frameSize.height }
               : {}),
+            ...(changes.rotation === undefined ? {} : { rotation: changes.rotation }),
+            ...(changes.flipH === undefined ? {} : { flipH: changes.flipH }),
+            ...(changes.flipV === undefined ? {} : { flipV: changes.flipV }),
+            ...(changes.altText === undefined ? {} : { altText: changes.altText }),
+            ...(changes.editAs === undefined ? {} : { editAs: changes.editAs }),
+            ...(changes.hyperlink === undefined ? {} : { hyperlink: changes.hyperlink }),
           },
     )
     if (changes.remove) clearVisualSelection(visualId)
@@ -462,17 +468,12 @@ export function applyShapeEdit(
     clearVisualSelection(visualId)
   } else if (!updateVisualAdd(state.editJournal, visualId, changes)) {
     const visual = state.file.visuals.find((candidate) => candidate.id === visualId)
-    if (changes.text !== undefined || changes.anchor === undefined) {
+    const { text, remove: _remove, ...fileChanges } = changes
+    if (text !== undefined || Object.keys(fileChanges).length === 0) {
       ctx.setMessage(t('appFileVisualMoveDeleteOnly'))
       return
     }
-    if (
-      !visual ||
-      !recordVisualEdit(state.editJournal, visual, {
-        anchor: changes.anchor,
-        ...(changes.frameSize ? { frameSize: changes.frameSize } : {}),
-      })
-    ) {
+    if (!visual || !recordVisualEdit(state.editJournal, visual, fileChanges)) {
       ctx.setMessage(t('appVisualNoMove'))
       return
     }
@@ -497,7 +498,11 @@ export function applyShapeEdit(
       ? t('appVisualDeleted')
       : changes.text !== undefined
         ? t('appShapeTextUpdated')
-        : t('appShapeMoved'),
+        : changes.fillColor !== undefined || changes.lineColor !== undefined
+          ? t('appShapeStyleUpdated')
+          : changes.anchor && Object.keys(changes).length <= 2
+            ? t('appShapeMoved')
+            : t('appVisualArranged'),
   )
   ctx.refreshLazyVisuals(state)
 }

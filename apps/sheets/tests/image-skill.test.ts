@@ -37,7 +37,9 @@ describe('image skill: image_search', () => {
     stubDesktopApi({
       imageSearch: vi.fn().mockResolvedValue({ images: [], method: 'error', error: 'quota' }),
     })
-    const result = await createImageSkill(hostApi()).executeTool(call('image_search', { query: 'cat' }))
+    const result = await createImageSkill(hostApi()).executeTool(
+      call('image_search', { query: 'cat' }),
+    )
     expect(result.isError).toBe(true)
     expect(result.output).toContain('quota')
     expect(result.output).toContain('not an empty result')

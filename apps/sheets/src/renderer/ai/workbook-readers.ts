@@ -5,10 +5,11 @@
  * WorkbookReadContext closing over its refs.
  */
 import type { IRange } from '@univerjs/core'
-import { columnLabel, parseAddress } from '../../domain/cell-address'
+import { columnLabel, parseAddress } from '@genoffice/xlsx-gateway/domain/cell-address'
 import { MAX_PATCH_ENTRY_BYTES } from '../../shared/desktop-api'
-import type { InMemoryWorkbookAdapter } from '../../domain/in-memory-workbook'
-import type { CellFormatState, CellScalar } from '../../domain/workbook.types'
+import type { InMemoryWorkbookAdapter } from '@genoffice/xlsx-gateway/domain/in-memory-workbook'
+import type { CellFormatState, CellScalar } from '@genoffice/xlsx-gateway/domain/workbook.types'
+import { planFileTableRegistrations } from '../file-tables'
 import { toSelectionFormat } from '../selection-format'
 import { lazyCellReader } from '../univer-sync'
 import { lazySheetScreenExtent, type LazyWorkbookState, type UniverRuntime } from '../univer-state'
@@ -43,7 +44,10 @@ export function readSheetFeatures(ctx: WorkbookReadContext, sheetIdInput?: strin
     state?.editJournal.sheetProtection.get(sheetId) ??
     state?.sheetProtections.get(sheetId)?.protected ??
     false
-  const status = [hidden ? 'hidden' : 'visible', isProtected ? 'protected' : 'unprotected']
+  const status = [
+    fileMeta?.veryHidden ? 'veryHidden (cannot be unhidden)' : hidden ? 'hidden' : 'visible',
+    isProtected ? 'protected' : 'unprotected',
+  ]
   try {
     const freeze = worksheet.getFreeze()
     if (freeze.ySplit > 0 || freeze.xSplit > 0) {
@@ -63,6 +67,25 @@ export function readSheetFeatures(ctx: WorkbookReadContext, sheetIdInput?: strin
         'sections below may be missing rules that exist in the file. Do NOT modify or clear those ' +
         'features based on this read — retry after indexing completes.',
     )
+  }
+
+  const tableLines: string[] = []
+  if (state) {
+    for (const table of planFileTableRegistrations(state.file.sheets)) {
+      if (table.sheetId !== sheetId) continue
+      tableLines.push(
+        `- ${table.tableName}: ${a1(table.range)} columns[${(table.columns ?? []).join(', ')}] (from file; structure read-only)`,
+      )
+    }
+    for (const table of state.editJournal.tableAdds) {
+      if (table.sheetId !== sheetId) continue
+      tableLines.push(
+        `- ${table.name}: ${a1(table.area)} columns[${table.columnNames.join(', ')}] (added this session)`,
+      )
+    }
+  }
+  if (tableLines.length > 0) {
+    lines.push('Tables (formulas may use TableName[Column] with this exact casing):', ...tableLines)
   }
 
   if (fileMeta && fileMeta.pivotTables.length > 0) {
@@ -394,8 +417,11 @@ export function readCells(
   ctx: WorkbookReadContext,
   addresses: readonly string[],
   sheetId?: string,
-): Record<string, { value: CellScalar; formula?: string }> {
-  const result: Record<string, { value: CellScalar; formula?: string }> = {}
+): Record<string, { value: CellScalar; formula?: string; rawValue?: CellScalar | undefined }> {
+  const result: Record<
+    string,
+    { value: CellScalar; formula?: string; rawValue?: CellScalar | undefined }
+  > = {}
   const workbook = ctx.univerRef.current?.univerAPI.getActiveWorkbook()
   const state = ctx.lazyWorkbookRef.current
   if (state) {
@@ -405,9 +431,12 @@ export function readCells(
     const reader = lazyCellReader(worksheet)
     for (const address of addresses) {
       const cell = reader(address)
+      // `value` is the rendered text and `rawValue` the model value behind it;
+      // machine-facing callers (the MCP bridge, the save pipeline) need the
+      // latter — see modelCellValue in univer-sync.ts.
       result[address] = cell.formula
-        ? { value: cell.value, formula: cell.formula }
-        : { value: cell.value }
+        ? { value: cell.value, formula: cell.formula, rawValue: cell.rawValue }
+        : { value: cell.value, rawValue: cell.rawValue }
     }
     return result
   }

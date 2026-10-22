@@ -27,7 +27,7 @@
  */
 
 const { execFileSync } = require('node:child_process')
-const { existsSync, rmSync } = require('node:fs')
+const { existsSync, readFileSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
 
 function normalizeHttpsBaseUrl(name, value) {
@@ -75,29 +75,36 @@ if (winArm64 && !process.env.ELECTRON_BUILDER_7Z_FILTER) {
 }
 const winArch = winArm64 ? 'arm64' : 'x64'
 const winSidecarTarget = winArm64 ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-gnu'
-const WIN_SIDECAR = `../sheets/native/xlsx-engine/target/${winSidecarTarget}/release/xlsx-sidecar.exe`
+// Where the release pipeline puts the sidecar: an explicit cross-compilation
+// triple (CI builds it that way). A Windows contributor's plain
+// `npm run build:all` instead leaves it in cargo's host-native target/release
+// (MSVC, statically linked per native/xlsx-engine/.cargo/config.toml), so that
+// output is accepted too — but only when the host arch really matches the
+// packaged one: an x64 host build must never be shipped inside an arm64
+// installer, which has to come from a cross build.
+const winSidecarCandidates = [
+  `../sheets/native/xlsx-engine/target/${winSidecarTarget}/release/xlsx-sidecar.exe`,
+  ...(process.platform === 'win32' && (process.arch === 'arm64') === winArm64
+    ? ['../sheets/native/xlsx-engine/target/release/xlsx-sidecar.exe']
+    : []),
+]
+const WIN_SIDECAR =
+  winSidecarCandidates.find((rel) => existsSync(join(__dirname, rel))) ?? winSidecarCandidates[0]
 
-// The gsk CLI tree below is copied verbatim from node_modules, and the
-// nested commander path depends on npm's current hoisting layout — fail the
-// build with a clear message if an install ever changes it, instead of
-// shipping an installer with a broken gsk runtime.
-// LICENSES.chromium.html only exists after the Electron binary download —
-// since Electron 42 that no longer happens during `npm ci` (the postinstall
-// script was replaced by the lazy `install-electron` bin), and electron-builder
-// exits 0 on a missing extraResources source, so without this check the
-// installer would silently ship without the Chromium license.
-for (const rel of [
-  '../../node_modules/@genspark/cli',
-  '../../node_modules/@genspark/cli/node_modules/commander',
-  '../../node_modules/ws',
-  '../../node_modules/electron/dist/LICENSES.chromium.html',
-  '../../node_modules/@embedpdf/pdfium/dist/pdfium.wasm',
-  '../pdf/node_modules/harfbuzzjs/hb-subset.wasm',
-]) {
-  if (!existsSync(join(__dirname, rel))) {
-    throw new Error(
-      `electron-builder extraResources source missing: ${rel} (npm hoisting changed?)`,
-    )
+function assertExtraResourceSources() {
+  for (const rel of [
+    '../../node_modules/@genspark/cli',
+    '../../node_modules/@genspark/cli/node_modules/commander',
+    '../../node_modules/ws',
+    '../../node_modules/electron/dist/LICENSES.chromium.html',
+    '../../node_modules/@embedpdf/pdfium/dist/pdfium.wasm',
+    '../pdf/node_modules/harfbuzzjs/hb-subset.wasm',
+  ]) {
+    if (!existsSync(join(__dirname, rel))) {
+      throw new Error(
+        `electron-builder extraResources source missing: ${rel} (npm hoisting changed?)`,
+      )
+    }
   }
 }
 
@@ -133,23 +140,22 @@ function compileVisionOcr({ universalOnly } = { universalOnly: false }) {
   }
 }
 
-if (process.platform === 'darwin' && !existsSync(join(__dirname, VISION_OCR_HELPER))) {
-  compileVisionOcr()
-}
-
-// Windows local-OCR helper (Windows.Media.Ocr): compiled by the in-box .NET
-// Framework csc via build-win.mjs — same on-demand policy as the mac helper,
-// and Windows installers must not silently ship without it.
 const WIN_OCR_HELPER = '../../packages/pdf2docx/ocr-helper/win-ocr.exe'
-if (process.platform === 'win32' && !existsSync(join(__dirname, WIN_OCR_HELPER))) {
-  try {
-    execFileSync(
-      process.execPath,
-      [join(__dirname, '../../packages/pdf2docx/ocr-helper/build-win.mjs')],
-      { stdio: 'inherit' },
-    )
-  } catch (err) {
-    throw new Error(`win-ocr helper compile failed: ${err}`, { cause: err })
+
+function ensurePlatformHelpers() {
+  if (process.platform === 'darwin' && !existsSync(join(__dirname, VISION_OCR_HELPER))) {
+    compileVisionOcr()
+  }
+  if (process.platform === 'win32' && !existsSync(join(__dirname, WIN_OCR_HELPER))) {
+    try {
+      execFileSync(
+        process.execPath,
+        [join(__dirname, '../../packages/pdf2docx/ocr-helper/build-win.mjs')],
+        { stdio: 'inherit' },
+      )
+    } catch (err) {
+      throw new Error(`win-ocr helper compile failed: ${err}`, { cause: err })
+    }
   }
 }
 
@@ -219,6 +225,8 @@ function assertModuleTreesPresent() {
     '../pdf/out',
     '../markdown/out',
     '../html/out',
+    '../../packages/cli/dist/genoffice.cjs',
+    '../../packages/cli/dist/node_modules/jsdom',
   ]) {
     if (!existsSync(join(__dirname, rel))) {
       throw new Error(
@@ -228,7 +236,236 @@ function assertModuleTreesPresent() {
   }
 }
 
+const CLI_BUNDLE_REL = '../../packages/cli/dist/genoffice.cjs'
+const CLI_BUILD_REL = '../../packages/cli/build.mjs'
+const CLI_VERSION_ENV = 'GENOFFICE_APP_VERSION'
+const CLI_VERSION_BANNER = /^const __cliAppVersion = ("(?:[^"\\]|\\.)*");$/m
+
+/**
+ * The version the packaged app reports: CI's -c.extraMetadata.version deep-merges
+ * into the block below, and without it electron-builder ships apps/shell/package.json.
+ */
+function packagedAppVersion() {
+  const injected = config.extraMetadata && config.extraMetadata.version
+  if (typeof injected === 'string' && injected.trim()) return injected.trim()
+  return require('./package.json').version
+}
+
+function bundledCliVersion(bundlePath) {
+  const baked = CLI_VERSION_BANNER.exec(readFileSync(bundlePath, 'utf-8'))
+  if (!baked) return null
+  try {
+    return JSON.parse(baked[1])
+  } catch {
+    return null
+  }
+}
+
+/**
+ * `genoffice --version` is baked into the CLI bundle, which is built before
+ * electron-builder runs and therefore before a release version is known. Rebuild
+ * it here with the app version whenever the two disagree, so the packaged
+ * command line can never answer with the workspace CLI version.
+ */
+function ensureCliBundleCarriesAppVersion() {
+  const bundlePath = join(__dirname, CLI_BUNDLE_REL)
+  const appVersion = packagedAppVersion()
+  if (bundledCliVersion(bundlePath) === appVersion) return
+  execFileSync(process.execPath, [join(__dirname, CLI_BUILD_REL)], {
+    stdio: 'inherit',
+    env: { ...process.env, [CLI_VERSION_ENV]: appVersion },
+  })
+  const baked = bundledCliVersion(bundlePath)
+  if (baked !== appVersion) {
+    throw new Error(
+      `packaged genoffice CLI reports ${baked ?? 'no version'} but the app ships ${appVersion} ` +
+        `(rebuild it with ${CLI_VERSION_ENV}=${appVersion})`,
+    )
+  }
+}
+
+const NOTICE_PATH = join(__dirname, 'build/THIRD-PARTY-NOTICES.txt')
+const PDFIUM_NOTICE_TERMS = ['@embedpdf/pdfium', 'Copyright 2014 PDFium Authors', 'Apache License']
+
+function hasValidThirdPartyNotice() {
+  if (!existsSync(NOTICE_PATH)) return false
+  try {
+    const text = readFileSync(NOTICE_PATH, 'utf8')
+    return PDFIUM_NOTICE_TERMS.every((term) => text.includes(term))
+  } catch {
+    return false
+  }
+}
+
+function ensureThirdPartyNotices() {
+  if (!hasValidThirdPartyNotice()) {
+    execFileSync(process.execPath, [join(__dirname, '../../tools/gen-third-party-notices.mjs')], {
+      stdio: 'inherit',
+    })
+  }
+  if (!hasValidThirdPartyNotice()) {
+    throw new Error('third-party notice missing PDFium redistribution terms')
+  }
+}
+
 /** @type {import('electron-builder').Configuration} */
+// NSIS makes every declared ProgId the extension's default opener; for the
+// office types that is the point, for plain text and JSON it would hijack the
+// system editor, so Windows leaves those two out (mac/Linux only offer them
+// in Open With).
+const WIN_OPEN_WITH_ONLY_EXTS = new Set(['txt', 'json'])
+const FILE_ASSOCIATIONS = [
+  {
+    ext: 'docx',
+    name: 'Word Document',
+    description: 'Word Document',
+    role: 'Editor',
+    icon: 'docx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  },
+  {
+    ext: 'xlsx',
+    name: 'Excel Workbook',
+    description: 'Excel Workbook',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  },
+  {
+    ext: 'xlsm',
+    name: 'Excel Macro-Enabled Workbook',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12',
+  },
+  {
+    ext: 'pptx',
+    name: 'PowerPoint Presentation',
+    description: 'PowerPoint Presentation',
+    role: 'Editor',
+    icon: 'pptx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  },
+  {
+    ext: 'xls',
+    name: 'Excel 97-2003 Workbook',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'application/vnd.ms-excel',
+  },
+  {
+    ext: 'csv',
+    name: 'CSV Document',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'text/csv',
+  },
+  {
+    // opens as a converted copy and saves as .xlsx (genoffice#1146)
+    ext: 'tsv',
+    name: 'TSV Document',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'text/tab-separated-values',
+  },
+  {
+    // import-only: opens as a converted .xlsx copy, GenOffice never writes ODF
+    ext: 'ods',
+    name: 'OpenDocument Spreadsheet',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'application/vnd.oasis.opendocument.spreadsheet',
+  },
+  {
+    ext: 'ots',
+    name: 'OpenDocument Spreadsheet Template',
+    role: 'Editor',
+    icon: 'xlsx',
+    mimeType: 'application/vnd.oasis.opendocument.spreadsheet-template',
+  },
+  {
+    // import-only: opens as a converted .docx copy, GenOffice never writes ODF
+    ext: 'odt',
+    name: 'OpenDocument Text',
+    role: 'Editor',
+    icon: 'docx',
+    mimeType: 'application/vnd.oasis.opendocument.text',
+  },
+  {
+    ext: 'ott',
+    name: 'OpenDocument Text Template',
+    role: 'Editor',
+    icon: 'docx',
+    mimeType: 'application/vnd.oasis.opendocument.text-template',
+  },
+  {
+    // import-only: opens as a converted .pptx copy, GenOffice never writes ODF
+    ext: 'odp',
+    name: 'OpenDocument Presentation',
+    role: 'Editor',
+    icon: 'pptx',
+    mimeType: 'application/vnd.oasis.opendocument.presentation',
+  },
+  {
+    ext: 'otp',
+    name: 'OpenDocument Presentation Template',
+    role: 'Editor',
+    icon: 'pptx',
+    mimeType: 'application/vnd.oasis.opendocument.presentation-template',
+  },
+  {
+    ext: 'pdf',
+    name: 'PDF Document',
+    role: 'Editor',
+    icon: 'pdf',
+    mimeType: 'application/pdf',
+  },
+  {
+    ext: 'md',
+    name: 'Markdown Document',
+    role: 'Editor',
+    icon: 'md',
+    mimeType: 'text/markdown',
+  },
+  {
+    ext: 'markdown',
+    name: 'Markdown Document',
+    role: 'Editor',
+    icon: 'md',
+    mimeType: 'text/markdown',
+  },
+  {
+    ext: 'txt',
+    name: 'Text Document',
+    description: 'Text Document',
+    role: 'Editor',
+    icon: 'txt',
+    mimeType: 'text/plain',
+  },
+  {
+    ext: 'json',
+    name: 'JSON Document',
+    description: 'JSON Document',
+    role: 'Editor',
+    icon: 'json',
+    mimeType: 'application/json',
+  },
+  {
+    ext: 'html',
+    name: 'HTML Document',
+    role: 'Editor',
+    icon: 'html',
+    mimeType: 'text/html',
+  },
+  {
+    ext: 'htm',
+    name: 'HTML Document',
+    role: 'Editor',
+    icon: 'html',
+    mimeType: 'text/html',
+  },
+]
+
 const config = {
   appId: 'com.genoffice.app',
   productName: 'GenOffice',
@@ -298,6 +535,42 @@ const config = {
       from: '../../node_modules/@genspark/cli',
       to: 'gsk/node_modules/@genspark/cli',
     },
+    // genoffice command line: runs on the app binary with ELECTRON_RUN_AS_NODE (as
+    // the gsk CLI above already does), so the RunAsNode fuse must stay enabled.
+    // Layout (Resources/cli next to wasm/, native/, ocr/) is what
+    // packages/cli/src/resources.ts expects.
+    {
+      from: '../../packages/cli/dist/genoffice.cjs',
+      to: 'cli/genoffice.cjs',
+    },
+    {
+      from: '../../packages/cli/bin/genoffice',
+      to: 'cli/genoffice',
+    },
+    {
+      from: '../../packages/cli/bin/genoffice.cmd',
+      to: 'cli/genoffice.cmd',
+    },
+    // the CLI's version (Settings → Integrations shows it) and the agent skill
+    // the same pane installs into Claude Code / Codex / …; bytes identical to the repo file
+    {
+      from: '../../packages/cli/package.json',
+      to: 'cli/package.json',
+    },
+    {
+      from: '../../skills/genoffice/SKILL.md',
+      to: 'cli/skills/genoffice/SKILL.md',
+    },
+    {
+      from: '../../skills/recommended',
+      to: 'cli/skills/recommended',
+    },
+    // runtime deps the genoffice bundle leaves external (jsdom for the Word/Markdown
+    // paths); collected by packages/cli/collect-deps.mjs during its build
+    {
+      from: '../../packages/cli/dist/node_modules',
+      to: 'cli/node_modules',
+    },
     {
       from: '../../node_modules/@genspark/cli/node_modules/commander',
       to: 'gsk/node_modules/commander',
@@ -318,85 +591,7 @@ const config = {
   // bare GenOffice logo instead of a per-type document icon. The icns/ico
   // pairs are generated from the shell renderer's file-type tiles by
   // tools/gen-file-association-icons.mjs.
-  fileAssociations: [
-    {
-      ext: 'docx',
-      name: 'Word Document',
-      role: 'Editor',
-      icon: 'docx',
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    },
-    {
-      ext: 'xlsx',
-      name: 'Excel Workbook',
-      role: 'Editor',
-      icon: 'xlsx',
-      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    },
-    {
-      ext: 'xlsm',
-      name: 'Excel Macro-Enabled Workbook',
-      role: 'Editor',
-      icon: 'xlsx',
-      mimeType: 'application/vnd.ms-excel.sheet.macroEnabled.12',
-    },
-    {
-      ext: 'pptx',
-      name: 'PowerPoint Presentation',
-      role: 'Editor',
-      icon: 'pptx',
-      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    },
-    {
-      ext: 'xls',
-      name: 'Excel 97-2003 Workbook',
-      role: 'Editor',
-      icon: 'xlsx',
-      mimeType: 'application/vnd.ms-excel',
-    },
-    {
-      ext: 'csv',
-      name: 'CSV Document',
-      role: 'Editor',
-      icon: 'xlsx',
-      mimeType: 'text/csv',
-    },
-    {
-      ext: 'pdf',
-      name: 'PDF Document',
-      role: 'Editor',
-      icon: 'pdf',
-      mimeType: 'application/pdf',
-    },
-    {
-      ext: 'md',
-      name: 'Markdown Document',
-      role: 'Editor',
-      icon: 'md',
-      mimeType: 'text/markdown',
-    },
-    {
-      ext: 'markdown',
-      name: 'Markdown Document',
-      role: 'Editor',
-      icon: 'md',
-      mimeType: 'text/markdown',
-    },
-    {
-      ext: 'html',
-      name: 'HTML Document',
-      role: 'Editor',
-      icon: 'html',
-      mimeType: 'text/html',
-    },
-    {
-      ext: 'htm',
-      name: 'HTML Document',
-      role: 'Editor',
-      icon: 'html',
-      mimeType: 'text/html',
-    },
-  ],
+  fileAssociations: FILE_ASSOCIATIONS,
   npmRebuild: false,
   mac: {
     // Two separate arch packages (NOT universal): arm64 keeps the exact
@@ -415,6 +610,12 @@ const config = {
     gatekeeperAssess: false,
     entitlements: 'build/entitlements.mac.plist',
     entitlementsInherit: 'build/entitlements.mac.plist',
+    // Slides' Slide Show > Record: the hardened runtime refuses the microphone without the
+    // audio-input entitlement, and macOS asks for it with this text
+    extendInfo: {
+      NSMicrophoneUsageDescription:
+        'GenOffice records your narration when you record a slide show.',
+    },
     notarize: true,
     extraResources: [
       {
@@ -430,10 +631,16 @@ const config = {
         arch: [winArch],
       },
     ],
+    fileAssociations: FILE_ASSOCIATIONS.filter((a) => !WIN_OPEN_WITH_ONLY_EXTS.has(a.ext)),
     extraResources: [
       {
         from: WIN_SIDECAR,
         to: 'native/xlsx-sidecar.exe',
+      },
+      {
+        from: 'build/shell-new',
+        to: 'shell-new',
+        filter: ['*.docx', '*.xlsx', '*.pptx'],
       },
     ],
   },
@@ -500,6 +707,9 @@ const config = {
   deb: {
     artifactName: 'genoffice_${version}_${arch}.deb',
     packageName: 'genoffice',
+    // expose the genoffice command line shipped inside the app
+    afterInstall: 'build/linux-after-install.sh',
+    afterRemove: 'build/linux-after-remove.sh',
   },
   // Same "@genoffice/shell" naming problem as deb: spell the artifact name
   // out (${arch} expands to the rpm arch string, x86_64) and pin the rpm
@@ -516,20 +726,34 @@ const config = {
     artifactName: 'genoffice-${version}.${arch}.rpm',
     packageName: 'genoffice',
     publish: null,
+    afterInstall: 'build/linux-after-install.sh',
+    afterRemove: 'build/linux-after-remove.sh',
+    // rpmbuild links every packaged ELF file into /usr/lib/.build-id/<hash>.
+    // Two Electron apps built on the same Electron release ship identical
+    // binaries, so the links are identical too and dnf refuses the install
+    // with a file conflict against the other app (genoffice#1145). The links exist only
+    // to locate detached debuginfo, which this package does not ship, so turn
+    // them off. rpm-level `fpm` (not linux-level) keeps it away from the deb.
+    fpm: ['--rpm-rpmbuild-define=_build_id_links none'],
   },
   nsis: {
     oneClick: false,
     allowToChangeInstallationDirectory: true,
   },
   beforePack: async (context) => {
+    ensurePlatformHelpers()
+    assertExtraResourceSources()
+    ensureThirdPartyNotices()
     assertModuleTreesPresent()
+    ensureCliBundleCarriesAppVersion()
     if (context.electronPlatformName === 'darwin' && includeMacX64) {
       assertUniversalSidecar()
       assertUniversalVisionOcr()
     }
     if (context.electronPlatformName === 'win32' && !existsSync(join(__dirname, WIN_SIDECAR))) {
       throw new Error(
-        `win extraResources source missing: ${WIN_SIDECAR} (cargo build --target ${winSidecarTarget} first)`,
+        `win extraResources source missing: ${winSidecarCandidates.join(' or ')} ` +
+          `(run "npm run native:build -w @genoffice/sheets", or cargo build --target ${winSidecarTarget})`,
       )
     }
   },

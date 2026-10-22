@@ -143,6 +143,13 @@ const TRACKED_PITCH_UNIFORM_MIN = 0.7
 const TRACKED_PITCH_BAND = 0.25
 /** minimum adjacent pairs before the pattern is trusted */
 const TRACKED_MIN_PAIRS = 6
+/**
+ * a gap counts as an inflated-box overlap only below this share of the font
+ * size: ordinary body text reports gaps of −0.002 em from float noise, and
+ * treating those as overlaps sent every wide glyph ("m" at 0.78 em against a
+ * 0.45 em median pitch) down the pitch path as a word gap ("rem uneração")
+ */
+const TRACKED_OVERLAP_MIN_EMS = 0.05
 
 /** the line's median origin pitch, or null when the pattern does not hold */
 function trackedPitchOf(chars: readonly PdfChar[]): number | null {
@@ -152,7 +159,8 @@ function trackedPitchOf(chars: readonly PdfChar[]): number | null {
   for (const c of chars) {
     if (isSpaceCode(c.code) || c.code <= 0x1f) continue
     if (prev && !isNoSpaceScript(prev.script) && !isNoSpaceScript(c.script)) {
-      if (charGap(prev, c) < 0) negGaps++
+      const fontSize = Math.min(prev.fontSize, c.fontSize) || 1
+      if (charGap(prev, c) < -TRACKED_OVERLAP_MIN_EMS * fontSize) negGaps++
       pitches.push(c.originX - prev.originX)
     }
     prev = c
@@ -181,12 +189,45 @@ export interface WordOptions {
 }
 
 /** Split one line's chars into words. */
+/** an inferred/fabricated word gap must reach this share of the line's real ones */
+const WORD_GAP_FLOOR_RATIO = 0.5
+
+/**
+ * Half the median advance gap spanned by the line's REAL space glyphs
+ * between two Latin-script glyphs; null without any. CJK↔Latin gaps stay
+ * out: a wide CJK-term-to-"data" gap says nothing about the Latin word gaps.
+ */
+function realWordGapFloor(chars: readonly PdfChar[]): number | null {
+  const gaps: number[] = []
+  let prevVisible: PdfChar | null = null
+  let realSpaceSeen = false
+  for (const c of chars) {
+    if (isSpaceCode(c.code)) {
+      if (!c.isGenerated) realSpaceSeen = true
+      continue
+    }
+    if (c.code <= 0x1f) continue
+    if (
+      realSpaceSeen &&
+      prevVisible &&
+      !isNoSpaceScript(c.script) &&
+      !isNoSpaceScript(prevVisible.script)
+    ) {
+      gaps.push(charGap(prevVisible, c))
+    }
+    realSpaceSeen = false
+    prevVisible = c
+  }
+  return gaps.length > 0 ? WORD_GAP_FLOOR_RATIO * median(gaps) : null
+}
+
 export function groupIntoWords(chars: readonly PdfChar[], options: WordOptions = {}): Word[] {
   // letter-spaced display text (P10 C): the uniform tracking gaps are NOT
   // word gaps — suppress inference so the spans layer can restore w:spacing
   const inferSpaces = (options.inferSpaces ?? true) && !isLetterSpacedLine(chars)
   const lineGap = medianCharGap(chars)
   const trackedPitch = inferSpaces ? trackedPitchOf(chars) : null
+  const wordGapFloor = realWordGapFloor(chars)
   const words: Word[] = []
   let current: PdfChar[] = []
   let pendingSpace = false
@@ -248,11 +289,24 @@ export function groupIntoWords(chars: readonly PdfChar[], options: WordOptions =
         prevVisible !== null && charGap(prevVisible, c) >= GENERATED_BOUNDARY_KEEP_EMS * fontPt
       if (!(boundary && wideGap)) pendingSpace = false
     }
+    // a real space glyph on this line shows the author's word gap; a
+    // fabricated or inferred space between Latin glyphs must reach half of it
+    // (a tracked eyebrow label puts 0.2 em between letters and 1 em between
+    // words — PDFium fabricates a space at every letter, drowning the words)
+    const underWordGap =
+      wordGapFloor !== null &&
+      prevVisible !== null &&
+      !isNoSpaceScript(c.script) &&
+      !isNoSpaceScript(prevVisible.script) &&
+      charGap(prevVisible, c) < wordGapFloor
+    if (pendingSpace && pendingSpaceGenerated && underWordGap) pendingSpace = false
+    // the floor gates the gap-based guesses only; the origin-pitch path below
+    // exists precisely because inflated glyph boxes make gaps meaningless
     const inferredSpace =
       inferSpaces &&
       prevVisible !== null &&
       current.length > 0 &&
-      (shouldInsertSpace(prevVisible, c, lineGap) ||
+      ((!underWordGap && shouldInsertSpace(prevVisible, c, lineGap)) ||
         (trackedPitch !== null &&
           !isNoSpaceScript(prevVisible.script) &&
           !isNoSpaceScript(c.script) &&

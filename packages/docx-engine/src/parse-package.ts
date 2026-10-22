@@ -13,7 +13,7 @@ import {
   type XNode,
 } from './xml-utils'
 import { customEnumItems } from './list-markers'
-import { decodeNumericCharRefs, type RelInfo } from './parse-xml-text'
+import { decodeNumericCharRefs, onOffOf, type RelInfo } from './parse-xml-text'
 import type {
   CommentInfo,
   DocProtection,
@@ -31,10 +31,37 @@ export async function resolveMainDocumentPath(zip: JSZip): Promise<string | null
   const rels = await parseRels(zip, '_rels/.rels')
   for (const rel of rels.values()) {
     if (!/\/officeDocument$/.test(rel.type) || rel.targetMode === 'External') continue
-    const target = rel.target.replace(/^\//, '')
-    if (zip.file(target)) return target
+    const target = resolveRelationshipTargetPath('', rel.target)
+    if (target && zip.file(target)) return target
   }
   return null
+}
+
+export function resolveRelationshipTargetPath(sourcePath: string, target: string): string | null {
+  const withoutFragment = target.split('#', 1)[0]
+  if (!withoutFragment || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(withoutFragment)) return null
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(withoutFragment)
+  } catch {
+    return null
+  }
+  const sourceSlash = sourcePath.lastIndexOf('/')
+  const base = sourceSlash >= 0 ? sourcePath.slice(0, sourceSlash + 1) : ''
+  // Test the root anchor after normalizing: a backslash-led target is rooted too.
+  const normalized = decoded.replace(/\\/g, '/')
+  const path = normalized.startsWith('/') ? normalized.slice(1) : `${base}${normalized}`
+  const parts: string[] = []
+  for (const segment of path.split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (parts.length === 0) return null
+      parts.pop()
+    } else {
+      parts.push(segment)
+    }
+  }
+  return parts.join('/') || null
 }
 
 export async function parseRels(zip: JSZip, path: string): Promise<Map<string, RelInfo>> {
@@ -44,7 +71,10 @@ export async function parseRels(zip: JSZip, path: string): Promise<Map<string, R
   // fast-xml-parser rejects a DOCTYPE declaring external entities; drop the
   // prologue instead of failing the whole document (entities never resolve —
   // XXE-safe — and Relationship elements carry everything in attributes)
-  const relsXml = (await file.async('string')).replace(/<!DOCTYPE(?:[^>[]|\[[\s\S]*?\])*>/i, '')
+  const relsXml = (await file.async('string')).replace(
+    /<!DOCTYPE(?:[^>"'\x5B\x5D]|\[[\s\S]*?\]|"[^"]*"|'[^']*')*>/i,
+    '',
+  )
   const parsed = xmlParser.parse(relsXml) as XNode[]
   const root = parsed.find((n) => nameOf(n) === 'Relationships')
   if (!root) return rels
@@ -121,18 +151,24 @@ export async function parseProtection(zip: JSZip): Promise<DocProtection | null>
   const file = zip.file('word/settings.xml')
   if (!file) return null
   const xml = await file.async('string')
-  const tag = /<w:documentProtection[^>]*\/>/.exec(xml)?.[0]
+  const tag = /<w:documentProtection\b[^>]*?(?:\/>|>)/.exec(xml)?.[0]
   if (!tag) return null
-  const edit = /w:edit="([^"]+)"/.exec(tag)?.[1]
+  const editMatch = /w:edit=(?:"([^"]+)"|'([^']+)')/.exec(tag)
+  const edit = editMatch?.[1] ?? editMatch?.[2]
   if (!edit || edit === 'none') return null
-  const enforcement = /w:enforcement="([^"]+)"/.exec(tag)?.[1]
-  const hash = /w:hash="([^"]+)"/.exec(tag)?.[1]
-  const salt = /w:salt="([^"]+)"/.exec(tag)?.[1]
-  const spin = /w:cryptSpinCount="(\d+)"/.exec(tag)?.[1]
-  const sid = /w:cryptAlgorithmSid="(\d+)"/.exec(tag)?.[1]
+  const enforcementMatch = /w:enforcement=(?:"([^"]+)"|'([^']+)')/.exec(tag)
+  const enforcement = enforcementMatch?.[1] ?? enforcementMatch?.[2]
+  const hashMatch = /w:hash=(?:"([^"]+)"|'([^']+)')/.exec(tag)
+  const hash = hashMatch?.[1] ?? hashMatch?.[2]
+  const saltMatch = /w:salt=(?:"([^"]+)"|'([^']+)')/.exec(tag)
+  const salt = saltMatch?.[1] ?? saltMatch?.[2]
+  const spinMatch = /w:cryptSpinCount=(?:"(\d+)"|'(\d+)')/.exec(tag)
+  const spin = spinMatch?.[1] ?? spinMatch?.[2]
+  const sidMatch = /w:cryptAlgorithmSid=(?:"(\d+)"|'(\d+)')/.exec(tag)
+  const sid = sidMatch?.[1] ?? sidMatch?.[2]
   return {
     edit,
-    enforced: enforcement === '1' || enforcement === 'true',
+    enforced: enforcement === '1' || enforcement === 'true' || enforcement === 'on',
     ...(hash ? { hash } : {}),
     ...(salt ? { salt } : {}),
     ...(spin ? { spinCount: parseInt(spin, 10) } : {}),
@@ -144,13 +180,17 @@ export async function parseProtection(zip: JSZip): Promise<DocProtection | null>
 export async function parseWriteProtection(zip: JSZip): Promise<WriteProtection | null> {
   const file = zip.file('word/settings.xml')
   if (!file) return null
-  const tag = /<w:writeProtection[^>]*\/>/.exec(await file.async('string'))?.[0]
+  const tag = /<w:writeProtection\b[^>]*?(?:\/>|>)/.exec(await file.async('string'))?.[0]
   if (!tag) return null
-  const recommended = /w:recommended="(?:1|true|on)"/.test(tag)
-  const hash = /w:hash="([^"]+)"/.exec(tag)?.[1]
-  const salt = /w:salt="([^"]+)"/.exec(tag)?.[1]
-  const spin = /w:cryptSpinCount="(\d+)"/.exec(tag)?.[1]
-  const sid = /w:cryptAlgorithmSid="(\d+)"/.exec(tag)?.[1]
+  const recommended = /w:recommended=(?:"(?:1|true|on)"|'(?:1|true|on)')/.test(tag)
+  const hashMatch = /w:hash=(?:"([^"]+)"|'([^']+)')/.exec(tag)
+  const hash = hashMatch?.[1] ?? hashMatch?.[2]
+  const saltMatch = /w:salt=(?:"([^"]+)"|'([^']+)')/.exec(tag)
+  const salt = saltMatch?.[1] ?? saltMatch?.[2]
+  const spinMatch = /w:cryptSpinCount=(?:"(\d+)"|'(\d+)')/.exec(tag)
+  const spin = spinMatch?.[1] ?? spinMatch?.[2]
+  const sidMatch = /w:cryptAlgorithmSid=(?:"(\d+)"|'(\d+)')/.exec(tag)
+  const sid = sidMatch?.[1] ?? sidMatch?.[2]
   if (!recommended && !hash) return null
   return {
     ...(recommended ? { recommended } : {}),
@@ -222,37 +262,89 @@ function parseNumberingLevel(lvlNode: XNode): NumberingLevel {
   if (customFormat) level.customFormat = customFormat
   const suff = attrsOf(findChild(lvlNode, 'w:suff') ?? {})['w:val']
   if (suff === 'space' || suff === 'nothing' || suff === 'tab') level.suff = suff
+  const isLgl = findChild(lvlNode, 'w:isLgl')
+  if (isLgl && !['0', 'false', 'off'].includes(attrsOf(isLgl)['w:val'] ?? '')) level.isLgl = true
+  const lvlJc = attrsOf(findChild(lvlNode, 'w:lvlJc') ?? {})['w:val']
+  if (lvlJc === 'right' || lvlJc === 'end') level.lvlJc = 'right'
+  else if (lvlJc === 'center') level.lvlJc = 'center'
+  const pStyle = attrsOf(findChild(lvlNode, 'w:pStyle') ?? {})['w:val']
+  if (pStyle) level.pStyle = pStyle
+  const lvlRestart = parseInt(attrsOf(findChild(lvlNode, 'w:lvlRestart') ?? {})['w:val'] ?? '', 10)
+  if (Number.isFinite(lvlRestart)) level.lvlRestart = lvlRestart
   const lvlPPr = findChild(lvlNode, 'w:pPr')
+  if (lvlPPr && onOffOf(lvlPPr, 'w:bidi')) level.bidi = true
+  const tabs = lvlPPr ? findChild(lvlPPr, 'w:tabs') : undefined
+  const tabPos = tabs ? parseInt(attrsOf(findChild(tabs, 'w:tab') ?? {})['w:pos'] ?? '', 10) : NaN
+  if (Number.isFinite(tabPos)) level.tabStop = tabPos
   const ind = lvlPPr ? findChild(lvlPPr, 'w:ind') : undefined
   if (ind) {
     const attrs = attrsOf(ind)
+    // an explicit 0 is a real value: left="0" firstLine="0" puts the marker at the
+    // margin with no hanging area (Word then tabs to the next default stop); an
+    // absent left is 0 too (Word probe 2026-10-20: `right=360 hanging=360` hangs
+    // the marker 18pt outside the start margin), left/right are logical start/end
     const left = parseInt(attrs['w:left'] ?? attrs['w:start'] ?? '', 10)
-    if (left > 0) level.indentLeft = left
+    level.indentLeft = Number.isFinite(left) ? left : 0
+    const right = parseInt(attrs['w:right'] ?? attrs['w:end'] ?? '', 10)
+    if (Number.isFinite(right)) level.indentRight = right
     const hanging = parseInt(attrs['w:hanging'] ?? '', 10)
     if (hanging > 0) level.hanging = hanging
     const firstLine = parseInt(attrs['w:firstLine'] ?? '', 10)
-    if (!level.hanging && firstLine > 0) level.firstLine = firstLine
+    if (!level.hanging && firstLine >= 0) level.firstLine = firstLine
   }
   const lvlRPr = findChild(lvlNode, 'w:rPr')
   const sz = lvlRPr ? parseInt(attrsOf(findChild(lvlRPr, 'w:sz') ?? {})['w:val'] ?? '', 10) : NaN
   if (sz > 0) level.szHalfPoints = sz
+  const color = lvlRPr ? attrsOf(findChild(lvlRPr, 'w:color') ?? {})['w:val'] : undefined
+  if (color && /^[0-9a-f]{6}$/i.test(color)) level.color = color.toUpperCase()
+  const flag = (name: string) => {
+    const el = lvlRPr ? findChild(lvlRPr, name) : undefined
+    return !!el && !['0', 'false', 'off'].includes(attrsOf(el)['w:val'] ?? '')
+  }
+  if (flag('w:b')) level.bold = true
+  if (flag('w:i')) level.italic = true
   const fonts = lvlRPr ? attrsOf(findChild(lvlRPr, 'w:rFonts') ?? {}) : {}
   const font = fonts['w:ascii'] ?? fonts['w:hAnsi'] ?? fonts['w:eastAsia']
   if (font) level.font = font
+  const picId = parseInt(attrsOf(findChild(lvlNode, 'w:lvlPicBulletId') ?? {})['w:val'] ?? '', 10)
+  if (Number.isFinite(picId)) level.picBulletId = picId
   return level
 }
 
+/** image relationship id inside a w:numPicBullet (VML v:imagedata or DrawingML a:blip) */
+function picBulletRId(node: XNode): string | undefined {
+  for (const child of childrenOf(node)) {
+    if ('#text' in child) continue
+    const name = nameOf(child)
+    if (name === 'v:imagedata') return attrsOf(child)['r:id']
+    if (name === 'a:blip') return attrsOf(child)['r:embed']
+    const nested = picBulletRId(child)
+    if (nested) return nested
+  }
+  return undefined
+}
+
 /** word/numbering.xml -> per-numId level definitions + the bullet/ordered classification */
-export async function parseNumbering(
-  zip: JSZip,
-): Promise<{ formats: Map<string, 'bullet' | 'ordered'>; defs: Map<string, NumberingDef> }> {
+export async function parseNumbering(zip: JSZip): Promise<{
+  formats: Map<string, 'bullet' | 'ordered'>
+  defs: Map<string, NumberingDef>
+  /** w:numPicBulletId -> image relationship id (relative to word/_rels/numbering.xml.rels) */
+  picBullets: Map<number, string>
+}> {
   const formats = new Map<string, 'bullet' | 'ordered'>()
   const defs = new Map<string, NumberingDef>()
+  const picBullets = new Map<number, string>()
   const file = zip.file('word/numbering.xml')
-  if (!file) return { formats, defs }
+  if (!file) return { formats, defs, picBullets }
   const parsed = xmlParser.parse(await file.async('string')) as XNode[]
   const root = parsed.find((n) => nameOf(n) === 'w:numbering')
-  if (!root) return { formats, defs }
+  if (!root) return { formats, defs, picBullets }
+
+  for (const pic of findChildren(root, 'w:numPicBullet')) {
+    const id = parseInt(attrsOf(pic)['w:numPicBulletId'] ?? '', 10)
+    const rId = picBulletRId(pic)
+    if (Number.isFinite(id) && rId) picBullets.set(id, rId)
+  }
 
   const absLevels = new Map<string, Record<number, NumberingLevel>>()
   const numStyleLinks = new Map<string, string>()
@@ -307,5 +399,5 @@ export async function parseNumbering(
     defs.set(numId, { numId, abstractNumId: absId, levels, startOverrides })
     formats.set(numId, levels[0]?.numFmt === 'bullet' ? 'bullet' : 'ordered')
   }
-  return { formats, defs }
+  return { formats, defs, picBullets }
 }

@@ -4,7 +4,7 @@ import type { ChainedCommands, Editor } from '@tiptap/core'
  * Word's Ctrl+Enter / Insert→Page Break: the paragraph content AFTER the
  * caret starts the next page — no extra empty line. Inserting a fresh empty
  * break-paragraph left a blank line coupled to the break (deleting the line
- * killed the break — alpha ledger r154). Mid-paragraph we split and the
+ * killed the break). Mid-paragraph we split and the
  * second half takes the pageBreakBefore attribute; an empty second half
  * (caret at paragraph end) matches Word, whose break then lives on an empty
  * line at the next page top; at a paragraph start the block itself takes the
@@ -50,4 +50,13 @@ export function insertPageBreak(editor: Editor): boolean {
   return start()
     .insertContent({ type: 'docParagraph', attrs: { pageBreakBefore: true } })
     .run()
+}
+
+export function insertColumnBreak(editor: Editor): boolean {
+  return editor.commands.insertContent({ type: 'hardBreak', attrs: { colBreak: true } })
+}
+
+/** Word's Layout > Breaks > Text Wrapping: a line break whose next line clears the floats */
+export function insertTextWrappingBreak(editor: Editor): boolean {
+  return editor.commands.insertContent({ type: 'hardBreak', attrs: { wrapBreak: true } })
 }

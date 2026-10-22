@@ -5,8 +5,13 @@ import {
   structuralOpLabel,
   workbookCommandBatchSchema,
   workbookOperationSchema,
-} from '../src/domain/workbook-dsl'
-import { columnIndex, columnLabel, parseRange, rangeCellCount } from '../src/domain/cell-address'
+} from '@genoffice/xlsx-gateway/domain/workbook-dsl'
+import {
+  columnIndex,
+  columnLabel,
+  parseRange,
+  rangeCellCount,
+} from '@genoffice/xlsx-gateway/domain/cell-address'
 
 describe('cell-address helpers', () => {
   it('round-trips column labels', () => {
@@ -60,7 +65,7 @@ describe('expandToPrimitiveOps', () => {
           values: [['Q', 'A', 'note'], ['Q only']],
         },
       ]),
-    ).toThrow(/rectangular.*row 1 has 3 cell\(s\) but row 2 has 1/)
+    ).toThrow(/rectangular.*values\[0\] has 3 cell\(s\) but values\[1\] has 1/)
   })
 
   it('accepts range as an alias for start when its size matches values', () => {

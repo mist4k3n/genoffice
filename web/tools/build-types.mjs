@@ -43,7 +43,39 @@ const entry = join(staging, relative(repoRoot, join(webRoot, 'src/embed/index.d.
 rmSync(staging, { recursive: true, force: true })
 
 console.log('tsc --emitDeclarationOnly …')
-execFileSync('npx', ['tsc', '-p', 'tsconfig.build.json'], { cwd: webRoot, stdio: 'inherit' })
+/**
+ * One class of error is tolerated, and only one: TS7056, "the inferred type of
+ * this node exceeds the maximum length the compiler will serialize".
+ *
+ * Upstream's `i18n/strings.ts` trips it -- twenty-one locales of fourteen
+ * hundred keys is past what tsc will write into a `.d.ts` -- and the limit is
+ * about *serializing* that type, not about checking it: `npm run typecheck` is
+ * clean, every other declaration is still emitted, and nothing in this
+ * package's public surface mentions the dictionary. Failing the build over it
+ * would mean annotating an upstream file for no one's benefit.
+ *
+ * Anything else tsc says fails the build.
+ */
+let tscOutput = ''
+try {
+  tscOutput = execFileSync('npx', ['tsc', '-p', 'tsconfig.build.json'], {
+    cwd: webRoot,
+    encoding: 'utf8',
+  })
+} catch (error) {
+  tscOutput = `${error.stdout ?? ''}${error.stderr ?? ''}`
+  const fatal = tscOutput
+    .split('\n')
+    .filter((line) => /error TS\d+:/.test(line))
+    .filter((line) => !line.includes('error TS7056:'))
+  if (fatal.length > 0) {
+    console.error(tscOutput.trim())
+    process.exit(1)
+  }
+  for (const line of tscOutput.split('\n').filter((l) => l.includes('TS7056'))) {
+    console.log(`  tolerated: ${line.trim()}`)
+  }
+}
 
 if (!existsSync(entry)) {
   console.error(`expected a declaration for the entry at ${entry}, and there is none`)

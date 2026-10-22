@@ -4,6 +4,7 @@ import { DEFAULT_HEADER_FOOTER, DEFAULT_WATERMARK } from './stamps'
 import type { HeaderFooterConfig, WatermarkConfig } from './stamps'
 import type { TFunc } from './i18n/locale'
 import { ColorPickerPopover } from './ColorPicker'
+import { useModalDialog } from './modal-dialog'
 
 /** Watermark / header-footer config dialog; on confirm App generates stamps and marks unsaved changes */
 export function StampDialog({
@@ -20,6 +21,8 @@ export function StampDialog({
   const [hf, setHf] = useState<HeaderFooterConfig>(DEFAULT_HEADER_FOOTER)
   const [colorOpen, setColorOpen] = useState(false)
   const colorWrapRef = useRef<HTMLSpanElement>(null)
+  // The color popover handles Escape itself while open
+  const dialogRef = useModalDialog(onCancel, { escape: !colorOpen })
 
   // outside-click / Escape close for the color popover (no blur close: the
   // native "More Colors" dialog blurs the window while it is open)
@@ -64,7 +67,14 @@ export function StampDialog({
 
   return (
     <div className="pdf-modal-mask" onClick={onCancel}>
-      <div className="pdf-modal pdf-modal-wide" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="pdf-modal pdf-modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('stampTitle')}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="pdf-modal-title">{t('stampTitle')}</div>
         <div className="pdf-sign-tabs">
           <button
@@ -89,7 +99,6 @@ export function StampDialog({
                 className="pdf-modal-input"
                 value={wm.text}
                 placeholder={t('watermarkPlaceholder')}
-                autoFocus
                 onChange={(e) => setWm({ ...wm, text: e.target.value })}
               />
             </label>

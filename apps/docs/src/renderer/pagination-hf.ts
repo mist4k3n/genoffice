@@ -1,9 +1,66 @@
 // Header/footer variant resolution and page-number sequences / formats.
-import type { HeaderFooter, HfPartInfo, SectionInfo } from '@genoffice/docx-engine'
+import type { HeaderFooter, HfImage, HfPartInfo, SectionInfo } from '@genoffice/docx-engine'
 
 import type { PageSlice } from './pagination-types'
 
 export type HfVariant = 'default' | 'first' | 'even'
+
+/** the parsed strips of a one-section document, one slot per variant */
+export interface HfSet {
+  header: HeaderFooter | null
+  footer: HeaderFooter | null
+  headerFirst: HeaderFooter | null
+  footerFirst: HeaderFooter | null
+  headerEven: HeaderFooter | null
+  footerEven: HeaderFooter | null
+  titlePg: boolean
+  evenOddHf: boolean
+  /** images in each variant part (logos etc., display-only) */
+  images?: Partial<
+    Record<
+      'header' | 'footer' | 'headerFirst' | 'footerFirst' | 'headerEven' | 'footerEven',
+      HfImage[]
+    >
+  >
+}
+
+export interface PageHf {
+  header: HeaderFooter | null
+  footer: HeaderFooter | null
+  headerImages?: HfImage[]
+  footerImages?: HfImage[]
+}
+
+export type HfResolve = (kind: 'header' | 'footer') => {
+  value: HeaderFooter | null
+  images?: HfImage[]
+}
+
+/**
+ * The strips a page shows. The resolver carries the pending state (strip edits,
+ * Link to Previous) and wins whenever the host supplies one; the parsed set is
+ * the fallback for a preview mounted without it.
+ */
+export function pageHfStrips(
+  variant: HfVariant,
+  resolve: HfResolve | undefined,
+  set: HfSet,
+): PageHf {
+  if (resolve) {
+    const h = resolve('header')
+    const f = resolve('footer')
+    return { header: h.value, footer: f.value, headerImages: h.images, footerImages: f.images }
+  }
+  const slot = variant === 'default' ? '' : variant === 'first' ? 'First' : 'Even'
+  const headerSlot = `header${slot}` as const
+  const footerSlot = `footer${slot}` as const
+  return {
+    header: set[headerSlot],
+    footer: set[footerSlot],
+    headerImages: set.images?.[headerSlot],
+    footerImages: set.images?.[footerSlot],
+  }
+}
 
 export interface SectionHfRefs {
   header: Partial<Record<HfVariant, string>>
@@ -61,6 +118,19 @@ export function hasPrintableHeaderFooter(input: {
   })
 }
 
+/** Header/footer variant a page renders: the titlePg first page of its section
+ *  takes 'first', an even page under evenAndOddHeaders takes 'even' */
+export function hfVariantOf(
+  titlePg: boolean | undefined,
+  firstOfSection: boolean,
+  evenOddHf: boolean,
+  pageNo: number,
+): 'first' | 'even' | 'default' {
+  if (titlePg && firstOfSection) return 'first'
+  if (evenOddHf && pageNo % 2 === 0) return 'even'
+  return 'default'
+}
+
 /** Displayed page number per page: restart at the section's pgNumType w:start, otherwise continue;
  *  evenPage/oddPage section breaks skip a number to fix parity (when not restarting) */
 export function pageNumbers(slices: PageSlice[], sections: SectionInfo[]): number[] {
@@ -101,9 +171,21 @@ const ROMAN: Array<[number, string]> = [
   [1, 'I'],
 ]
 
+/** Page numbers arrive from the file (w:pgNumType w:start) and AI setups: a
+ *  non-finite or huge value must not hang toRoman/toLetters or OOM toGreek's
+ *  repeat(). Bound to a million pages (far beyond real documents). */
+const MAX_PAGE_NUMBER = 1_000_000
+
+function boundedPageNumber(n: number): number {
+  if (!Number.isFinite(n)) return 1
+  const floored = Math.floor(n)
+  if (floored < 1) return 1
+  return Math.min(floored, MAX_PAGE_NUMBER)
+}
+
 function toRoman(n: number): string {
   let out = ''
-  let rest = Math.max(1, Math.floor(n))
+  let rest = boundedPageNumber(n)
   for (const [v, s] of ROMAN) {
     while (rest >= v) {
       out += s
@@ -116,7 +198,7 @@ function toRoman(n: number): string {
 /** 1→A ... 26→Z, 27→AA (Word letter numbering) */
 function toLetters(n: number): string {
   let out = ''
-  let rest = Math.max(1, Math.floor(n))
+  let rest = boundedPageNumber(n)
   while (rest > 0) {
     rest -= 1
     out = String.fromCharCode(65 + (rest % 26)) + out
@@ -126,10 +208,11 @@ function toLetters(n: number): string {
 }
 
 function toGreek(n: number, base: number): string {
-  if (n < 1) return String(n)
+  const bounded = boundedPageNumber(n)
+  if (bounded < 1) return String(bounded)
   // 24-letter alphabet (no final sigma); 25 -> αα, skip the ς slot from the 18th letter on
-  const idx = ((n - 1) % 24) + 1
-  const repeat = Math.floor((n - 1) / 24) + 1
+  const idx = ((bounded - 1) % 24) + 1
+  const repeat = Math.floor((bounded - 1) / 24) + 1
   return String.fromCharCode(base + idx - 1 + (idx >= 18 ? 1 : 0)).repeat(repeat)
 }
 

@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { AiPanel } from '../src/renderer/ai/AiPanel'
+import { t } from '../src/renderer/i18n/locale'
 import { AI_PROVIDERS, type AiSettings } from '../src/shared/ipc'
 
 // New chat must drop staged composer attachments along with the transcript:
@@ -50,8 +51,6 @@ function mount(element: React.ReactElement): { container: HTMLElement; cleanup: 
 }
 
 function panelProps(editor: Editor) {
-  // No onCollapse: the New chat button is then the only .ai-header-btn,
-  // which keeps the selector independent of the active i18n locale.
   return { editor, blocks: [], settings, open: true }
 }
 
@@ -100,18 +99,23 @@ describe('AiPanel new chat attachments', () => {
       try {
         await flush()
         await flush()
-        // Stage a file through the attach button.
-        const attach = container.querySelector<HTMLButtonElement>('.ai-attach-btn')
-        expect(attach).not.toBeNull()
+        // Stage a file through the "+" menu's Add file item.
+        const plus = container.querySelector<HTMLButtonElement>('.ai-plus-btn')
+        expect(plus).not.toBeNull()
+        act(() => plus!.click())
+        const addFile = container.querySelector<HTMLButtonElement>('.ai-plus-pop .ai-plus-item')
+        expect(addFile).not.toBeNull()
         await act(async () => {
-          attach!.click()
+          addFile!.click()
           await new Promise((resolve) => setTimeout(resolve, 0))
         })
         await flush()
         expect(container.querySelector('.ai-attachments')).not.toBeNull()
 
         // New chat clears the composer strip (transcript goes with it).
-        const button = container.querySelector<HTMLButtonElement>('.ai-header-btn')
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${t('aiNewChatTitle')}"]`,
+        )
         expect(button).not.toBeNull()
         act(() => button!.click())
         expect(container.querySelector('.ai-attachments')).toBeNull()

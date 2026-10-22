@@ -100,6 +100,34 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
     note: 'crash recovery, phase 02',
   },
   onChromePressed: { status: 'shell', channel: 'app:chrome-pressed', note: 'tab strip press' },
+  onDocumentThemeChanged: {
+    status: 'shell',
+    channel: 'app:document-theme-changed',
+    note: 'the dark page is the host\u2019s decision; theme arrives as a prop',
+  },
+  onUserDisplayNameChanged: {
+    status: 'shell',
+    channel: 'app:author-name-changed',
+    note: 'no shell Home to rename the author',
+  },
+  onAiSettingsChanged: {
+    status: 'shell',
+    channel: IPC_CHANNELS.aiSettingsChanged,
+    note: 'nothing changes them while the AI surface is off',
+  },
+  onMcpCommand: {
+    status: 'shell',
+    channel: IPC_CHANNELS.mcpCommand,
+    note: 'the desktop shell pushes these; Papan has its own assistant',
+  },
+  // Not permanent, unlike its neighbours: the engine pool *does* know when a
+  // sidecar dies. Wiring it as a push would make recovery positive instead of
+  // inferred from a session guard's error text -- PAPAN-INTEGRATION.md, D3.
+  onSidecarCrashed: {
+    status: 'shell',
+    channel: IPC_CHANNELS.sidecarCrashed,
+    note: 'the pool could push this; until it does, a crash is inferred',
+  },
 
   // ── document lifecycle (phase 02/03) ─────────────────────────────────────
   // On the web there is no file dialog: the document is whichever one the
@@ -113,6 +141,14 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   readWorkbookMedia: { status: 'http', channel: IPC_CHANNELS.readWorkbookMedia },
   readPivotDefinition: { status: 'http', channel: IPC_CHANNELS.readPivotDefinition },
   recalcWorkbook: { status: 'http', channel: IPC_CHANNELS.recalcWorkbook },
+  // Pairs with onSidecarCrashed: re-open a known path through the normal open
+  // path to adopt a live session. The server has that pipeline already.
+  reopenWorkbook: { status: 'todo', channel: IPC_CHANNELS.reopenWorkbook },
+  // Find run inside the engine over the file's chunk index rather than over
+  // what the viewport happens to hold -- the streamed-workbook case, which is
+  // every heavy workbook on the web.
+  findWorkbookCells: { status: 'todo', channel: IPC_CHANNELS.findWorkbookCells },
+  readWorkbookRowOutline: { status: 'todo', channel: IPC_CHANNELS.readWorkbookRowOutline },
 
   // ── save ─────────────────────────────────────────────────────────────────
   saveWorkbookEdits: { status: 'http', channel: IPC_CHANNELS.saveWorkbook },
@@ -135,6 +171,17 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   // round trip would only hand the bytes back again.
   exportCsv: { status: 'local', channel: IPC_CHANNELS.exportCsv },
   createDocument: { status: 'todo', channel: IPC_CHANNELS.createDocument },
+  // Printing is Electron's: a browser has no printer list and no silent
+  // print. The web answer to both is export-PDF plus the browser's own print.
+  listPrinters: { status: 'todo', channel: IPC_CHANNELS.listPrinters },
+  printWorkbook: { status: 'todo', channel: IPC_CHANNELS.printWorkbook },
+  // The shell's headless-export handshake: it queues an out path before the
+  // renderer boots and waits for the result. Pairs with exportPdf above.
+  // Answered in the browser: there is no shell to queue an export path, and
+  // the renderer asks on every boot, so a rejection would be an uncaught error
+  // on every open rather than a feature gap.
+  consumeHeadlessExport: { status: 'local', channel: 'sheets:consume-headless-export' },
+  headlessExportDone: { status: 'todo', channel: 'sheets:headless-export-done' },
 
   // ── AI (phase 04) ────────────────────────────────────────────────────────
   aiStream: { status: 'todo', channel: IPC_CHANNELS.aiStream },
@@ -146,6 +193,11 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
   webSearch: { status: 'todo', channel: 'ai:web-search' },
   imageSearch: { status: 'todo', channel: IPC_CHANNELS.aiImageSearch },
   generateImage: { status: 'todo', channel: IPC_CHANNELS.aiGenerateImage },
+  setAiPanelPrefs: { status: 'todo', channel: 'app:set-ai-panel-prefs' },
+  openAiModelSettings: { status: 'todo', channel: IPC_CHANNELS.aiOpenModelSettings },
+  openSkillsSettings: { status: 'todo', channel: 'ai:open-skills-settings' },
+  skillsList: { status: 'todo', channel: 'ai:skills-list' },
+  skillText: { status: 'todo', channel: 'ai:skill-text' },
 
   // ── assets and attachments (phase 03) ────────────────────────────────────
   readLocalImage: { status: 'todo', channel: IPC_CHANNELS.readLocalImage },
@@ -176,6 +228,33 @@ export const COVERAGE: Record<keyof DesktopApi, Entry> = {
     status: 'local',
     channel: IPC_CHANNELS.openExternal,
     note: 'window.open; a round trip to learn a URL we already have is waste',
+  },
+  openSourcePath: {
+    status: 'todo',
+    channel: 'home:open-path',
+    note: 'shell file navigation; a host routes its own documents',
+  },
+  getDocumentTheme: {
+    status: 'todo',
+    channel: 'app:get-document-theme',
+    note: 'the embed resolves the dark page from its own container, not from a setting',
+  },
+  getUserDisplayName: {
+    status: 'local',
+    channel: IPC_CHANNELS.userDisplayName,
+    note: "threaded-comment authorship; answers '' until the server serves identify()'s user",
+  },
+  // Sends, not requests: the bridge installs against a no-op `onMcpCommand`
+  // and then announces into nothing. A send with no listener is a no-op.
+  reportMcpResult: {
+    status: 'local',
+    channel: IPC_CHANNELS.mcpResult,
+    note: 'the desktop MCP bridge; no web counterpart',
+  },
+  signalMcpReady: {
+    status: 'local',
+    channel: IPC_CHANNELS.mcpReady,
+    note: 'the desktop MCP bridge; no web counterpart',
   },
 }
 

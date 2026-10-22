@@ -20,6 +20,7 @@ interface FakeWebContents {
   once: ReturnType<typeof vi.fn>
   on: ReturnType<typeof vi.fn>
   setWindowOpenHandler: ReturnType<typeof vi.fn>
+  loadURL: ReturnType<typeof vi.fn>
   listeners: Map<string, () => void>
 }
 
@@ -41,6 +42,7 @@ function makeFakeWebContents(): FakeWebContents {
       listeners.set(event, handler)
     }),
     setWindowOpenHandler: vi.fn(),
+    loadURL: vi.fn(),
   }
   lastWebContents = webContents
   return webContents
@@ -92,7 +94,7 @@ afterEach(() => {
 })
 
 describe('in-place PDF page operation writes', () => {
-  it('removes the .gensave temp when an insert-page rename fails', async () => {
+  it('keeps the original when an insert-page rename and in-place fallback both fail', async () => {
     dir = mkdtempSync(join(tmpdir(), 'pdf-page-write-'))
     const path = join(dir, 'doc.pdf')
     const doc = await PDFDocument.create()
@@ -116,6 +118,7 @@ describe('in-place PDF page operation writes', () => {
 
     expect(result.ok).toBe(false)
     expect(readFileSync(preserved)).toEqual(original)
-    expect(readdirSync(dir).filter((name) => name.includes('.gensave-'))).toEqual([])
+    // The shared writer keeps the finished temp beside the target so the new bytes survive
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toHaveLength(1)
   })
 })

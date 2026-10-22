@@ -5,7 +5,7 @@
  */
 import JSZip from 'jszip'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { applyCellEditsToXlsx } from '../src/gateway/xlsx-gateway'
+import { applyCellEditsToXlsx } from '@genoffice/xlsx-gateway/gateway/xlsx-gateway'
 import { handleSave, type SaveContext } from '../src/renderer/save-actions'
 import { createEditJournal, recordSetRangeValues } from '../src/renderer/edit-journal'
 import { buildEditFixture } from './fixture-builder'
@@ -26,15 +26,18 @@ function ctxWith(opts: { dirty: boolean; needsSaveAs?: boolean; restoredFromReco
   messages: string[]
   journal: ReturnType<typeof createEditJournal>
   overlay: Map<string, Map<string, { v?: string | number | boolean | null }>>
+  incompleteRuns: Set<string>
 } {
   const journal = createEditJournal()
   if (opts.dirty) recordSetRangeValues(journal, 'sheet-1', { 0: { 0: { v: 'edited' } } })
   const messages: string[] = []
   const overlay = new Map<string, Map<string, { v?: string | number | boolean | null }>>()
+  const incompleteRuns = new Set<string>()
   return {
     messages,
     journal,
     overlay,
+    incompleteRuns,
     ctx: {
       univerRef: { current: null },
       stashViewRestore: () => {},
@@ -47,13 +50,14 @@ function ctxWith(opts: { dirty: boolean; needsSaveAs?: boolean; restoredFromReco
             failed: false,
             formulaCells: new Map(),
             overlay,
+            incompleteRuns,
           },
           // The host bridge is per workbook state, not a page-level global, so that one
           // page can hold several editors each bound to its own document. Tests build
           // this state by hand, so they supply it the same way the app does.
           get api() {
-      return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
-    },
+            return (globalThis as { window?: { desktopApi?: unknown } }).window?.desktopApi as never
+          },
           file: {
             sessionId: '11111111-1111-4111-8111-111111111111',
             needsSaveAs: !!opts.needsSaveAs,
@@ -97,10 +101,12 @@ describe('handleSave recovery mode', () => {
     expect(messages).toEqual([])
   })
 
-  it('a failed copy is swallowed (best-effort, never surfaces)', async () => {
+  it('a failed copy is swallowed (best-effort, never surfaces; resolves not-ok)', async () => {
     writeWorkbookRecovery.mockRejectedValue(new Error('disk full'))
     const { ctx, messages } = ctxWith({ dirty: true })
-    await expect(handleSave(ctx, 'recovery')).resolves.toBeUndefined()
+    // handleSave now reports an outcome (the MCP bridge reads it); recovery
+    // mode still stays silent on failure
+    await expect(handleSave(ctx, 'recovery')).resolves.toEqual({ ok: false })
     expect(messages).toEqual([])
   })
 })
@@ -186,6 +192,27 @@ describe('handleSave formula cache overlay', () => {
     const savedB3 = /<c r="B3"[^>]*>[\s\S]*?<\/c>/.exec(savedWorksheet)?.[0]
     expect(savedB3).toContain('<f>2+2</f>')
     expect(savedB3).not.toContain('<v>')
+  })
+
+  it('drops a whole sheet overlay when its run kept any cached value', async () => {
+    const { ctx, journal, overlay, incompleteRuns } = ctxWith({ dirty: false })
+    recordSetRangeValues(journal, 'sheet-1', { 5: { 5: { v: 1 } } })
+    overlay.set(
+      'sheet-1',
+      new Map([
+        // IFERROR(D14/D8,0) laundered to 0 by a SUMPRODUCT gap: must not
+        // replace the file's cached result on save.
+        ['14:3', { v: 0 }],
+        ['7:3', { v: 56 }],
+      ]),
+    )
+    overlay.set('sheet-2', new Map([['0:0', { v: 7 }]]))
+    incompleteRuns.add('sheet-1')
+    await handleSave(ctx, 'save')
+    const payload = saveWorkbookEdits.mock.calls[0]![0] as {
+      formulaValues: { sheetId: string; row: number; column: number; value: unknown }[]
+    }
+    expect(payload.formulaValues).toEqual([{ sheetId: 'sheet-2', row: 0, column: 0, value: 7 }])
   })
 
   it("never writes IronCalc's #ERROR! into a cached <v> (issue 235)", async () => {

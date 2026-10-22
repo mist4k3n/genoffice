@@ -9,11 +9,13 @@ freely redistributable with the app. Licenses: Carlito and Liberation are
 | ---------------- | ---------- | ---------------------------------- |
 | Carlito GO       | OFL 1.1    | Calibri (Word's default body font) |
 | Caladea          | Apache-2.0 | Cambria                            |
+| Cambria Math GO  | Apache-2.0 | Cambria Math (Caladea, adjusted)   |
 | Liberation Serif | OFL 1.1    | Times New Roman                    |
 | Liberation Sans  | OFL 1.1    | Arial                              |
 | Liberation Mono  | OFL 1.1    | Courier New                        |
 | Aptos GO         | OFL 1.1    | Aptos (Carlito, size-adjusted)     |
 | Aptos Display GO | OFL 1.1    | Aptos Display (Carlito, adjusted)  |
+| Aptos Narrow GO  | OFL 1.1    | Aptos Narrow (Carlito, adjusted)   |
 
 "Carlito GO" (`Carlito-*.ttf`) is a derivative of Carlito 1.103: a build-time patch
 (`tools/patch-carlito-vi.py`) rebuilds Vietnamese precomposed glyphs whose above mark
@@ -30,14 +32,17 @@ pagination model (`tests/helpers/lo-fonts.ts` measures the same set of files).
 
 Registration lives in `fonts.css`; family-name mapping in `cssFontFamily()` of `line-metrics.ts`.
 
-"Aptos GO" / "Aptos Display GO" are not separate files: they are `size-adjust`ed
-views of the Carlito faces (Word probe 2026-09-03 against Word's bundled Aptos).
-Aptos letters run ~6.8% wider than Carlito's, digits +5.4%, the space 10%
-narrower, so each weight registers three faces (general, `U+0030-0039`,
-`U+0020/00A0`) — later faces win inside their unicode-range. Aptos Display is
-close to Carlito for letters but shares the narrow space. Pitch stays Calibri's
-1.22 (`lineHeightFactor`). `tests/aptos-alias-metrics.test.ts` holds the probed
-sentence widths.
+"Aptos GO" / "Aptos Display GO" / "Aptos Narrow GO" are not separate files: they
+are `size-adjust`ed views of the Carlito faces. Aptos is not a scale of Carlito
+(per glyph the ratio spans 0.87 to 1.22), so each face declares the
+corpus-weighted letter scale as its general rule plus one range-limited face per
+1.5% advance bucket of the ASCII letters, digits, space and common punctuation;
+later faces win inside their unicode-range. The ratios are Aptos hmtx (Word's
+bundled DFonts / cloud-font cache, which Word PDF char origins reproduce
+exactly) over Carlito hmtx; the block is generated from the font files, refit
+rather than hand-edit it. Pitch stays Calibri's 1.22 (`lineHeightFactor`).
+`tests/aptos-alias-metrics.test.ts` holds the Word-probed sentence widths
+(2026-09-03, 2026-10-20).
 
 ## CJK fallback
 
@@ -78,7 +83,12 @@ would shift line breaks ~8% vs Word), serif digits → 0.596em and space →
 0.333em (measured Batang values), sans Basic Latin (U+0020-007E, U+00A0) →
 measured Malgun Gothic advances (space 0.352em, digits 0.551em; Noto's 0.224em
 space alone drifted Korean sans line breaks ~3%/line —
-`tools/normalize-kr-sans-hmtx.py`, asserted by `tests/kr-font-metrics.test.ts`).
+`tools/normalize-kr-sans-hmtx.py`, asserted by `tests/kr-font-metrics.test.ts`);
+the CJK brackets U+3008-3011/3014-3015/300C-300F and U+203B are proportional
+in Malgun (0.49-0.60em) and take its advances too, as do Latin-1 Supplement
+(U+00A1-00FF; middle dot 0.219em vs Noto's 0.561em, the usual Korean list
+separator) and the General Punctuation glyphs Malgun carries (dashes, quotes,
+bullet, ellipsis).
 The printable Latin outlines are also horizontally transformed to the measured
 ink widths and side bearings of Batang/Malgun
 (`tools/normalize-kr-latin-metrics.py`,
@@ -151,6 +161,25 @@ checked in as `GenOfficePoppins-{Regular,Bold}-subset.woff2`. Renamed (no
 Reserved Font Name upstream) so a locally installed Poppins wins by chain
 order. Italic synthesizes oblique from these faces.
 
+## DM Sans (Google Fonts)
+
+| Font                             | Role                                 |
+| -------------------------------- | ------------------------------------ |
+| GenOffice DM Sans (subset woff2) | real face for DM Sans-declaring docs |
+
+Source: DM Sans 1.200 Regular/Bold statics from [google/fonts](https://github.com/google/fonts/tree/af0704e25dfad3e8999a2955cbbdfa2b28099617/ofl/dmsans)
+(SIL OFL 1.1; the current upstream is a variable font whose instances no
+longer share the 1.200 advances). Word lays a DM Sans document out with the
+installed Google Fonts face: corpus 2026-09-30 PDFs embed DMSans-Regular/Bold
+whose hmtx equals the 1.200 statics glyph for glyph (hhea = typo = win =
+992/-310/0, line box 1.302em, 9 pt body pitch 11.7), while the Helvetica-class
+fallback runs ~7% narrower per line and 1.15-spaced. Subset to Latin + Latin
+Extended + punctuation/currency, advances and vertical metrics **unmodified**
+(`tools/build-dm-sans-font.py`), checked in as
+`GenOfficeDMSans-{Regular,Bold}-subset.woff2`. Renamed (no Reserved Font Name
+of its own upstream) so a locally installed DM Sans wins by chain order.
+Italic synthesizes oblique from these faces.
+
 ## Tamil fallback
 
 | Font                    | Role                                     |
@@ -167,6 +196,24 @@ Tamil-letter ratio (`tools/build-tamil-font.py`; shaped sentence R vs Latha
 0.994, every probe sentence within ±2.3%). The face ships no Latin letters
 (upstream Noto Sans Tamil has none); Latin falls through the chain. Renamed
 per OFL ("Noto" is a Reserved Font Name; advances are modified).
+
+## Bengali fallback
+
+| Font                      | Role                                         |
+| ------------------------- | -------------------------------------------- |
+| GenOffice Bengali (woff2) | Nirmala UI-metric stand-in, Regular and Bold |
+
+Source: Noto Sans Bengali Regular/Bold from [notofonts](https://github.com/notofonts/notofonts.github.io)
+(SIL OFL 1.1). Word for Mac renders Nirmala UI for real (M365 cloud font);
+macOS has no twin and Chromium's fallback (Kohinoor Bangla) shapes ~8%
+narrower, so a two-page Bengali notice fits one page. Advances are rewritten
+to Nirmala UI's: the 132 cmap-shared codepoints exactly (86% of a legal
+notice's shaped width), remaining glyphs (conjuncts, half forms) by one scale
+fitted so the corpus' shaped width matches (`tools/build-bengali-font.py`;
+body paragraphs within 0.98-1.02, every paragraph within 0.93-1.07). The face
+ships no Latin letters or ASCII digits/periods (upstream has none); those fall
+through the chain to Kohinoor Bangla. Renamed per OFL ("Noto" is a Reserved
+Font Name; advances are modified).
 
 ## Arabic fallback
 

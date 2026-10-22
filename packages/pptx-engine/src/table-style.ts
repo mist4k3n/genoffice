@@ -23,6 +23,11 @@ export interface TablePartStyle {
   fill?: Fill
   bold?: boolean
   textColor?: string
+  /** <a:tcTxStyle><a:fontRef idx>: the theme font scheme cell text follows (every built-in
+   *  style says minor), ranking above presentation defaults but below the cell's own styles */
+  fontRef?: 'minor' | 'major'
+  /** <a:tcTxStyle><a:font>: explicit per-bucket typefaces */
+  font?: { latin?: string; ea?: string; cs?: string }
 }
 
 export interface TableStyleDef {
@@ -149,6 +154,80 @@ const BUILTIN: Record<string, { family: BuiltinFamily; accent?: string }> = {
   '{0660B408-B3CF-4A94-85FC-2B1E0A45F4A2}': { family: 'dark2', accent: 'accent1' },
   '{91EBBBCC-DAD2-459C-BE2E-F6DE35CF9A28}': { family: 'dark2', accent: 'accent3' },
   '{46F890A9-2807-4EBB-B81D-B2AA78EC7F39}': { family: 'dark2', accent: 'accent5' },
+}
+
+const FAMILY_LABEL: Record<BuiltinFamily, string> = {
+  themed1: 'Themed Style 1',
+  themed2: 'Themed Style 2',
+  light1: 'Light Style 1',
+  light2: 'Light Style 2',
+  light3: 'Light Style 3',
+  medium1: 'Medium Style 1',
+  medium2: 'Medium Style 2',
+  medium3: 'Medium Style 3',
+  medium4: 'Medium Style 4',
+  dark1: 'Dark Style 1',
+  dark2: 'Dark Style 2',
+}
+
+export interface BuiltinTableStyle {
+  id: string
+  /** Gallery name as PowerPoint shows it ("Medium Style 2 - Accent 1") */
+  name: string
+  family: BuiltinFamily
+  accent?: string
+}
+
+function builtinName(family: BuiltinFamily, accent?: string): string {
+  if (!accent) {
+    if (family === 'themed1') return 'No Style, No Grid'
+    if (family === 'themed2') return 'No Style, Table Grid'
+    return FAMILY_LABEL[family]
+  }
+  const n = accent.slice('accent'.length)
+  // Dark Style 2 pairs two accents per definition (official gallery labels)
+  if (family === 'dark2') return `${FAMILY_LABEL[family]} - Accent ${n}/Accent ${Number(n) + 1}`
+  return `${FAMILY_LABEL[family]} - Accent ${n}`
+}
+
+/** The 74 PowerPoint built-in table styles, gallery order. */
+export const BUILTIN_TABLE_STYLES: readonly BuiltinTableStyle[] = Object.entries(BUILTIN).map(
+  ([id, def]) => ({
+    id,
+    name: builtinName(def.family, def.accent),
+    family: def.family,
+    ...(def.accent ? { accent: def.accent } : {}),
+  }),
+)
+
+/** Gallery name of a built-in style id, or undefined for custom/unknown ids. */
+export function builtinTableStyleName(styleId: string | undefined): string | undefined {
+  if (!styleId) return undefined
+  const def = BUILTIN[styleId]
+  return def ? builtinName(def.family, def.accent) : undefined
+}
+
+/**
+ * GUID for a built-in style given its GUID or gallery name (case-insensitive,
+ * "Dark Style 2 - Accent 2" resolves to the Accent 1/Accent 2 definition).
+ */
+export function resolveBuiltinTableStyleId(nameOrId: string): string | undefined {
+  const key = nameOrId.trim()
+  if (/^\{[0-9A-Fa-f-]{36}\}$/.test(key)) {
+    const upper = key.toUpperCase()
+    return BUILTIN[upper] ? upper : undefined
+  }
+  const norm = key.toLowerCase().replace(/\s+/g, ' ')
+  for (const s of BUILTIN_TABLE_STYLES) {
+    if (s.name.toLowerCase() === norm) return s.id
+    if (s.family === 'dark2' && s.accent) {
+      const n = Number(s.accent.slice('accent'.length))
+      for (const alt of [n, n + 1]) {
+        if (norm === `dark style 2 - accent ${alt}`) return s.id
+      }
+    }
+  }
+  return undefined
 }
 
 /** Compatibility: the made-up "no style" GUID this app used to write (not in the official table). */
@@ -391,13 +470,16 @@ export function resolveTableStyle(
     const def = parseTableStylesXml(tableStylesXml, styleId, theme)
     if (def) return def
   }
-  // A tableStyles part that defines explicit styles but not this id renders unstyled in
-  // PowerPoint — the built-in gallery only backs an empty part (def-id only). Measured on
-  // prod imports: same undefined Medium2/Accent1 id styled with an empty part, transparent
-  // with a populated one (decorative shapes behind the table show through).
-  if (tableStylesXml && /<a:tblStyle[\s>]/.test(tableStylesXml)) return undefined
+  // The built-in gallery backs an undefined id even when the part defines other styles
+  // (prod deck: Light Style 1 - Accent 3 banding drawn next to a one-entry part). The
+  // earlier "transparent with a populated part" reading came from decks whose cells
+  // carried an explicit <a:noFill/>, which hides any style fill anyway.
   const builtin = BUILTIN[styleId]
-  if (builtin) return builtinStyle(builtin.family, builtin.accent, theme)
+  if (builtin) {
+    const def = builtinStyle(builtin.family, builtin.accent, theme)
+    def.wholeTbl = { fontRef: 'minor', ...def.wholeTbl }
+    return def
+  }
   if (styleId === LEGACY_NO_STYLE) return {}
   return undefined
 }
@@ -469,6 +551,13 @@ function readPart(part: unknown, theme: Theme | undefined): TablePartStyle | und
   if (p['a:tcTxStyle']) {
     const tx = asXmlNode(p['a:tcTxStyle'])
     if (tx['@_b'] === 'on') out.bold = true
+    const refIdx = asXmlNode(tx['a:fontRef'])['@_idx']
+    if (refIdx === 'minor' || refIdx === 'major') out.fontRef = refIdx
+    if (tx['a:font']) {
+      const f = asXmlNode(tx['a:font'])
+      const face = (tag: string) => asXmlNode(f[tag])['@_typeface'] as string | undefined
+      out.font = { latin: face('a:latin'), ea: face('a:ea'), cs: face('a:cs') }
+    }
     const c = readColor(tx, theme)
     if (c) out.textColor = c
   }

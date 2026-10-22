@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import type { HeaderFooter, HfImage, HfTextBox, SectionSettings } from '@genoffice/docx-engine'
 import {
-  HF_WASHOUT_FILTER,
+  hfCellParaStyle,
   hfFloatPagePos,
   hfHasVisibleContent,
+  hfImageHangsOnPara,
   hfStripGeom,
   hfTextBoxStyle,
+  hfWashoutFilter,
   makeGapHfEl,
   makeHfFloatImgEl,
 } from '../src/renderer/editor/hf-dom'
+
+const WASHOUT_PRESET = { gain: 0.3, blackLevel: 0.35 }
 import { estimateHfHeight, hfHeaderGeom } from '../src/renderer/line-metrics'
 import { effectiveTopPx } from '../src/renderer/pagination'
 
@@ -40,6 +44,35 @@ describe('header table cells keep per-paragraph lines', () => {
     expect(shaded.querySelectorAll('.page-hf-cell-para')).toHaveLength(1)
   })
 
+  it('cell paragraph spacing collapses as margins, adds as padding under doNotUseHTMLParagraphAutoSpacing', () => {
+    const props = { spaceBefore: 120, spaceAfter: 60, indentLeft: 150, indentFirstLine: 300 }
+    expect(hfCellParaStyle(props)).toMatchObject({
+      marginTop: '8.0px',
+      marginBottom: '4.0px',
+      paddingLeft: '10.0px',
+      textIndent: '20.0px',
+    })
+    const additive = hfCellParaStyle(props, undefined, undefined, { additiveSpacing: true })
+    expect(additive.paddingTop).toBe('8.0px')
+    expect(additive.marginTop).toBeUndefined()
+    // a tab-wrapped paragraph's middle line carries neither first- nor last-line props
+    const middle = hfCellParaStyle(props, { first: false, last: false })
+    expect(middle.marginTop).toBeUndefined()
+    expect(middle.marginBottom).toBeUndefined()
+    expect(middle.textIndent).toBeUndefined()
+    expect(middle.paddingLeft).toBe('10.0px')
+  })
+
+  it('a cell paragraph without run sizes takes its paragraph style size', () => {
+    expect(
+      hfCellParaStyle({ styleId: 'Caption8', sizeHalfPoints: 16 }, undefined, [{ text: 'x' }]),
+    ).toMatchObject({ fontSize: '8pt' })
+    expect(
+      hfCellParaStyle({ sizeHalfPoints: 16 }, undefined, [{ text: 'x', sizeHalfPoints: 20 }])
+        .fontSize,
+    ).toContain('10pt')
+  })
+
   it('estimateHfHeight sizes a table row by its tallest cell paragraph stack', () => {
     const oneLine = estimateHfHeight(
       { text: '', paras: [{ runs: [], cells: [{ paras: [[{ text: 'only' }]] }] }] },
@@ -59,6 +92,34 @@ describe('header table cells keep per-paragraph lines', () => {
     )
     expect(oneLine).toBeGreaterThan(0)
     expect(twoLines).toBeGreaterThan(oneLine * 1.5)
+  })
+
+  it('cell paragraph line spacing (style chain or direct) sizes the row and the cell line box', () => {
+    const rowOf = (lineSpacing: number) =>
+      estimateHfHeight(
+        {
+          text: '',
+          paras: [
+            {
+              runs: [],
+              cells: [
+                {
+                  paras: [[{ text: 'Faculty name' }]],
+                  paraProps: [{ lineRule: 'auto', lineRawTwips: lineSpacing * 240, lineSpacing }],
+                },
+              ],
+            },
+          ],
+        },
+        600,
+      )
+    const single = rowOf(1)
+    const double = rowOf(2)
+    expect(double).toBeGreaterThan(single * 1.8)
+    expect(
+      hfCellParaStyle({ lineRule: 'auto', lineRawTwips: 240, lineSpacing: 1 }).lineHeight,
+    ).toBe('calc(var(--doc-line-factor,1.2) * 1)')
+    expect(hfCellParaStyle({ align: 'right' }).lineHeight).toBeUndefined()
   })
 })
 
@@ -127,6 +188,20 @@ describe('floating header image positioning', () => {
     expect(hfFloatPagePos(img, box)).toEqual({ x: 106, y: 34, translateX: 0, translateY: 0 })
   })
 
+  it('footer paragraph-relative offsets measure from the footer strip top', () => {
+    const img: HfImage = {
+      dataUrl: 'data:,',
+      posXPx: 570,
+      posYPx: 52,
+      posHRel: 'margin',
+      posVRel: 'paragraph',
+      wrap: 'none',
+    }
+    // strip top = pageH - footerDist - reserved strip height
+    const pos = hfFloatPagePos(img, { ...box, paraOriginY: 1056 - 48 - 88 })
+    expect(pos).toEqual({ x: 666, y: 972, translateX: 0, translateY: 0 })
+  })
+
   it('alignment fields reproduce the legacy margin-box anchors', () => {
     expect(hfFloatPagePos({ dataUrl: 'data:,' }, box)).toEqual({
       x: 96,
@@ -152,27 +227,50 @@ describe('floating header image positioning', () => {
       widthPx: 816,
       heightPx: 1056,
       behind: true,
-      washout: true,
+      washout: WASHOUT_PRESET,
     }
     const el = makeHfFloatImgEl(img, box, 'gap')
     expect(el.className).toBe('page-hf-float-img')
     expect(el.style.left).toBe('0px')
     expect(el.style.top).toBe('calc(100% - 96px)')
     expect(el.style.width).toBe('816px')
-    expect(el.style.filter).toBe(HF_WASHOUT_FILTER)
+    expect(el.style.filter).toBe(hfWashoutFilter(WASHOUT_PRESET))
   })
 
-  it('washout filter fades toward white and keeps white pixels white (Word preset out = 0.3*in + 0.7)', () => {
-    const steps = [...HF_WASHOUT_FILTER.matchAll(/(invert|brightness)\(([\d.]+)\)/g)]
-    expect(steps).toHaveLength(3)
+  it('washout filter matches Word: black to 0.805, white from 1 - blacklevel up (preset out = 0.805 + 0.3*in)', () => {
+    const steps = [...hfWashoutFilter(WASHOUT_PRESET).matchAll(/(invert|brightness)\(([\d.]+)\)/g)]
+    expect(steps).toHaveLength(4)
     const apply = (v: number) =>
       steps.reduce((c, [, fn, amt]) => {
         const a = Number(amt)
         return fn === 'invert' ? c * (1 - a) + (1 - c) * a : Math.min(1, c * a)
       }, v)
-    expect(apply(1)).toBeCloseTo(1, 5)
-    expect(apply(0)).toBeCloseTo(0.7, 5)
-    expect(apply(0.5)).toBeCloseTo(0.85, 5)
+    expect(apply(1)).toBeCloseTo(1, 3)
+    expect(apply(0.65)).toBeCloseTo(1, 3)
+    expect(apply(0)).toBeCloseTo(0.805, 3)
+    expect(apply(0.3)).toBeCloseTo(0.895, 3)
+  })
+
+  it('rotated WordArt float renders inline SVG text stretched to the box, rotated about its center', () => {
+    const img: HfImage = {
+      dataUrl: '',
+      widthPx: 400,
+      heightPx: 200,
+      floating: true,
+      behind: true,
+      posH: 'center',
+      posV: 'center',
+      posHRel: 'margin',
+      posVRel: 'margin',
+      rotationDeg: 315,
+      wordArt: { text: 'DRAFT', colorHex: 'C0C0C0', opacity: 0.5, fontFamily: 'Calibri' },
+    }
+    const el = makeHfFloatImgEl(img, box, 'lead')
+    expect(el.style.transform).toBe('translate(-50%, -50%) rotate(315deg)')
+    expect(el.style.width).toBe('400px')
+    expect(el.style.zIndex).toBe('')
+    // jsdom has no canvas text metrics: the SVG stays empty instead of guessing glyph bounds
+    expect(el.querySelector('img')).toBeNull()
   })
 
   it('lead-hosted element positions from the first page content origin', () => {
@@ -449,5 +547,56 @@ describe('boxAnchored paragraphs (floating-textbox content)', () => {
     const stacked = makeGapHfEl({ kind: 'header', value, pageNo: 1, pageTotal: 1 })
     expect(stacked.querySelectorAll('.page-hf-textbox')).toHaveLength(0)
     expect(stacked.querySelectorAll(':scope > .page-hf-para')).toHaveLength(4)
+  })
+})
+
+describe('cell paragraph line factor and row-anchored pictures', () => {
+  it('sizes a cell line by the declared face factor, not the substitute metrics', () => {
+    const runs = [{ text: 'MONTEZ AZULEZ', fontAscii: 'Century Gothic', sizeHalfPoints: 32 }]
+    const style = hfCellParaStyle(undefined, undefined, runs)
+    expect(style['--doc-line-factor']).toBe('1.226')
+    expect(style.lineHeight).toContain('var(--doc-line-factor')
+    expect(hfCellParaStyle(undefined, undefined, [{ text: 'plain' }]).lineHeight).toBeUndefined()
+  })
+
+  it('hosts a row-anchored picture inside its anchor row at the paragraph offset', () => {
+    const value: HeaderFooter = {
+      text: '',
+      paras: [
+        { runs: [] },
+        { runs: [], cells: [{ paras: [[{ text: 'Title' }]] }, { paras: [[]] }] },
+      ],
+    }
+    const img: HfImage = {
+      dataUrl: 'data:image/png;base64,AA==',
+      widthPx: 58,
+      heightPx: 49,
+      floating: true,
+      wrap: 'none',
+      posHRel: 'margin',
+      posXPx: 606,
+      posVRel: 'paragraph',
+      posYPx: 3,
+      anchorPara: 1,
+    }
+    expect(hfImageHangsOnPara(img)).toBe(true)
+    expect(hfImageHangsOnPara({ ...img, anchorPara: undefined })).toBe(false)
+    const geom = hfStripGeom({
+      pageWidth: 12240,
+      pageHeight: 15840,
+      marginLeft: 720,
+      marginRight: 720,
+      marginTop: 349,
+      marginBottom: 720,
+      headerDist: 283,
+      footerDist: 57,
+    } as SectionSettings)
+    const el = makeGapHfEl({ kind: 'header', value, images: [img], pageNo: 1, pageTotal: 1, geom })
+    const hosted = el.querySelector<HTMLElement>('.page-hf-row.page-hf-anchor > img')!
+    expect(hosted).not.toBeNull()
+    expect(hosted.style.top).toBe('3px')
+    // margin band: x = marginLeft + posXPx, strip-relative = posXPx
+    expect(hosted.style.left).toBe('606px')
+    expect(el.querySelector('.page-hf-images')).toBeNull()
   })
 })

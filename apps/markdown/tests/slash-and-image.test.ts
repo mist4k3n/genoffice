@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildSlashItems, filterSlashItems } from '../src/renderer/editor/slashCommand'
-import { resolveImageSrc, unresolveImageSrc } from '../src/renderer/editor/localImage'
+import { dirOf, resolveImageSrc, unresolveImageSrc } from '../src/renderer/editor/localImage'
 import { moveSelectedBlocks, uiOp } from '../src/renderer/editor/ops'
 
 // Undestroyed views leave DOMObserver flush timers that fire after jsdom teardown
@@ -57,6 +57,17 @@ describe('resolveImageSrc', () => {
 
   it('returns the authored value when relative with no base dir', () => {
     expect(resolveImageSrc('assets/p.png', null)).toBe('assets/p.png')
+  })
+
+  it('does not double-encode an already percent-encoded path', () => {
+    expect(resolveImageSrc('%E5%9B%BE_files/image1.jpg', '/n')).toBe(
+      'md-asset:///n/%E5%9B%BE_files/image1.jpg',
+    )
+    expect(resolveImageSrc('/tmp/%E5%9B%BE.png', null)).toBe('md-asset:///tmp/%E5%9B%BE.png')
+  })
+
+  it('keeps a bare percent sign that is not an escape', () => {
+    expect(resolveImageSrc('100%.png', '/n')).toBe('md-asset:///n/100%25.png')
   })
 })
 
@@ -215,6 +226,18 @@ describe('resolveImageSrc on Windows paths', () => {
 
   it('resolves relative paths against a Windows base dir', () => {
     expect(resolveImageSrc('assets/p.png', 'C:\\notes')).toBe('md-asset:///C:/notes/assets/p.png')
+  })
+})
+
+describe('dirOf', () => {
+  it('returns the filesystem root for root-level files', () => {
+    expect(dirOf('/note.md')).toBe('/')
+    expect(resolveImageSrc('a.png', dirOf('/note.md'))).toBe('md-asset:///a.png')
+  })
+
+  it('returns containing dirs for nested and Windows paths', () => {
+    expect(dirOf('/a/b.md')).toBe('/a')
+    expect(dirOf('C:\\a\\b.md')).toBe('C:\\a')
   })
 })
 

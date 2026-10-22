@@ -27,6 +27,32 @@ async function cellA1(page: Page): Promise<{ x: number; y: number }> {
 }
 
 test.describe('sheets: a CSV keeps its identity through Save', () => {
+  test('blank-line CSV opens with one friendly notice and an open action', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'genoffice-empty-csv-e2e-'))
+    const csvSource = join(scratch, 'empty.csv')
+    await writeFile(csvSource, '\r\n'.repeat(5_927))
+
+    const launched = await launchShell({
+      onboardingSeen: true,
+      videoDir: 'sheets-empty-csv',
+      openFile: csvSource,
+    })
+    try {
+      const sheets = await waitForPageWithUrl(launched.app, '://sheets/')
+      await expect(sheets.locator('.csv-empty-notice')).toBeVisible({ timeout: 30_000 })
+      await expect(sheets.getByText('The CSV file has no data.')).toHaveCount(1)
+      await expect(
+        sheets.locator('.csv-empty-notice').getByRole('button', { name: /^Open Workbook/ }),
+      ).toBeVisible()
+      const shell = await waitForPageWithUrl(launched.app, 'shell/out')
+      await expect(shell.locator('.tab-title').filter({ hasText: 'empty.csv' })).toBeVisible()
+      await expect(sheets.locator('.workbook-status')).not.toContainText('Error invoking')
+      await expect(sheets.locator('.status-bar')).not.toContainText('Error invoking')
+    } finally {
+      await closeAndSaveVideo(launched, 'sheets-empty-csv')
+    }
+  })
+
   test('Cmd+S writes the edit back to the original .csv', async () => {
     const scratch = await mkdtemp(join(tmpdir(), 'genoffice-csv-save-e2e-'))
     const csvSource = join(scratch, 'data.csv')
@@ -38,12 +64,12 @@ test.describe('sheets: a CSV keeps its identity through Save', () => {
       openFile: csvSource,
     })
     try {
-      const sheets = await waitForPageWithUrl(launched.app, 'sheets/out')
+      const sheets = await waitForPageWithUrl(launched.app, '://sheets/')
       await waitForWorkbook(sheets)
 
       const a1 = await cellA1(sheets)
       await sheets.mouse.click(a1.x, a1.y)
-      await expect(sheets.locator('.name-box')).toHaveValue('A1')
+      await expect(sheets.locator('[data-u-comp="defined-name"] input')).toHaveValue('A1')
       await sheets.keyboard.type('Hello', { delay: 50 })
       await sheets.keyboard.press('Enter')
 
@@ -58,7 +84,7 @@ test.describe('sheets: a CSV keeps its identity through Save', () => {
       // Save may be refused politely until the preload finishes — retry.
       await expect(async () => {
         await launched.app.evaluate(({ webContents }) => {
-          const wc = webContents.getAllWebContents().find((w) => w.getURL().includes('sheets/out'))
+          const wc = webContents.getAllWebContents().find((w) => w.getURL().includes('://sheets/'))
           wc?.send('menu:action', 'save')
         })
         const bytes = await readFile(csvSource)

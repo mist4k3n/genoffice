@@ -14,12 +14,13 @@ import type { Node as PmNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import {
   AddMarkStep,
+  canJoin,
   Mapping,
   RemoveMarkStep,
   ReplaceAroundStep,
   ReplaceStep,
 } from '@tiptap/pm/transform'
-import { t } from '../i18n/locale'
+import { authorName } from '../author-name'
 
 export interface RevisionRange {
   from: number
@@ -29,6 +30,8 @@ export interface RevisionRange {
     | 'del'
     | 'both'
     | 'pPrChange'
+    | 'paraMarkDel'
+    | 'paraMarkIns'
     | 'moveFrom'
     | 'moveTo'
     | 'rPrChange'
@@ -47,7 +50,7 @@ export const TRACK_IGNORE = 'trackIgnore'
 
 const TRACKED_FORMAT_MARKS = new Set(['bold', 'italic', 'underline', 'strike', 'docTextStyle'])
 
-const TEXT_STYLE_FIELDS = [
+export const TEXT_STYLE_FIELDS = [
   'color',
   'sizeHalfPoints',
   'font',
@@ -60,7 +63,7 @@ const TEXT_STYLE_FIELDS = [
 ] as const
 
 const PARAGRAPH_NODE_TYPES = new Set(['docParagraph', 'docHeading', 'docListItem'])
-const PARAGRAPH_FORMAT_FIELDS = [
+export const PARAGRAPH_FORMAT_FIELDS = [
   'align',
   'lineSpacing',
   'lineRule',
@@ -68,6 +71,7 @@ const PARAGRAPH_FORMAT_FIELDS = [
   'indentLeft',
   'indentRight',
   'indentFirstLine',
+  'indentFirstLineChars',
   'spaceBefore',
   'spaceAfter',
   'pageBreakBefore',
@@ -180,37 +184,48 @@ export function collectRevisions(doc: PmNode): RevisionRange[] {
   const isSuppressed = (pos: number, kind: 'ins' | 'del' | 'both') =>
     suppressed.some((s) => pos >= s.from && pos < s.to && (kind === 'both' || s.kind === kind))
 
-  // First pass: collect paragraph revisions at any depth, including table cells.
+  // First pass: paragraph-level revisions at any depth, including table cells.
+  // A moved paragraph's text carries plain ins / del marks (the parser maps
+  // moveTo / moveFrom onto them); the paragraph attr only says they are a move.
+  const moveParas: Array<{
+    from: number
+    to: number
+    kind: 'moveFrom' | 'moveTo'
+    hasRuns?: boolean
+  }> = []
+  const credit = (raw: string | null): { author: string; date?: string } => {
+    try {
+      const parsed = raw ? JSON.parse(raw) : null
+      return { author: parsed?.author ?? '', ...(parsed?.date ? { date: parsed.date } : {}) }
+    } catch {
+      return { author: '' }
+    }
+  }
   doc.descendants((node, pos) => {
     if (!PARAGRAPH_NODE_TYPES.has(node.type.name)) return
+    const range = { from: pos, to: pos + node.nodeSize }
     const pPrChange = node.attrs?.pPrChange as string | null
+    const paraMarkDel = node.attrs?.paraMarkDel as string | null
+    const paraMarkIns = node.attrs?.paraMarkIns as string | null
     const moveRevision = node.attrs?.moveRevision as string | null
-    if (pPrChange) {
-      let author = ''
-      let date: string | undefined
-      try {
-        const parsed = JSON.parse(pPrChange)
-        author = parsed?.author ?? ''
-        date = parsed?.date
-      } catch {
-        /* ignore */
-      }
-      out.push({
-        from: pos,
-        to: pos + node.nodeSize,
-        kind: 'pPrChange',
-        author,
-        ...(date ? { date } : {}),
-      })
-    } else if (moveRevision === 'from' || moveRevision === 'to') {
-      out.push({
-        from: pos,
-        to: pos + node.nodeSize,
+    if (pPrChange) out.push({ ...range, kind: 'pPrChange', ...credit(pPrChange) })
+    if (paraMarkDel) out.push({ ...range, kind: 'paraMarkDel', ...credit(paraMarkDel) })
+    if (paraMarkIns) out.push({ ...range, kind: 'paraMarkIns', ...credit(paraMarkIns) })
+    if (moveRevision === 'from' || moveRevision === 'to')
+      moveParas.push({
+        ...range,
         kind: moveRevision === 'from' ? 'moveFrom' : 'moveTo',
-        author: '',
+        // a moved paragraph mark is handled as that mark's revision
+        hasRuns: !!(paraMarkDel || paraMarkIns),
       })
-    }
   })
+  const moveKindAt = (pos: number, kind: 'ins' | 'del'): 'moveFrom' | 'moveTo' | null => {
+    const para = moveParas.find((m) => pos >= m.from && pos < m.to)
+    if (!para) return null
+    const match = para.kind === 'moveFrom' ? kind === 'del' : kind === 'ins'
+    if (match) para.hasRuns = true
+    return match ? para.kind : null
+  }
 
   // Second pass: collect run-level text revisions (ins/del marks)
   doc.descendants((node, pos) => {
@@ -235,8 +250,9 @@ export function collectRevisions(doc: PmNode): RevisionRange[] {
       }
       return
     }
-    const kind: 'ins' | 'del' | 'both' = ins && del ? 'both' : ins ? 'ins' : 'del'
-    if (isSuppressed(pos, kind)) return
+    const textKind: 'ins' | 'del' | 'both' = ins && del ? 'both' : ins ? 'ins' : 'del'
+    if (isSuppressed(pos, textKind)) return
+    const kind = (textKind === 'both' ? null : moveKindAt(pos, textKind)) ?? textKind
     const src = del ?? ins!
     const author = String(src.attrs.author ?? '')
     const prev = out[out.length - 1]
@@ -252,6 +268,9 @@ export function collectRevisions(doc: PmNode): RevisionRange[] {
       })
     }
   })
+  // a moved paragraph with no run-level marks (empty, or the mark alone moved) is the revision itself
+  for (const m of moveParas)
+    if (!m.hasRuns) out.push({ from: m.from, to: m.to, kind: m.kind, author: '' })
   out.push(...tableRevs)
   return out.sort((a, b) => a.from - b.from)
 }
@@ -266,7 +285,11 @@ function stripTrackMarker(raw: string | null, tag: string, container: string): s
   return out
 }
 
-function applyRevisions(editor: Editor, ranges: RevisionRange[], mode: 'accept' | 'reject'): void {
+export function applyRevisions(
+  editor: Editor,
+  ranges: RevisionRange[],
+  mode: 'accept' | 'reject',
+): void {
   if (ranges.length === 0) return
   const { state } = editor
   const tr = state.tr
@@ -373,33 +396,19 @@ function applyRevisions(editor: Editor, ranges: RevisionRange[], mode: 'accept' 
       continue
     }
 
-    if (r.kind === 'moveFrom' || r.kind === 'moveTo') {
-      // moveFrom/moveTo: translate to del/ins logic using the same remove/keep semantics
-      const effectiveKind = r.kind === 'moveFrom' ? 'del' : 'ins'
-      const removeText = mode === 'accept' ? effectiveKind !== 'ins' : effectiveKind !== 'del'
-      if (removeText) {
-        const $from = state.doc.resolve(r.from)
-        const $to = state.doc.resolve(r.to)
-        if ($from.depth >= 1 && $from.sameParent($to) && state.doc.childCount > 1) {
-          tr.delete($from.before(), $to.after())
-        } else {
-          tr.delete(r.from, r.to)
-        }
-      } else if (mode === 'accept') {
-        tr.removeMark(r.from, r.to, state.schema.marks.ins)
-      } else {
-        tr.removeMark(r.from, r.to, state.schema.marks.del)
-      }
-      // Also clear the moveRevision attr from the node
-      try {
-        const $pos = state.doc.resolve(r.from + 1)
-        const nodePos = $pos.before($pos.depth)
-        if ($pos.parent.attrs?.moveRevision) {
-          tr.setNodeMarkup(nodePos, undefined, { ...$pos.parent.attrs, moveRevision: null })
-        }
-      } catch {
-        /* ignore if node is being deleted */
-      }
+    if (r.kind === 'paraMarkDel' || r.kind === 'paraMarkIns') {
+      // the mark itself is the revision: accepting a deletion / rejecting an
+      // insertion joins the paragraph into the next one (Word keeps the first
+      // paragraph's properties); the record leaves either way
+      const pos = tr.mapping.map(r.from, 1)
+      const node = tr.doc.nodeAt(pos)
+      if (!node || !node.attrs?.[r.kind]) continue
+      // a moved mark (w:pPr/w:rPr/w:moveFrom|moveTo) also flagged the paragraph as a move
+      tr.setNodeMarkup(pos, undefined, { ...node.attrs, [r.kind]: null, moveRevision: null })
+      const join = (mode === 'accept') === (r.kind === 'paraMarkDel')
+      const after = pos + node.nodeSize
+      if (join && tr.doc.resolve(after).nodeAfter?.isTextblock && canJoin(tr.doc, after))
+        tr.join(after)
       continue
     }
 
@@ -460,7 +469,25 @@ function applyRevisions(editor: Editor, ranges: RevisionRange[], mode: 'accept' 
       continue
     }
 
-    const removeText = mode === 'accept' ? r.kind !== 'ins' : r.kind !== 'del'
+    // moved text is a deletion at its source and an insertion at its destination
+    const textKind = r.kind === 'moveFrom' ? 'del' : r.kind === 'moveTo' ? 'ins' : r.kind
+    if (r.kind === 'moveFrom' || r.kind === 'moveTo') {
+      const block = state.doc.nodeAt(r.from)
+      if (block && PARAGRAPH_NODE_TYPES.has(block.type.name) && r.to === r.from + block.nodeSize) {
+        // whole-paragraph move with no run-level marks: the paragraph goes or stays as a block
+        const pos = tr.mapping.map(r.from, 1)
+        const node = tr.doc.nodeAt(pos)
+        if (!node?.attrs?.moveRevision) continue
+        const drop = (mode === 'accept') === (r.kind === 'moveFrom')
+        if (drop && tr.doc.resolve(pos).parent.childCount > 1) tr.delete(pos, pos + node.nodeSize)
+        else tr.setNodeMarkup(pos, undefined, { ...node.attrs, moveRevision: null })
+        continue
+      }
+      const $para = state.doc.resolve(r.from)
+      if ($para.parent.attrs?.moveRevision)
+        tr.setNodeMarkup($para.before(), undefined, { ...$para.parent.attrs, moveRevision: null })
+    }
+    const removeText = mode === 'accept' ? textKind !== 'ins' : textKind !== 'del'
     if (removeText) {
       // a revision covering a block's entire content removes the block itself
       // (Word: rejecting an inserted paragraph deletes the paragraph, not just
@@ -531,23 +558,31 @@ export function rejectCurrentRevision(editor: Editor): boolean {
   return true
 }
 
-/** move the selection to the next / previous revision (wraps around) */
-export function gotoRevision(editor: Editor, dir: 1 | -1): boolean {
+/** the next / previous revision after the selection (wraps around) */
+export function nextRevision(editor: Editor, dir: 1 | -1): RevisionRange | null {
   const ranges = collectRevisions(editor.state.doc)
-  if (ranges.length === 0) return false
+  if (ranges.length === 0) return null
   // compare range starts so adjacent revisions (shared boundary) still advance
   const anchor = editor.state.selection.from
-  const target =
-    dir === 1
-      ? (ranges.find((r) => r.from > anchor) ?? ranges[0])
-      : ([...ranges].reverse().find((r) => r.from < anchor) ?? ranges[ranges.length - 1])
+  return dir === 1
+    ? (ranges.find((r) => r.from > anchor) ?? ranges[0])
+    : ([...ranges].reverse().find((r) => r.from < anchor) ?? ranges[ranges.length - 1])
+}
+
+export function selectRevision(editor: Editor, target: RevisionRange): void {
   const tr = editor.state.tr
   // between: row/cell-level revision range endpoints are not text positions; snap to the nearest selectable text position
   tr.setSelection(TextSelection.between(tr.doc.resolve(target.from), tr.doc.resolve(target.to)))
   tr.scrollIntoView()
   tr.setMeta(TRACK_IGNORE, true)
   editor.view.dispatch(tr)
-  return true
+}
+
+/** move the selection to the next / previous revision (wraps around) */
+export function gotoRevision(editor: Editor, dir: 1 | -1): RevisionRange | null {
+  const target = nextRevision(editor, dir)
+  if (target) selectRevision(editor, target)
+  return target
 }
 
 export interface TrackChangesStorage {
@@ -575,7 +610,7 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
   name: 'trackChanges',
 
   addStorage() {
-    return { enabled: false, author: t('editorDefaultAuthor') }
+    return { enabled: false, author: authorName() }
   },
 
   addKeyboardShortcuts() {
@@ -792,30 +827,68 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
           const fullMapping = new Mapping(
             tracked.flatMap((transaction) => transaction.steps.map((step) => step.getMap())),
           )
-          const oldAnchors = new Map<number, { node: PmNode; pos: number }>()
-          oldState.doc.nodesBetween(oldFrom, oldTo, (node, pos) => {
-            const index = node.attrs?.docxIndex
-            if (typeof index === 'number') oldAnchors.set(index, { node, pos })
-            return false
-          })
-          const newAnchors = new Map<number, { node: PmNode; pos: number }>()
-          newState.doc.nodesBetween(newFrom, newTo, (node, pos) => {
-            const index = node.attrs?.docxIndex
-            if (typeof index === 'number') newAnchors.set(index, { node, pos })
-            return false
-          })
+          // docxIndex anchors are NOT unique identifiers: ProseMirror's split
+          // clones the attrs onto both halves, so every Enter mints a second
+          // block with the same index. Collapsing them into single-slot Maps
+          // misread a plain paragraph split as a block MOVE (the old position
+          // no longer equals the surviving slot's position) and re-materialized
+          // the whole original paragraph as a deleted block — a full visual
+          // duplicate whose Reject corrupted the document. Group the anchors
+          // instead and match the k-th old occurrence to the k-th new one.
+          const groupAnchors = (doc: PmNode, from: number, to: number) => {
+            const groups = new Map<number, Array<{ node: PmNode; pos: number }>>()
+            doc.nodesBetween(from, to, (node, pos) => {
+              const index = node.attrs?.docxIndex
+              if (typeof index === 'number') {
+                const group = groups.get(index)
+                if (group) group.push({ node, pos })
+                else groups.set(index, [{ node, pos }])
+              }
+              return false
+            })
+            return groups
+          }
+          const oldAnchors = groupAnchors(oldState.doc, oldFrom, oldTo)
+          const newAnchors = groupAnchors(newState.doc, newFrom, newTo)
+          /**
+           * A paragraph JOIN keeps the block's content and only drops the
+           * paragraph mark: its old content range maps onto an identical,
+           * contiguous range inside one surviving textblock. A whole-block
+           * deletion maps that range to a single point instead.
+           */
+          const survivesInsideTextblock = (node: PmNode, oldPos: number): boolean => {
+            if (node.content.size === 0) return false
+            const from = fullMapping.map(oldPos + 1, 1)
+            const to = fullMapping.map(oldPos + 1 + node.content.size, -1)
+            if (to - from !== node.content.size) return false
+            const $from = newState.doc.resolve(from)
+            return (
+              $from.parent.isTextblock &&
+              $from.sameParent(newState.doc.resolve(to)) &&
+              newState.doc.slice(from, to).content.eq(node.content)
+            )
+          }
           const matchedNewPositions = new Set<number>()
           const movedNewPositions = new Set<number>()
           const deletedBlocks: Array<{ node: PmNode; pos: number }> = []
+          const oldOrdinals = new Map<number, number>()
           oldState.doc.nodesBetween(oldFrom, oldTo, (before, oldPos) => {
             const index = before.attrs?.docxIndex
             if (typeof index === 'number') {
-              const match = newAnchors.get(index)
+              const group = newAnchors.get(index) ?? []
+              const ordinal = oldOrdinals.get(index) ?? 0
+              oldOrdinals.set(index, ordinal + 1)
+              const match = group[ordinal]
               if (match) {
                 matchedNewPositions.add(match.pos)
                 const mapped = fullMapping.map(oldPos, -1)
                 if (
                   mapped !== match.pos &&
+                  // only a 1:1 anchor at a new position is a move — with
+                  // duplicated anchors (a split's halves) the position
+                  // mismatch is the split itself, not a relocation
+                  (oldAnchors.get(index)?.length ?? 0) === 1 &&
+                  group.length === 1 &&
                   (before.attrs?.blockRevision as { kind?: string } | null)?.kind !== 'ins'
                 ) {
                   deletedBlocks.push({ node: before, pos: mapped })
@@ -824,7 +897,12 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
               } else if (
                 (before.attrs?.blockRevision as { kind?: string } | null)?.kind !== 'ins'
               ) {
-                deletedBlocks.push({ node: before, pos: fullMapping.map(oldPos, -1) })
+                // No block left for this occurrence. After a paragraph JOIN
+                // the content lives on inside a surviving textblock; re-inserting
+                // it as a deleted block would show it twice and rejecting the
+                // phantom would corrupt the document.
+                if (!survivesInsideTextblock(before, oldPos))
+                  deletedBlocks.push({ node: before, pos: fullMapping.map(oldPos, -1) })
               }
               return false
             }
@@ -874,8 +952,10 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
 
           // Native table row commands preserve the table anchor. Record the
           // single contiguous row span they insert/delete using trPr revisions.
-          for (const [index, oldTable] of oldAnchors) {
-            const nextTable = newAnchors.get(index)
+          for (const [index, oldGroup] of oldAnchors) {
+            // tables never split under Enter, so a table anchor group is 1:1
+            const oldTable = oldGroup[0]!
+            const nextTable = newAnchors.get(index)?.[0]
             if (oldTable.node.type.name !== 'docTable' || nextTable?.node.type.name !== 'docTable')
               continue
             const oldRows = Array.from({ length: oldTable.node.childCount }, (_, i) =>

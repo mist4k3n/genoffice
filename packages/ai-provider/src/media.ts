@@ -14,6 +14,8 @@ export const XAI_BASE_URL = 'https://api.x.ai/v1'
 /** DashScope root: images ride /api/v1/services/aigc/..., understanding rides /compatible-mode/v1 */
 export const DASHSCOPE_BASE_URL = 'https://dashscope.aliyuncs.com'
 export const MINIMAX_BASE_URL = 'https://api.minimax.io/v1'
+/** DeepSeek's OpenAI-compatible root; the Vision + Files API live at https://api.deepseek.com */
+export const DEEPSEEK_MEDIA_BASE_URL = 'https://api.deepseek.com/v1'
 
 // Model ids verified against vendor docs 2026-09; keep chat-capable analysis
 // models in step with the chat catalog in providers.ts.
@@ -39,10 +41,29 @@ export const AI_MEDIA_PROVIDERS: AiMediaProviderMeta[] = [
     keyPlaceholder: 'sk-...',
     defaultBaseUrl: OPENAI_IMAGES_BASE_URL,
     imageProtocol: 'openai-images',
-    imageModels: ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini'],
+    // GPT Image 2.5 (sunburst = quality, flare = fast) per the OpenAI models page
+    // 2026-09-24, same token rates as GPT Image 2, both on generations and edits.
+    // GPT-6 reads images over Chat Completions; the tool-call caveat that keeps
+    // it off the chat provider does not apply to analysis.
+    imageModels: [
+      'gpt-image-2.5-sunburst',
+      'gpt-image-2.5-flare',
+      'gpt-image-2',
+      'gpt-image-1.5',
+      'gpt-image-1',
+      'gpt-image-1-mini',
+    ],
     defaultImageModel: 'gpt-image-2',
     analysisProtocol: 'openai-chat',
-    analysisModels: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4-mini'],
+    analysisModels: [
+      'gpt-6-sol',
+      'gpt-6-luna',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.5',
+      'gpt-5.4-mini',
+    ],
     defaultAnalysisModel: 'gpt-5.6-luna',
     videoAnalysis: false,
   },
@@ -62,8 +83,13 @@ export const AI_MEDIA_PROVIDERS: AiMediaProviderMeta[] = [
     ],
     defaultImageModel: 'gemini-3.1-flash-image',
     analysisProtocol: 'gemini',
-    analysisModels: ['gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-3.6-flash'],
-    defaultAnalysisModel: 'gemini-3.7-flash',
+    analysisModels: [
+      'gemini-3.8-flash',
+      'gemini-3.7-flash',
+      'gemini-3.1-pro-preview',
+      'gemini-3.6-flash',
+    ],
+    defaultAnalysisModel: 'gemini-3.8-flash',
     videoAnalysis: true,
   },
   {
@@ -73,12 +99,17 @@ export const AI_MEDIA_PROVIDERS: AiMediaProviderMeta[] = [
     keyPlaceholder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
     defaultBaseUrl: ARK_BASE_URL,
     imageProtocol: 'openai-images',
+    // per the Ark model list 2026-10-12: Seedream 5.0 split into a pro cut
+    // (layer split, interactive editing, 14-language text) and a flash cut
+    // (same feature set, cheaper and faster), so 5.0 is no longer one model.
+    // The 4.5 and 4.0 IDs are both flagged for retirement there and come out.
+    // 5-0-260128 stays — only its lite alias is on the way out.
     imageModels: [
+      'doubao-seedream-5-0-pro-260628',
+      'doubao-seedream-5-0-flash-260915',
       'doubao-seedream-5-0-260128',
-      'doubao-seedream-4-5-251128',
-      'doubao-seedream-4-0-250828',
     ],
-    defaultImageModel: 'doubao-seedream-5-0-260128',
+    defaultImageModel: 'doubao-seedream-5-0-pro-260628',
     analysisProtocol: 'openai-chat',
     analysisModels: ['doubao-seed-2-1-pro-260628', 'doubao-seed-2-1-turbo-260628'],
     defaultAnalysisModel: 'doubao-seed-2-1-pro-260628',
@@ -130,14 +161,30 @@ export const AI_MEDIA_PROVIDERS: AiMediaProviderMeta[] = [
     id: 'minimax',
     label: 'MiniMax',
     description:
-      'image-01 image generation (api.minimax.io; use api.minimaxi.com/v1 for the CN region)',
+      'Image generation; MiniMax-M3 reads images and video (use api.minimaxi.com/v1 for CN)',
     keyPlaceholder: 'eyJ...',
     defaultBaseUrl: MINIMAX_BASE_URL,
     imageProtocol: 'minimax',
     imageModels: ['image-01'],
     defaultImageModel: 'image-01',
-    analysisModels: [],
-    defaultAnalysisModel: '',
+    analysisProtocol: 'openai-chat',
+    analysisModels: ['MiniMax-M3'],
+    defaultAnalysisModel: 'MiniMax-M3',
+    videoAnalysis: true,
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    // native multimodal (V4.1 Flash = wire id deepseek-flash): reads JPEG/PNG/GIF/WebP,
+    // no image generation and no video/audio, so it only appears for image analysis
+    description: 'DeepSeek V4.1 Flash reads images (native multimodal); no image generation',
+    keyPlaceholder: 'sk-...',
+    defaultBaseUrl: DEEPSEEK_MEDIA_BASE_URL,
+    imageModels: [],
+    defaultImageModel: '',
+    analysisProtocol: 'openai-chat',
+    analysisModels: ['deepseek-flash'],
+    defaultAnalysisModel: 'deepseek-flash',
     videoAnalysis: false,
   },
   {
@@ -203,13 +250,17 @@ export function resolveAiMediaSettings(
   const providers = { ...defaults.providers }
   for (const [id, config] of Object.entries(stored.providers ?? {})) {
     if (!config || typeof config !== 'object') continue
+    // Hand-edited settings files can carry non-string values: trim only
+    // strings (like the search-settings guard) instead of crashing.
+    const str = (v: unknown, fallback: string): string =>
+      typeof v === 'string' ? v.trim() : fallback
     const base = providers[id as AiMediaProviderId]
     providers[id as AiMediaProviderId] = {
-      apiKey: (config.apiKey ?? base?.apiKey ?? '').trim(),
-      imageModel: (config.imageModel ?? base?.imageModel ?? '').trim(),
-      analysisModel: (config.analysisModel ?? base?.analysisModel ?? '').trim(),
+      apiKey: str(config.apiKey, base?.apiKey ?? ''),
+      imageModel: str(config.imageModel, base?.imageModel ?? ''),
+      analysisModel: str(config.analysisModel, base?.analysisModel ?? ''),
       ...(config.baseUrl !== undefined
-        ? { baseUrl: config.baseUrl.trim() }
+        ? { baseUrl: str(config.baseUrl, base?.baseUrl ?? '') }
         : base?.baseUrl !== undefined
           ? { baseUrl: base.baseUrl }
           : {}),
@@ -232,8 +283,10 @@ export function mediaConfigUsable(
   config: AiMediaProviderConfig | undefined,
 ): boolean {
   if (!config) return false
-  if (meta.needsBaseUrl) return !!config.baseUrl
-  return !!config.apiKey
+  // Trim-aware like activeProvider: whitespace-only survivors of in-memory
+  // settings are not usable configs.
+  if (meta.needsBaseUrl) return !!config.baseUrl?.trim()
+  return !!config.apiKey?.trim()
 }
 
 /**
