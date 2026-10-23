@@ -70,7 +70,28 @@ export function IsolatedSheets(props: SheetsEditorProps): React.JSX.Element {
       if (message.kind === 'hello') {
         // Sent whenever the frame's script starts, so a reload re-opens the
         // document without the host noticing.
-        if (configRef.current) post({ kind: 'open', config: configRef.current })
+        const config = configRef.current
+        if (config) {
+          // Headers are resolved now, at each open: the frame makes its own
+          // requests, and a function cannot be posted into another realm.
+          const source = handlers.current.headers
+          void Promise.resolve(typeof source === 'function' ? source() : source).then(
+            (headers) => {
+              if (configRef.current !== config) return
+              const credentials = handlers.current.credentials
+              post({
+                kind: 'open',
+                config: {
+                  ...config,
+                  ...(headers ? { headers: { ...headers } } : {}),
+                  ...(credentials ? { credentials } : {}),
+                },
+              })
+            },
+            (error: unknown) =>
+              handlers.current.onError?.(error instanceof Error ? error : new Error(String(error))),
+          )
+        }
         return
       }
       if (message.kind === 'event') {
@@ -137,7 +158,15 @@ export function IsolatedSheets(props: SheetsEditorProps): React.JSX.Element {
       // with flexbox gives its wrapper no definite height, and a percentage
       // against `auto` collapses -- measured at 703px inside a full-height
       // pane, with the grid clipped and black below it.
-      style={{ border: 'none', display: 'block', flex: 1, width: '100%', height: '100%', minWidth: 0, minHeight: 0 }}
+      style={{
+        border: 'none',
+        display: 'block',
+        flex: 1,
+        width: '100%',
+        height: '100%',
+        minWidth: 0,
+        minHeight: 0,
+      }}
       // Deliberately no `sandbox`. The frame runs this package's own code from
       // the origin that served the bundle, so the only attribute set that
       // would let it work at all is `allow-scripts allow-same-origin` -- which

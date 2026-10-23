@@ -78,6 +78,22 @@ export interface HttpTransportOptions {
    * second one must not be able to write.
    */
   readonly readOnly?: boolean | undefined
+  /**
+   * `fetch`'s credentials mode for every request. The default, `same-origin`,
+   * sends no cookie to an API on another origin of the same site
+   * (`app.example.com` calling `api.example.com`); a host that authenticates by
+   * cookie there needs `include`. The push socket follows the browser's own
+   * cookie rules either way.
+   */
+  readonly credentials?: RequestCredentials | undefined
+  /**
+   * Told when the push socket cannot be opened at all -- an unusable URL, or a
+   * connection that fails before it ever opens. Without a socket the editor
+   * still works, but conflict pushes never arrive and the server learns a tab
+   * closed only from the idle sweep, so a host should hear about it rather
+   * than discover it.
+   */
+  readonly onConnectionProblem?: ((error: Error) => void) | undefined
 }
 
 /** Wire envelope for a push. The server multiplexes every channel over one socket. */
@@ -108,9 +124,28 @@ export function createHttpTransport(options: HttpTransportOptions): HostTranspor
    * and a renderer that subscribes late must not miss a channel the server has
    * already started sending.
    */
+  /** Whether any socket has ever opened. A failure before that is reported once. */
+  let everOpened = false
+  let reported = false
+  const report = (error: Error): void => {
+    if (reported) return
+    reported = true
+    options.onConnectionProblem?.(error)
+  }
+
   function connect(): void {
     if (closed || socket) return
-    const url = new URL(`${base}/events`)
+    // Resolved against the page, so a relative base -- `/sheets-api`, which is
+    // what a same-origin host naturally writes -- works. `new URL()` with no
+    // base throws on a relative URL, and it used to: no socket, no conflict
+    // pushes, no release on tab close, and nothing said so (Papan, D7).
+    let url: URL
+    try {
+      url = new URL(`${base}/events`, globalThis.location?.href)
+    } catch (error) {
+      report(new Error(`cannot open the push socket for "${base}": ${String(error)}`))
+      return
+    }
     url.protocol = url.protocol.replace(/^http/, 'ws')
     if (options.documentId) url.searchParams.set('doc', options.documentId)
 
@@ -119,6 +154,10 @@ export function createHttpTransport(options: HttpTransportOptions): HostTranspor
 
     next.addEventListener('open', () => {
       reconnectDelay = 500
+      everOpened = true
+    })
+    next.addEventListener('error', () => {
+      if (!everOpened) report(new Error(`the push socket at ${url.toString()} did not connect`))
     })
 
     next.addEventListener('message', (event: MessageEvent) => {
@@ -168,6 +207,7 @@ export function createHttpTransport(options: HttpTransportOptions): HostTranspor
           method: 'POST',
           headers,
           body: JSON.stringify({ args }),
+          ...(options.credentials ? { credentials: options.credentials } : {}),
         })
       } catch (error) {
         throw new HostTransportError(channel, `network error: ${String(error)}`)
@@ -203,7 +243,11 @@ export function createHttpTransport(options: HttpTransportOptions): HostTranspor
 
       let response: Response
       try {
-        response = await fetchImpl(`${base}${path}`, { method: 'GET', headers })
+        response = await fetchImpl(`${base}${path}`, {
+          method: 'GET',
+          headers,
+          ...(options.credentials ? { credentials: options.credentials } : {}),
+        })
       } catch (error) {
         throw new HostTransportError(path, `network error: ${String(error)}`)
       }

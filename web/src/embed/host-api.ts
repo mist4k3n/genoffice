@@ -220,6 +220,27 @@ export interface SheetsEditorProps extends SheetsHostEvents {
    */
   readonly ai?: boolean | undefined
   /**
+   * Headers sent with every request to the Sheets router -- a tenant id, an
+   * auth token, whatever the host's \`identify()\` reads. A function is called
+   * per request, so a rotating token stays current.
+   *
+   * With \`isolate\`, the frame makes its own requests and a function cannot
+   * cross into it: it is called each time the frame opens the document and the
+   * result is sent across, so a token that rotates mid-session needs the frame
+   * remounted (or cookie auth, which the browser keeps current itself).
+   */
+  readonly headers?:
+    | Readonly<Record<string, string>>
+    | (() => Record<string, string> | Promise<Record<string, string>>)
+    | undefined
+  /**
+   * \`fetch\`'s credentials mode. The default, \`same-origin\`, sends no cookie to
+   * an API on another origin of the same site (\`app.example.com\` calling
+   * \`api.example.com\`); a host that authenticates by cookie there passes
+   * \`'include'\`, and its API must then answer CORS with credentials allowed.
+   */
+  readonly credentials?: RequestCredentials | undefined
+  /**
    * Run this editor in its own frame.
    *
    * Needed only when two editors must be **visible at the same time** -- a

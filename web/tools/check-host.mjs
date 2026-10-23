@@ -115,7 +115,7 @@ import { SheetsEditor } from '@mist4k3n/sheets-web'
 import '@mist4k3n/sheets-web/style.css'
 
 const report = (window as unknown as { __sheets: Record<string, unknown> }).__sheets = {
-  loaded: false, errors: [], pending: 0, saves: 0, handle: null, dirty: [],
+  loaded: false, errors: [], pending: 0, saves: 0, handle: null, dirty: [], conflicts: [],
 }
 createRoot(document.getElementById('root')!).render(
   createElement(SheetsEditor, {
@@ -126,6 +126,7 @@ createRoot(document.getElementById('root')!).render(
     onLoaded: () => { report.loaded = true },
     onDirtyChange: (pending: number) => { report.pending = pending; (report.dirty as number[]).push(pending) },
     onSaved: () => { report.saves = (report.saves as number) + 1 },
+    onConflict: (event: { pendingEdits: number }) => { (report.conflicts as number[]).push(event.pendingEdits) },
     onError: (error: Error) => { (report.errors as string[]).push(error.message) },
   }),
 )
@@ -204,6 +205,12 @@ try {
 
   await page.goto(`http://127.0.0.1:${server.address().port}/`, { waitUntil: 'domcontentloaded' })
 
+  // A second tab on the same document, which makes no edits. When the first
+  // saves, it must hear about it -- and with nothing of its own at stake.
+  const other = await browser.newPage({ viewport: { width: 1400, height: 900 } })
+  other.on('pageerror', (error) => failures.push(`second tab, uncaught: ${error.message}`))
+  await other.goto(`http://127.0.0.1:${server.address().port}/`, { waitUntil: 'domcontentloaded' })
+
   const painted = () =>
     [...document.querySelectorAll('canvas')].some((c) => c.width > 200 && c.height > 100)
   try {
@@ -263,6 +270,19 @@ try {
       break
     }
   }
+  // The tab that made no edits heard both saves, and had nothing at stake.
+  try {
+    await other.waitForFunction(() => window.__sheets.conflicts.length > 0, null, {
+      timeout: 10_000,
+    })
+    const heard = await other.evaluate(() => window.__sheets.conflicts)
+    if (heard.some((pending) => pending !== 0)) {
+      failures.push(`the tab with no edits was told it had unsaved edits: ${JSON.stringify(heard)}`)
+    }
+  } catch {
+    failures.push('the second tab never heard that the document moved')
+  }
+
   // Let the post-save reinstall and its reads settle before judging them.
   await page.waitForTimeout(3_000)
   if (lostReads.length > 0) {

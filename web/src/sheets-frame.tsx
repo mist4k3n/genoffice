@@ -96,6 +96,8 @@ function Frame(): React.JSX.Element | null {
       visible={config.visible}
       readOnly={config.readOnly}
       ai={config.ai}
+      {...(config.headers ? { headers: config.headers } : {})}
+      {...(config.credentials ? { credentials: config.credentials } : {})}
       onLoaded={(file) => emit({ name: 'loaded', file })}
       onDirtyChange={(pendingEdits) => emit({ name: 'dirty', pendingEdits })}
       onSaved={(event) => emit({ name: 'saved', event })}

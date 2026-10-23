@@ -43,6 +43,7 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
     visible = true,
     readOnly = false,
     ai = false,
+    credentials,
   } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const [ready, setReady] = useState(false)
@@ -109,7 +110,19 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
       // The transport is built here rather than inside createHttpDesktopApi so
       // that unmounting can close its socket. Without that, every editor a
       // host ever mounted keeps a WebSocket open for the life of the page.
-      transport = createHttpTransport({ baseUrl: apiBase, documentId, readOnly })
+      transport = createHttpTransport({
+        baseUrl: apiBase,
+        documentId,
+        readOnly,
+        // Read through the ref per request, so a host passing a new object or
+        // a token that rotates is current without reopening the document.
+        headers: async () => {
+          const headers = handlers.current.headers
+          return typeof headers === 'function' ? await headers() : { ...headers }
+        },
+        ...(credentials ? { credentials } : {}),
+        onConnectionProblem: (error) => handlers.current.onError?.(error),
+      })
       apiRef.current = buildDesktopApi(transport, {
         unsavedGuard: installUnsavedGuard(),
         observer: (event) => {
@@ -138,7 +151,14 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
         if (!conflict.sessions.includes(sessionIdRef.current)) return
         handlers.current.onConflict?.({
           currentVersion: conflict.currentVersion,
-          pendingEdits: conflict.pendingEdits,
+          // This tab's own count, not the push's. The server learns pending
+          // counts from \`notifyPendingEdits(count)\`, which carries no session,
+          // so it attributes a count to every session of that user on that
+          // document; and one push serves every stale session, so its figure
+          // is the largest of them. Either way a clean tab heard another tab's
+          // edits (Papan, D3). The renderer reports its count to this tab
+          // directly, and that number is the truth here.
+          pendingEdits: pendingEditsRef.current,
           message: 'The document changed since this session opened it.',
           source: 'announced',
         })
@@ -162,7 +182,7 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
       awaitingSave.current.abandon(new Error('The editor was closed.'))
       awaitingExport.current.abandon(new Error('The editor was closed.'))
     }
-  }, [apiBase, documentId, readOnly, commands, settings, generation])
+  }, [apiBase, documentId, readOnly, credentials, commands, settings, generation])
 
   /**
    * The selection bridge. Papan fed the active cell to its AI chat from a

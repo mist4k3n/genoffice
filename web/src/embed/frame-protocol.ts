@@ -32,6 +32,9 @@ export interface FrameConfig {
   readonly readOnly: boolean
   readonly ai: boolean
   readonly visible: boolean
+  /** Resolved by the host when the frame opens: a function cannot cross realms. */
+  readonly headers?: Readonly<Record<string, string>> | undefined
+  readonly credentials?: RequestCredentials | undefined
 }
 
 /** Props that may change without reopening the document. */

@@ -117,6 +117,15 @@ registry needs `private` dropped and a `publishConfig` added.
 />
 ```
 
+`apiBase` may be relative (`/sheets-api`) or absolute; the push socket resolves
+against the page either way. Two props cover how requests are authenticated:
+`headers` (an object, or a function called per request, so a rotating token
+stays current) for whatever your `identify()` reads, and `credentials` (`fetch`'s
+mode) — pass `'include'` when the API is on another origin of the same site and
+authenticates by cookie, and allow credentials in its CORS answer. If the push
+socket cannot open at all, `onError` says so: the editor keeps working, but
+conflict pushes and tab-close release depend on it.
+
 Several viewers of the same document share one workbook in the engine: the
 second person to open it costs nothing, and so does the twelfth. Each still
 gets its own session handle, its own permission and its own liveness —
