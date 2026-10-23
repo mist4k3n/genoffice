@@ -21,6 +21,25 @@ import { installUnsavedGuard } from '../host/unsaved-guard'
 import './embed.css'
 
 /**
+ * Resolves once the page is visible, or immediately if it already is. Polls
+ * `isCancelled` on each visibility change so an editor unmounted while its
+ * tab was in the background stops waiting.
+ */
+function untilPageVisible(isCancelled: () => boolean): Promise<void> {
+  if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    const onChange = (): void => {
+      if (document.visibilityState === 'hidden' && !isCancelled()) return
+      document.removeEventListener('visibilitychange', onChange)
+      resolve()
+    }
+    document.addEventListener('visibilitychange', onChange)
+  })
+}
+
+/**
  * The editor in the host's own realm: upstream's renderer, mounted as a
  * component rather than bootstrapped as a page.
  *
@@ -104,6 +123,14 @@ export function InlineSheets(props: SheetsEditorProps): React.JSX.Element {
     let transport: HostTransport | null = null
     let unsubscribeConflict: (() => void) | null = null
     void (async () => {
+      // A page opened in a background tab (Cmd-click a workbook, look at it
+      // later) mounted Univer with no frames to lay out, and the grid stayed
+      // blank after the tab came forward: "cannot subscribe to rect changes when
+      // container is not set" (Papan, D6). Opening waits until the page can
+      // actually be seen, which costs nothing a person could notice -- they
+      // were not looking -- and gives the engine the frames it needs.
+      await untilPageVisible(() => cancelled)
+      if (cancelled) return
       await installGlobalsOnce()
       if (cancelled) return
       setModuleLang(lang)

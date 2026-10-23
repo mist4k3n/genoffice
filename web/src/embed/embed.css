@@ -17,3 +17,21 @@
 .genoffice-sheets-embed > .app-shell {
   height: 100%;
 }
+
+/*
+ * Upstream's "Opening workbook…" screen is `position: fixed; inset: 0` -- the
+ * whole window, which on the desktop is the editor. Embedded, it covered the
+ * host's entire page for the length of an open and caught its clicks, for a
+ * moment even after the grid was drawn (Papan, D9).
+ *
+ * Absolute instead, so it covers the nearest positioned ancestor -- the host's
+ * editor pane, when the host positions it, which README asks for -- and it
+ * never catches a click. It does not need to: upstream makes the shell `inert`
+ * while a workbook opens, so nothing behind the overlay can be edited early,
+ * and the overlay is left with the one job of being seen. With no positioned
+ * ancestor at all it covers the page, as it did, but no longer blocks it.
+ */
+.genoffice-sheets-embed > .workbook-opening-screen {
+  position: absolute;
+  pointer-events: none;
+}

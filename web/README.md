@@ -117,6 +117,10 @@ registry needs `private` dropped and a `publishConfig` added.
 />
 ```
 
+Give the element you mount it in a size and `position: relative` (or any
+positioned value): the editor fills it, and its "Opening workbook…" screen
+covers it rather than your whole page.
+
 `apiBase` may be relative (`/sheets-api`) or absolute; the push socket resolves
 against the page either way. Two props cover how requests are authenticated:
 `headers` (an object, or a function called per request, so a rotating token

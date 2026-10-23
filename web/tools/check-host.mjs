@@ -283,6 +283,33 @@ try {
     failures.push('the second tab never heard that the document moved')
   }
 
+  // A page that opens hidden -- a workbook Cmd-clicked into a background tab
+  // -- must not mount until it is seen, and must paint once it is (Papan, D6).
+  // Headless Chromium has no real background tab, so visibility is reported
+  // rather than earned: this checks the editor's own deferral, not Chromium's
+  // throttling, which is what the deferral exists to avoid.
+  const hidden = await browser.newPage({ viewport: { width: 1400, height: 900 } })
+  hidden.on('pageerror', (error) => failures.push(`hidden tab, uncaught: ${error.message}`))
+  await hidden.addInitScript(() => {
+    let state = 'hidden'
+    Object.defineProperty(document, 'visibilityState', { get: () => state, configurable: true })
+    Object.defineProperty(document, 'hidden', { get: () => state === 'hidden', configurable: true })
+    window.__reveal = () => {
+      state = 'visible'
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+  })
+  await hidden.goto(`http://127.0.0.1:${server.address().port}/`, { waitUntil: 'domcontentloaded' })
+  await hidden.waitForTimeout(2_000)
+  if (await hidden.evaluate(painted))
+    failures.push('a hidden page mounted its grid before it was seen')
+  await hidden.evaluate(() => window.__reveal())
+  try {
+    await hidden.waitForFunction(painted, null, { timeout: READY_TIMEOUT_MS })
+  } catch {
+    failures.push('a page that opened hidden never painted after it became visible')
+  }
+
   // Let the post-save reinstall and its reads settle before judging them.
   await page.waitForTimeout(3_000)
   if (lostReads.length > 0) {

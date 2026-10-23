@@ -189,3 +189,28 @@ test('the saving tab is not told its own save moved the document', { skip }, asy
     assert.ok(!named.includes(saver.sessionId), 'the saver, one step behind its own save, is not')
   })
 })
+
+/**
+ * Papan's D10 watch item: a read-only Save As is refused when the request
+ * carries anything, because `isUnmodified` cannot know which fields are edits.
+ * Upstream's renderer sends empty arrays and `null` snapshots when nothing
+ * changed (a tab order only travels with sheet operations), so it passes -- but
+ * only for as long as upstream adds no *required* field that cannot be empty.
+ * One that does would refuse every viewer's Save As, silently. This builds the
+ * emptiest request upstream's schema allows and requires the gate to pass it.
+ */
+test('the emptiest save request upstream allows is an unmodified one', async () => {
+  const { isUnmodified } = await import('../server/channels/save')
+  const request = oneCellSave(
+    { sessionId: '00000000-0000-4000-8000-000000000000', sheets: [{ id: 's1' }] },
+    'x',
+  )
+  const empty = { ...(request as Record<string, unknown>), mode: 'save-as', edits: [] }
+  const parsed = workbookSaveRequestSchema.parse(empty)
+  assert.equal(
+    isUnmodified(parsed),
+    true,
+    'a required field that cannot be empty would refuse every read-only Save As',
+  )
+  assert.equal(isUnmodified({ ...parsed, sheetOrder: ['s1'] }), false, 'a tab order is a change')
+})
