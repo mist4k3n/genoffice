@@ -111,6 +111,12 @@ export interface WorkbookSession {
 class ClientSession implements WorkbookSession {
   lastUsedAt = Date.now()
   pendingEdits = 0
+  /**
+   * Replaced by its own save. The tab that saved holds this id until it has
+   * installed the one the save returned, then closes it -- so for that window
+   * it is not a stale viewer to be warned, it is the saver one step behind.
+   */
+  superseded = false
 
   constructor(
     readonly sessionId: string,
@@ -174,6 +180,13 @@ export interface SessionRegistryOptions {
 
 /** The sidecar's open result: a workbook file minus the two fields we supply. */
 const openResultSchema = workbookFileSchema.omit({ sha256: true, readOnly: true })
+
+/**
+ * How long a session replaced by its own save stays readable when nobody closes
+ * it. Upstream's renderer closes it as soon as it has installed the new one;
+ * this only bounds a host that drives the API without that renderer.
+ */
+export const SUPERSEDED_GRACE_MS = 60_000
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, ClientSession>()
@@ -253,9 +266,7 @@ export class SessionRegistry {
     // storage -- and it is the difference between "your edits came back" and a
     // restore prompt asking a question the user cannot evaluate.
     const draft = await this.#freshDraft(identity)
-    return draft
-      ? this.#snapshotFromDraft(identity, draft)
-      : this.#snapshotFromStorage(identity)
+    return draft ? this.#snapshotFromDraft(identity, draft) : this.#snapshotFromStorage(identity)
   }
 
   async #snapshotFromDraft(
@@ -389,7 +400,13 @@ export class SessionRegistry {
   #attach(
     engine: EngineSession,
     identity: RequestIdentity,
-  ): { session: WorkbookSession; opened: OpenedWorkbook; name: string; displayPath: string | undefined; fromDraft: boolean } {
+  ): {
+    session: WorkbookSession
+    opened: OpenedWorkbook
+    name: string
+    displayPath: string | undefined
+    fromDraft: boolean
+  } {
     const sessionId = randomUUID()
     const session = new ClientSession(sessionId, identity.userId, identity.permission, engine)
     engine.clients.add(sessionId)
@@ -413,7 +430,9 @@ export class SessionRegistry {
     // Only a new engine consumes quota: a second viewer of an open workbook
     // costs nothing that the quota exists to bound.
     this.enforceQuota(identity)
-    const snapshot = draft ? await this.#snapshotFromDraft(identity, draft) : await this.#snapshotFromStorage(identity)
+    const snapshot = draft
+      ? await this.#snapshotFromDraft(identity, draft)
+      : await this.#snapshotFromStorage(identity)
     try {
       const { sessionId, opened } = await this.options.pool.open(
         snapshot.snapshotPath,
@@ -476,6 +495,18 @@ export class SessionRegistry {
    * The new session inherits the identity of the old one and the version
    * token the save produced, so the next save's conflict check compares
    * against what this save wrote rather than what the session first opened.
+   *
+   * **It gets a new id**, which is the contract upstream's renderer is written
+   * against: a desktop save returns a fresh session, and the renderer installs
+   * it and then closes the one it replaced. This used to keep the id, so that
+   * close landed on the session the tab was about to read through -- every
+   * read after a browser save answered 410 and the grid went blank (found by
+   * Papan). The replaced handle stays on the pre-save engine until it is
+   * closed, so reads already in flight finish against the bytes they asked
+   * about instead of being cancelled by the swap, and it is marked superseded
+   * so the save's own conflict push does not tell the saving tab that the
+   * document moved. A host that never closes it loses it after
+   * {@link SUPERSEDED_GRACE_MS}.
    */
   async reopenAfterSave(previous: WorkbookSession, saved: WorkbookMetadata): Promise<unknown> {
     const client = this.sessions.get(previous.sessionId)
@@ -493,23 +524,16 @@ export class SessionRegistry {
     // already opened that version or becomes the engine everyone else joins.
     const key = shareKey(identity, saved.version)
     const engine = this.engines.get(key) ?? (await this.#openEngine(identity, key, null))
+    const { session } = this.#attach(engine, identity)
+    session.pendingEdits = 0
 
-    // The client id does not change. Other clients still on the pre-save
-    // engine keep it -- they are looking at bytes that still exist, and the
-    // save's own push tells them the document moved.
-    const stale = client.engine
-    client.engine = engine
-    engine.clients.add(client.sessionId)
-    stale.clients.delete(client.sessionId)
-    if (stale.clients.size === 0) {
-      if (this.engines.get(stale.key) === stale) this.engines.delete(stale.key)
-      await this.options.pool.close(stale.engineSessionId)
-      await stale.releaseSnapshot()
-    }
+    client.superseded = true
+    const replacedId = client.sessionId
+    setTimeout(() => void this.close(replacedId), SUPERSEDED_GRACE_MS).unref?.()
 
     return workbookFileSchema.parse({
       ...engine.opened,
-      sessionId: client.sessionId,
+      sessionId: session.sessionId,
       name: saved.name,
       path: workbookDisplayPath(saved.name, saved.displayPath),
       sha256: engine.sha256,
@@ -551,6 +575,7 @@ export class SessionRegistry {
     for (const session of this.sessions.values()) {
       if (session.documentId !== documentId) continue
       if (session.openedFromVersion === version) continue
+      if (session.superseded) continue
       stale.push(session)
     }
     return stale

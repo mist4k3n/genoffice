@@ -89,13 +89,13 @@ export default defineConfig({
       cssFileName: 'sheets-web',
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react-dom',
-        'react-dom/client',
-        'react/jsx-runtime',
-        'react/jsx-dev-runtime',
-      ],
+      // Every React entry point, by pattern rather than by list. The list used
+      // to name five and missed `react-dom/server`, which upstream's
+      // IconsDialog imports: rolldown inlined its CommonJS build, that build
+      // `require`s react and react-dom, those are external, and the editor
+      // crashed on mount in a host with "Calling `require` for \"react\"".
+      // Found by Papan; `npm run check:host` mounts the editor in a host now.
+      external: (id) => /^react(-dom)?(\/.*)?$/.test(id),
       output: {
         // Univer's locales and anything else behind a dynamic import stay
         // separate chunks, so a host can lazy-route the editor (A4).
